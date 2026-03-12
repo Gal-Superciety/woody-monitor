@@ -40,13 +40,18 @@ WOODY_MEX = "erd1qqqqqqqqqqqqqpgqzqtfej5s9hp7cg0ardy6mt3fvz4jrdsa2jpsdg959f"
 
 TWITTER = "https://x.com/YOUR_ACCOUNT"
 
-# Prag minim pentru alertă
+# Praguri swap alerts
 MIN_WOODY_ALERT = 10000
 MIN_EGLD_ALERT = 0.2
 
-# BIG BUY / BIG SELL de la 1 EGLD în sus
+# BIG BUY / BIG SELL
 BIG_BUY_EGLD = 1.0
 BIG_SELL_EGLD = 1.0
+
+# Praguri pentru liquidity added REAL
+# Trimitem alertă doar dacă ambele rezerve cresc suficient
+MIN_LIQUIDITY_ADD_WOODY = 1000
+MIN_LIQUIDITY_ADD_EGLD = 0.05
 
 LAST_SWAP_STATE = {
     "xexchange": None,
@@ -54,11 +59,16 @@ LAST_SWAP_STATE = {
 }
 
 LAST_HOLDERS_COUNT = None
-LAST_TOTAL_LIQUIDITY = None
+
+# Ținem minte starea rezervelor pentru LP REAL
+LAST_LIQUIDITY_STATE = {
+    "xexchange": None,
+    "onedx": None,
+}
 
 
-def j(u, p=None):
-    r = requests.get(u, params=p, headers=UA, timeout=20)
+def j(url, params=None):
+    r = requests.get(url, params=params, headers=UA, timeout=20)
     r.raise_for_status()
     return r.json()
 
@@ -72,11 +82,11 @@ def reserves(pair_address):
     return {t["identifier"]: d(t["balance"], t["decimals"]) for t in data}
 
 
-def egld():
+def egld_usd():
     return float(j(CG)["elrond-erd-2"]["usd"])
 
 
-def quote(token):
+def quote_to_wegld(token):
     if token == WEGLD:
         return 1
     q = j(XOXNO, {"from": token, "to": WEGLD, "amountIn": str(10**18)})
@@ -91,11 +101,17 @@ def liq_wegld(pair_address):
 
 def liq_other(pair_address, token):
     r = reserves(pair_address)
-    return 2 * r.get(token, 0) * quote(token) if r.get(token, 0) > 0 else None
+    token_amount = r.get(token, 0)
+    if token_amount <= 0:
+        return None
+    price_in_wegld = quote_to_wegld(token)
+    if price_in_wegld <= 0:
+        return None
+    return 2 * token_amount * price_in_wegld
 
 
 def all_liq():
-    usd = egld()
+    usd = egld_usd()
     total = 0
     lines = []
 
@@ -117,7 +133,9 @@ def all_liq():
 
 def price():
     r = reserves(XEX)
-    return r.get(WEGLD) / r.get(WOODY) if r.get(WOODY, 0) > 0 else None
+    woody = r.get(WOODY, 0)
+    wegld = r.get(WEGLD, 0)
+    return wegld / woody if woody > 0 else None
 
 
 def holders():
@@ -190,33 +208,77 @@ def detect_swap(old_state, new_state):
     return None
 
 
+def detect_real_liquidity_add(old_state, new_state):
+    """
+    Detectăm LP add REAL doar dacă:
+    - crește rezerva de WOODY
+    - crește rezerva de WEGLD
+    - ambele diferențe sunt peste prag minim
+
+    Asta elimină multe false alerts.
+    """
+    if not old_state or not new_state:
+        return None
+
+    delta_woody = new_state["woody"] - old_state["woody"]
+    delta_wegld = new_state["wegld"] - old_state["wegld"]
+
+    if delta_woody > 0 and delta_wegld > 0:
+        if delta_woody >= MIN_LIQUIDITY_ADD_WOODY and delta_wegld >= MIN_LIQUIDITY_ADD_EGLD:
+            return {
+                "woody_added": delta_woody,
+                "egld_added": delta_wegld,
+                "new_woody_total": new_state["woody"],
+                "new_wegld_total": new_state["wegld"],
+            }
+
+    return None
+
+
 async def send_photo_alert(context: ContextTypes.DEFAULT_TYPE, image_name: str, message: str):
     base_dir = os.path.dirname(os.path.abspath(__file__))
     image_path = os.path.join(base_dir, image_name)
 
+    targets = []
     if PRIVATE_CHAT_ID:
-        try:
-            with open(image_path, "rb") as photo:
-                await context.bot.send_photo(
-                    chat_id=PRIVATE_CHAT_ID,
-                    photo=photo,
-                    caption=message
-                )
-            print(f"[OK] Sent to private chat: {PRIVATE_CHAT_ID}")
-        except Exception as e:
-            print(f"[PRIVATE ERROR] {e}")
-
+        targets.append(PRIVATE_CHAT_ID)
     if GROUP_CHAT_ID:
+        targets.append(GROUP_CHAT_ID)
+
+    if not targets:
+        print("[WARN] No target chat IDs configured.")
+        return
+
+    for chat_id in targets:
         try:
             with open(image_path, "rb") as photo:
                 await context.bot.send_photo(
-                    chat_id=GROUP_CHAT_ID,
+                    chat_id=chat_id,
                     photo=photo,
                     caption=message
                 )
-            print(f"[OK] Sent to group chat: {GROUP_CHAT_ID}")
+            print(f"[OK] Sent photo alert to {chat_id}")
         except Exception as e:
-            print(f"[GROUP ERROR] {e}")
+            print(f"[photo alert error] {image_name}: {e}")
+
+
+async def send_text_alert(context: ContextTypes.DEFAULT_TYPE, message: str):
+    targets = []
+    if PRIVATE_CHAT_ID:
+        targets.append(PRIVATE_CHAT_ID)
+    if GROUP_CHAT_ID:
+        targets.append(GROUP_CHAT_ID)
+
+    if not targets:
+        print("[WARN] No target chat IDs configured.")
+        return
+
+    for chat_id in targets:
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=message)
+            print(f"[OK] Sent text alert to {chat_id}")
+        except Exception as e:
+            print(f"[text alert error] {e}")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -233,7 +295,8 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• WOODY >= {MIN_WOODY_ALERT}\n"
         f"• EGLD >= {MIN_EGLD_ALERT}\n"
         f"• BIG BUY >= {BIG_BUY_EGLD} EGLD\n"
-        f"• BIG SELL >= {BIG_SELL_EGLD} EGLD"
+        f"• BIG SELL >= {BIG_SELL_EGLD} EGLD\n"
+        f"• REAL LP add >= {MIN_LIQUIDITY_ADD_WOODY} WOODY and {MIN_LIQUIDITY_ADD_EGLD} EGLD"
     )
     if update.message:
         await update.message.reply_text(text)
@@ -270,7 +333,7 @@ GREET = re.compile(r"\b(hi|hello|gm)\b", re.I)
 SPAM = re.compile(r"airdrop|claim|seed|100x|double", re.I)
 
 
-async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def monitor_group_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
 
@@ -289,10 +352,13 @@ async def monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cm = update.chat_member
     if cm.old_chat_member.status in ("left", "kicked"):
-        await context.bot.send_message(
-            update.effective_chat.id,
-            f"Welcome {cm.new_chat_member.user.first_name}!"
-        )
+        try:
+            await context.bot.send_message(
+                update.effective_chat.id,
+                f"Welcome {cm.new_chat_member.user.first_name}!"
+            )
+        except Exception as e:
+            print(f"[welcome error] {e}")
 
 
 async def check_swaps(context: ContextTypes.DEFAULT_TYPE):
@@ -387,36 +453,57 @@ async def check_holders(context: ContextTypes.DEFAULT_TYPE):
         print(f"[holders monitor error] {e}")
 
 
-async def check_liquidity(context: ContextTypes.DEFAULT_TYPE):
-    global LAST_TOTAL_LIQUIDITY
-
+async def check_real_liquidity_added(context: ContextTypes.DEFAULT_TYPE):
+    """
+    Alertă doar pentru LP add real-ish:
+    - cresc ambele rezerve
+    - diferența depășește pragurile minime
+    """
     try:
-        _, total, usd = all_liq()
+        pairs = [
+            ("xexchange", "WOODY/EGLD xExchange", XEX),
+            ("onedx", "WOODY/EGLD OneDex", ONEDX),
+        ]
 
-        if LAST_TOTAL_LIQUIDITY is None:
-            LAST_TOTAL_LIQUIDITY = total
-            return
+        usd = egld_usd()
 
-        diff = total - LAST_TOTAL_LIQUIDITY
+        for key, label, address in pairs:
+            current_state = get_pair_state(address)
+            previous_state = LAST_LIQUIDITY_STATE.get(key)
 
-        if diff > 0.05:
-            message = (
-                f"💧 WOODY LIQUIDITY ADDED\n\n"
-                f"Added: {diff:.3f} EGLD\n"
-                f"New total: {total:.3f} EGLD\n"
-                f"USD value: ${total * usd:,.2f}"
-            )
-            await send_photo_alert(context, "liquidity.png", message)
+            print(f"[LIQ] {label} previous: {previous_state}")
+            print(f"[LIQ] {label} current: {current_state}")
 
-        LAST_TOTAL_LIQUIDITY = total
+            event = detect_real_liquidity_add(previous_state, current_state)
+
+            print(f"[LIQ] {label} detected event: {event}")
+
+            if event:
+                estimated_total_value_egld = event["egld_added"] * 2
+                estimated_total_value_usd = estimated_total_value_egld * usd
+
+                message = (
+                    f"💧 WOODY REAL LIQUIDITY ADDED\n\n"
+                    f"💱 Pool: {label}\n"
+                    f"🪙 Added WOODY: {event['woody_added']:,.2f}\n"
+                    f"💰 Added EGLD: {event['egld_added']:.6f}\n"
+                    f"📊 Est. total value: {estimated_total_value_egld:.3f} EGLD\n"
+                    f"💵 Est. USD value: ${estimated_total_value_usd:,.2f}\n"
+                    f"🏦 New pool reserves:\n"
+                    f"• WOODY: {event['new_woody_total']:,.2f}\n"
+                    f"• WEGLD: {event['new_wegld_total']:.6f}"
+                )
+                await send_photo_alert(context, "liquidity.png", message)
+
+            LAST_LIQUIDITY_STATE[key] = current_state
 
     except Exception as e:
-        print(f"[liquidity monitor error] {e}")
+        print(f"[real liquidity monitor error] {e}")
 
 
 def main():
     if not TOKEN:
-        raise ValueError("TELEGRAM_BOT_TOKEN is missing from .env")
+        raise ValueError("TELEGRAM_BOT_TOKEN is missing from environment variables")
 
     app = Application.builder().token(TOKEN).build()
 
@@ -425,14 +512,17 @@ def main():
     app.add_handler(CommandHandler("id", get_id))
     app.add_handler(CallbackQueryHandler(btn))
     app.add_handler(ChatMemberHandler(welcome, ChatMemberHandler.CHAT_MEMBER))
-    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS, monitor))
+    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS, monitor_group_messages))
+
+    if app.job_queue is None:
+        raise RuntimeError("JobQueue is not available. Make sure python-telegram-bot[job-queue] is installed.")
 
     app.job_queue.run_repeating(check_swaps, interval=30, first=10)
     app.job_queue.run_repeating(check_holders, interval=120, first=20)
-    app.job_queue.run_repeating(check_liquidity, interval=120, first=30)
+    app.job_queue.run_repeating(check_real_liquidity_added, interval=60, first=30)
 
     print("WOODY Monitor Bot started...")
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
