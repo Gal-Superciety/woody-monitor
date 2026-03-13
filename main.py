@@ -83,7 +83,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("WOODY_MONITOR")
 
-
 # =========================
 # RANDOM MESSAGES
 # =========================
@@ -393,8 +392,248 @@ async def send_start_menu(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> N
             )
     else:
         await context.bot.send_message(
-        chat_id=chat_id,
-        text=caption,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=keyboard,
+            chat_id=chat_id,
+            text=caption,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=keyboard,
+        )
+
+
+async def send_alert_to_targets(
+    context: ContextTypes.DEFAULT_TYPE,
+    image_path: str,
+    caption: str,
+) -> None:
+    for target in chat_targets():
+        try:
+            if file_exists(image_path):
+                with open(image_path, "rb") as photo:
+                    await context.bot.send_photo(
+                        chat_id=target,
+                        photo=InputFile(photo),
+                        caption=caption,
+                    )
+            else:
+                await context.bot.send_message(chat_id=target, text=caption)
+
+            logger.info("[OK] Sent photo alert to %s", target)
+        except Exception as exc:
+            logger.warning("[ALERT ERROR] %s -> %s", target, exc)
+
+
+# =========================
+# TELEGRAM HANDLERS
+# =========================
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await send_start_menu(update.effective_chat.id, context)
+
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = (
+        "✅ *WOODY Monitor is running*\n\n"
+        f"Private alerts: *{'YES' if PRIVATE_CHAT_ID else 'NO'}*\n"
+        f"Group alerts: *{'YES' if GROUP_CHAT_ID else 'NO'}*\n\n"
+        f"Normal alerts: *≥ {MIN_EGLD_ALERT} EGLD*\n"
+        f"Big alerts: *≥ {BIG_ALERT_EGLD} EGLD*\n"
+        f"Whale alerts: *≥ {WHALE_ALERT_EGLD} EGLD*\n"
+        f"Super whale: *≥ {SUPER_WHALE_ALERT_EGLD} EGLD*"
     )
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+
+async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(f"Chat ID: {update.effective_chat.id}")
+
+
+async def menu_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "price":
+        text = (
+            "💰 *WOODY Price*\n\n"
+            "Open the official chart / price source below."
+        )
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("📈 Open Price", url=PRICE_URL)]]
+        )
+        await query.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+
+    elif query.data == "liquidity":
+        await query.message.reply_text(
+            format_liquidity_text(),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+    elif query.data == "holders":
+        holders = get_holders_count()
+        await query.message.reply_text(
+            format_holders_text(holders),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+    elif query.data == "chart":
+        text = "📈 *WOODY Chart*\n\nOpen the chart below."
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("📊 Open Chart", url=CHART_URL)]]
+        )
+        await query.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+
+
+async def greeting_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.message.text:
+        return
+
+    text = update.message.text.strip()
+    if text.startswith("/"):
+        return
+
+    if not greeting_detected(text):
+        return
+
+    now = int(time.time())
+    last_ts = context.application.bot_data.get("last_greet_ts", 0)
+
+    if now - last_ts < GREETING_COOLDOWN_SECONDS:
+        return
+
+    context.application.bot_data["last_greet_ts"] = now
+    await update.message.reply_text(random.choice(GREETING_REPLIES))
+
+
+async def welcome_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.message.new_chat_members:
+        return
+
+    for member in update.message.new_chat_members:
+        if member.is_bot:
+            continue
+
+        await update.message.reply_text(random.choice(WELCOME_NEW_MEMBER_MESSAGES))
+
+
+# =========================
+# BACKGROUND JOBS
+# =========================
+async def check_swaps(context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.info("Checking swaps...")
+
+    # xExchange
+    if XEXCHANGE_POOL_ADDRESS:
+        logger.info("Checking WOODY/EGLD xExchange...")
+        previous = context.application.bot_data.get("xexchange_prev")
+        current = get_pool_state(XEXCHANGE_POOL_ADDRESS)
+
+        logger.info("WOODY/EGLD xExchange previous: %s", previous)
+        logger.info("WOODY/EGLD xExchange current: %s", current)
+
+        if previous and current:
+            event = detect_swap(previous, current)
+            logger.info("WOODY/EGLD xExchange detected event: %s", event)
+
+            if event and safe_float(event["egld"]) >= MIN_EGLD_ALERT:
+                title = choose_title(event["type"], safe_float(event["egld"]))
+                image = choose_image(event["type"], safe_float(event["egld"]))
+
+                caption = (
+                    f"{title}\n\n"
+                    f"💱 Pool: WOODY/EGLD xExchange\n"
+                    f"🪙 Amount: {event['woody']:,.2f} WOODY\n"
+                    f"💰 Value: {event['egld']:.6f} EGLD"
+                )
+
+                await send_alert_to_targets(context, image, caption)
+
+        if current:
+            context.application.bot_data["xexchange_prev"] = current
+
+    # OneDex
+    if ONEDEX_POOL_ADDRESS:
+        logger.info("Checking WOODY/EGLD OneDex...")
+        previous = context.application.bot_data.get("onedex_prev")
+        current = get_pool_state(ONEDEX_POOL_ADDRESS)
+
+        logger.info("WOODY/EGLD OneDex previous: %s", previous)
+        logger.info("WOODY/EGLD OneDex current: %s", current)
+
+        if previous and current:
+            event = detect_swap(previous, current)
+            logger.info("WOODY/EGLD OneDex detected event: %s", event)
+
+            if event and safe_float(event["egld"]) >= MIN_EGLD_ALERT:
+                title = choose_title(event["type"], safe_float(event["egld"]))
+                image = choose_image(event["type"], safe_float(event["egld"]))
+
+                caption = (
+                    f"{title}\n\n"
+                    f"💱 Pool: WOODY/EGLD OneDex\n"
+                    f"🪙 Amount: {event['woody']:,.2f} WOODY\n"
+                    f"💰 Value: {event['egld']:.6f} EGLD"
+                )
+
+                await send_alert_to_targets(context, image, caption)
+
+        if current:
+            context.application.bot_data["onedex_prev"] = current
+
+
+async def check_new_holders(context: ContextTypes.DEFAULT_TYPE) -> None:
+    current = get_holders_count()
+    previous = context.application.bot_data.get("holders_prev")
+
+    logger.info("Checking holders... prev=%s current=%s", previous, current)
+
+    if current is None:
+        return
+
+    if previous is None:
+        context.application.bot_data["holders_prev"] = current
+        return
+
+    if current > previous:
+        diff = current - previous
+        caption = (
+            "👤 WOODY NEW HOLDER\n\n"
+            f"Added holders: +{diff}\n"
+            f"Total holders: {current}"
+        )
+        await send_alert_to_targets(context, NEW_HOLDER_IMAGE, caption)
+
+    context.application.bot_data["holders_prev"] = current
+
+
+# =========================
+# MAIN
+# =========================
+def main() -> None:
+    require_token()
+
+    app = Application.builder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("id", id_command))
+
+    app.add_handler(CallbackQueryHandler(menu_callbacks))
+
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, greeting_handler))
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_members))
+
+    if app.job_queue is None:
+        raise RuntimeError(
+            "JobQueue is missing. Install python-telegram-bot[job-queue]."
+        )
+
+    app.job_queue.run_repeating(check_swaps, interval=CHECK_INTERVAL_SECONDS, first=10)
+    app.job_queue.run_repeating(
+        check_new_holders,
+        interval=HOLDERS_CHECK_INTERVAL_SECONDS,
+        first=20,
+    )
+
+    logger.info("WOODY Monitor Bot started...")
+    app.run_polling(drop_pending_updates=True)
+
+
+if __name__ == "__main__":
+    main()
