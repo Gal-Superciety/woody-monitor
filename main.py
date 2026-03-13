@@ -392,7 +392,7 @@ async def send_start_menu(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> N
                 reply_markup=keyboard,
             )
     else:
-    await context.bot.send_message(
+        await context.bot.send_message(
         chat_id=chat_id,
         text=caption,
         parse_mode=ParseMode.MARKDOWN,
