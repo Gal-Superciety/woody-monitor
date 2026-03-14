@@ -577,29 +577,45 @@ async def check_swaps(context: ContextTypes.DEFAULT_TYPE) -> None:
             context.application.bot_data["onedex_prev"] = current
 
 
-async def check_new_holders(context: ContextTypes.DEFAULT_TYPE) -> None:
-    current = get_holders_count()
-    previous = context.application.bot_data.get("holders_prev")
+last_known_holders = None
+pending_holder_value = None
 
-    logger.info("Checking holders... prev=%s current=%s", previous, current)
+async def check_new_holders(context):
+    global last_known_holders
+    global pending_holder_value
 
-    if current is None:
+    holders = get_holders_count()
+
+    if holders is None:
         return
 
-    if previous is None:
-        context.application.bot_data["holders_prev"] = current
+    if last_known_holders is None:
+        last_known_holders = holders
         return
 
-    if current > previous:
-        diff = current - previous
-        caption = (
-            "👤 WOODY NEW HOLDER\n\n"
-            f"Added holders: +{diff}\n"
-            f"Total holders: {current}"
-        )
-        await send_alert_to_targets(context, NEW_HOLDER_IMAGE, caption)
+    if holders > last_known_holders:
 
-    context.application.bot_data["holders_prev"] = current
+        if pending_holder_value is None:
+            pending_holder_value = holders
+            return
+
+        if holders == pending_holder_value:
+
+            added = holders - last_known_holders
+
+            caption = (
+                f"👤 WOODY NEW HOLDER\n\n"
+                f"Added holders: +{added}\n"
+                f"Total holders: {holders}"
+            )
+
+            await send_alert_to_targets(context, NEW_HOLDER_IMAGE, caption)
+
+            last_known_holders = holders
+            pending_holder_value = None
+
+    else:
+        pending_holder_value = None
 
 
 # =========================
