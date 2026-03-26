@@ -43,7 +43,7 @@ TWITTER_URL = os.getenv("TWITTER_URL", "https://x.com/WOODY_EX").strip()
 BUY_XEXCHANGE_URL = os.getenv("BUY_XEXCHANGE_URL", "https://xexchange.com").strip()
 BUY_XOXNO_URL = os.getenv("BUY_XOXNO_URL", "https://xoxno.com").strip()
 
-# Pools / known contracts
+# Known pools / contracts
 XEXCHANGE_POOL_ADDRESS = os.getenv(
     "XEXCHANGE_POOL_ADDRESS",
     "erd1qqqqqqqqqqqqqpgqq66xk9gfr4esuhem3jru86wg5hvp33a62jps2fy57p",
@@ -88,11 +88,10 @@ SUPER_WHALE_IMAGE = os.getenv("SUPER_WHALE_IMAGE", "super_whale.png").strip()
 LIQUIDITY_IMAGE = os.getenv("LIQUIDITY_IMAGE", "liquidity.png").strip()
 
 # Thresholds
-SWAP_MIN_WOODY = float(os.getenv("SWAP_MIN_WOODY", "10000"))
-SWAP_MIN_EGLD = float(os.getenv("SWAP_MIN_EGLD", "0.2"))
-BIG_ALERT_EGLD = float(os.getenv("BIG_ALERT_EGLD", "1"))
-WHALE_ALERT_EGLD = float(os.getenv("WHALE_ALERT_EGLD", "3"))
-SUPER_WHALE_ALERT_EGLD = float(os.getenv("SUPER_WHALE_ALERT_EGLD", "10"))
+SWAP_MIN_USD = float(os.getenv("SWAP_MIN_USD", "2"))
+BIG_ALERT_USD = float(os.getenv("BIG_ALERT_USD", "25"))
+WHALE_ALERT_USD = float(os.getenv("WHALE_ALERT_USD", "100"))
+SUPER_WHALE_ALERT_USD = float(os.getenv("SUPER_WHALE_ALERT_USD", "500"))
 
 # Intervals
 CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "20"))
@@ -187,6 +186,9 @@ KNOWN_POOL_ADDRESSES = {
     WOODY_USDC_POOL_ADDRESS,
 }
 KNOWN_POOL_ADDRESSES = {x for x in KNOWN_POOL_ADDRESSES if x}
+
+TOKEN_PRICE_CACHE: Dict[str, Dict[str, float]] = {}
+TOKEN_PRICE_CACHE_TTL = 60
 
 # =========================
 # HELPERS
@@ -296,38 +298,38 @@ def greeting_detected(text: str) -> bool:
     return value in greetings
 
 
-def choose_title(event_type: str, egld_amount: float) -> str:
+def choose_title(event_type: str, swap_usd_value: float) -> str:
     if event_type == "BUY":
-        if egld_amount >= SUPER_WHALE_ALERT_EGLD:
+        if swap_usd_value >= SUPER_WHALE_ALERT_USD:
             return random.choice(SUPER_WHALE_TITLES)
-        if egld_amount >= WHALE_ALERT_EGLD:
+        if swap_usd_value >= WHALE_ALERT_USD:
             return random.choice(WHALE_BUY_TITLES)
-        if egld_amount >= BIG_ALERT_EGLD:
+        if swap_usd_value >= BIG_ALERT_USD:
             return random.choice(BIG_BUY_TITLES)
         return random.choice(BUY_ALERT_TITLES)
 
     if event_type == "SELL":
-        if egld_amount >= WHALE_ALERT_EGLD:
+        if swap_usd_value >= WHALE_ALERT_USD:
             return random.choice(WHALE_SELL_TITLES)
-        if egld_amount >= BIG_ALERT_EGLD:
+        if swap_usd_value >= BIG_ALERT_USD:
             return random.choice(BIG_SELL_TITLES)
         return random.choice(SELL_ALERT_TITLES)
 
     return "💧 WOODY LIQUIDITY ALERT"
 
 
-def choose_image(event_type: str, egld_amount: float) -> str:
+def choose_image(event_type: str, swap_usd_value: float) -> str:
     if event_type == "BUY":
-        if egld_amount >= SUPER_WHALE_ALERT_EGLD:
+        if swap_usd_value >= SUPER_WHALE_ALERT_USD:
             return SUPER_WHALE_IMAGE
-        if egld_amount >= WHALE_ALERT_EGLD:
+        if swap_usd_value >= WHALE_ALERT_USD:
             return WHALE_BUY_IMAGE
-        if egld_amount >= BIG_ALERT_EGLD:
+        if swap_usd_value >= BIG_ALERT_USD:
             return BIG_BUY_IMAGE
         return BUY_IMAGE
 
     if event_type == "SELL":
-        if egld_amount >= BIG_ALERT_EGLD:
+        if swap_usd_value >= BIG_ALERT_USD:
             return BIG_SELL_IMAGE
         return SELL_IMAGE
 
@@ -530,7 +532,6 @@ def parse_tx_from_wallet_perspective(tx: dict) -> Optional[Dict[str, Any]]:
     quote_in = 0.0
     quote_out = 0.0
     quote_token = None
-    egld_equivalent = 0.0
 
     for op in operations:
         token_id = (op.get("identifier") or op.get("tokenIdentifier") or "").strip()
@@ -547,17 +548,10 @@ def parse_tx_from_wallet_perspective(tx: dict) -> Optional[Dict[str, Any]]:
         else:
             if token_id:
                 quote_token = token_id
-
             if op_receiver == wallet:
                 quote_in += amount
             if op_sender == wallet:
                 quote_out += amount
-
-            if token_id in {"EGLD", WEGLD_TOKEN_ID}:
-                if op_receiver == wallet:
-                    egld_equivalent += amount
-                if op_sender == wallet:
-                    egld_equivalent += amount
 
     pair, dex = detect_pair_and_dex(tx)
 
@@ -588,27 +582,71 @@ def parse_tx_from_wallet_perspective(tx: dict) -> Optional[Dict[str, Any]]:
         "quote_token": quote_token or "?",
         "pair": pair,
         "dex": dex,
-        "egld_equivalent": egld_equivalent,
     }
 
 
+def get_token_usd_price(token_id: str) -> float:
+    if not token_id:
+        return 0.0
+
+    token_id = token_id.strip()
+    now_ts = time.time()
+
+    cached = TOKEN_PRICE_CACHE.get(token_id)
+    if cached and now_ts - cached.get("ts", 0) < TOKEN_PRICE_CACHE_TTL:
+        return cached.get("price", 0.0)
+
+    url = f"{MVX_API}/tokens/{token_id}"
+    data = get_json(url)
+
+    price = 0.0
+    if isinstance(data, dict):
+        for key in ("price", "usdPrice", "priceUsd", "priceUSD"):
+            if key in data and data[key] is not None:
+                price = safe_float(data[key])
+                break
+
+    TOKEN_PRICE_CACHE[token_id] = {
+        "price": price,
+        "ts": now_ts,
+    }
+    return price
+
+
+def get_swap_usd_value(parsed: Dict[str, Any]) -> float:
+    quote_token = (parsed.get("quote_token") or "").strip()
+    quote_amount = safe_float(parsed.get("quote_amount", 0.0))
+
+    if quote_amount <= 0 or not quote_token:
+        return 0.0
+
+    if "USDC" in quote_token.upper():
+        return quote_amount
+
+    token_price = get_token_usd_price(quote_token)
+    if token_price > 0:
+        return quote_amount * token_price
+
+    return 0.0
+
+
 def should_alert(parsed: Dict[str, Any]) -> bool:
-    woody_ok = parsed["woody_amount"] >= SWAP_MIN_WOODY
-    egld_ok = parsed["egld_equivalent"] >= SWAP_MIN_EGLD
-    return woody_ok or egld_ok or parsed["type"] == "LIQUIDITY"
+    swap_usd_value = get_swap_usd_value(parsed)
+    return swap_usd_value >= SWAP_MIN_USD
 
 
 def build_swap_message(tx: dict, parsed: Dict[str, Any]) -> str:
     tx_hash = tx.get("txHash") or tx.get("hash") or ""
     explorer = f"https://explorer.multiversx.com/transactions/{tx_hash}"
+    swap_usd_value = get_swap_usd_value(parsed)
 
     return (
-        f"{choose_title(parsed['type'], parsed['egld_equivalent'])}\n\n"
+        f"{choose_title(parsed['type'], swap_usd_value)}\n\n"
         f"🔁 Type: {parsed['type']}\n"
-        f"👤 Wallet: {parsed['wallet']}\n"
-        f"🪶 Short: {short_wallet(parsed['wallet'])}\n"
+        f"👤 Wallet: {short_wallet(parsed['wallet'])}\n"
         f"🪙 WOODY: {parsed['woody_amount']:,.2f}\n"
         f"💵 Quote: {parsed['quote_amount']:,.6f} {parsed['quote_token']}\n"
+        f"💲 Swap value: ${swap_usd_value:,.2f}\n"
         f"💱 Pair: {parsed['pair']}\n"
         f"🏦 DEX: {parsed['dex']}\n"
         f"🔗 {explorer}"
@@ -626,12 +664,11 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "✅ *WOODY Monitor is running*\n\n"
         f"Private alerts: *{'YES' if PRIVATE_CHAT_ID else 'NO'}*\n"
         f"Group alerts: *{'YES' if GROUP_CHAT_ID else 'NO'}*\n\n"
-        f"Token monitor filters:\n"
-        f"• Min WOODY: *{SWAP_MIN_WOODY:,.0f}*\n"
-        f"• Min EGLD: *{SWAP_MIN_EGLD}*\n\n"
-        f"Big alerts: *≥ {BIG_ALERT_EGLD} EGLD*\n"
-        f"Whale alerts: *≥ {WHALE_ALERT_EGLD} EGLD*\n"
-        f"Super whale: *≥ {SUPER_WHALE_ALERT_EGLD} EGLD*"
+        f"Universal swap filter:\n"
+        f"• Min swap value: *${SWAP_MIN_USD}*\n\n"
+        f"Big alert: *≥ ${BIG_ALERT_USD}*\n"
+        f"Whale alert: *≥ ${WHALE_ALERT_USD}*\n"
+        f"Super whale: *≥ ${SUPER_WHALE_ALERT_USD}*"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
@@ -766,7 +803,8 @@ async def check_swaps(context: ContextTypes.DEFAULT_TYPE) -> None:
         if not should_alert(parsed):
             continue
 
-        image = choose_image(parsed["type"], parsed["egld_equivalent"])
+        swap_usd_value = get_swap_usd_value(parsed)
+        image = choose_image(parsed["type"], swap_usd_value)
         caption = build_swap_message(tx, parsed)
 
         await send_alert_to_targets(context, image, caption)
@@ -779,9 +817,9 @@ async def check_swaps(context: ContextTypes.DEFAULT_TYPE) -> None:
                 "woody": parsed["woody_amount"],
                 "quote_amount": parsed["quote_amount"],
                 "quote_token": parsed["quote_token"],
+                "swap_usd_value": swap_usd_value,
                 "pair": parsed["pair"],
                 "dex": parsed["dex"],
-                "egld_equivalent": parsed["egld_equivalent"],
                 "timestamp": tx.get("timestamp"),
                 "explorer": f"https://explorer.multiversx.com/transactions/{tx_hash}",
             }
