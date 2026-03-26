@@ -7,12 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 from dotenv import load_dotenv
-from telegram import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    InputFile,
-    Update,
-)
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -36,6 +31,10 @@ MVX_API = os.getenv("MVX_API", "https://api.multiversx.com").strip()
 
 WOODY_TOKEN_ID = os.getenv("WOODY_TOKEN_ID", "WOODY-5f9d9c").strip()
 WEGLD_TOKEN_ID = os.getenv("WEGLD_TOKEN_ID", "WEGLD-bd4d79").strip()
+USDC_TOKEN_ID = os.getenv("USDC_TOKEN_ID", "USDC-c76f1f").strip()  # modifică dacă ai alt identifier
+MEX_TOKEN_ID = os.getenv("MEX_TOKEN_ID", "").strip()
+BOBER_TOKEN_ID = os.getenv("BOBER_TOKEN_ID", "").strip()
+JEX_TOKEN_ID = os.getenv("JEX_TOKEN_ID", "").strip()
 
 PRICE_URL = os.getenv("PRICE_URL", "https://e-compass.io/token/WOODY-5f9d9c").strip()
 CHART_URL = os.getenv("CHART_URL", PRICE_URL).strip()
@@ -54,8 +53,15 @@ ONEDEX_POOL_ADDRESS = os.getenv(
     "erd1qqqqqqqqqqqqqpgqqz6vp9y50ep867vnr296mqf3dduh6guvmvlsu3sujc",
 ).strip()
 
-# Leave empty until you confirm the real WOODY/MEX pool address
-WOODY_MEX_POOL_ADDRESS = os.getenv("WOODY_MEX_POOL_ADDRESS", "").strip()
+WOODY_USDC_POOL_ADDRESS = os.getenv(
+    "WOODY_USDC_POOL_ADDRESS",
+    "",
+).strip()
+
+WOODY_MEX_POOL_ADDRESS = os.getenv(
+    "WOODY_MEX_POOL_ADDRESS",
+    "",
+).strip()
 
 WOODY_BOBER_POOL_ADDRESS = os.getenv(
     "WOODY_BOBER_POOL_ADDRESS",
@@ -93,7 +99,6 @@ CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "20"))
 GREETING_COOLDOWN_SECONDS = int(os.getenv("GREETING_COOLDOWN_SECONDS", "120"))
 HOLDERS_CHECK_INTERVAL_SECONDS = int(os.getenv("HOLDERS_CHECK_INTERVAL_SECONDS", "180"))
 
-# Local storage
 SEEN_TX_FILE = os.getenv("SEEN_TX_FILE", "seen_swaps.json").strip()
 SWAP_LOG_FILE = os.getenv("SWAP_LOG_FILE", "large_swaps.json").strip()
 
@@ -240,7 +245,7 @@ def add_seen_tx(tx_hash: str) -> None:
     seen = load_json_file(SEEN_TX_FILE, [])
     if tx_hash not in seen:
         seen.append(tx_hash)
-        seen = seen[-1000:]
+        seen = seen[-1500:]
         save_json_file(SEEN_TX_FILE, seen)
 
 
@@ -317,6 +322,8 @@ def format_liquidity_text() -> str:
         f"• xExchange pool: `{XEXCHANGE_POOL_ADDRESS}`",
         f"• OneDex pool: `{ONEDEX_POOL_ADDRESS}`" if ONEDEX_POOL_ADDRESS else "• OneDex pool: not configured",
     ]
+    if WOODY_USDC_POOL_ADDRESS:
+        pools.append(f"• WOODY/USDC pool: `{WOODY_USDC_POOL_ADDRESS}`")
     if WOODY_MEX_POOL_ADDRESS:
         pools.append(f"• WOODY/MEX pool: `{WOODY_MEX_POOL_ADDRESS}`")
     if WOODY_BOBER_POOL_ADDRESS:
@@ -429,56 +436,17 @@ def normalize_amount(raw: Any, decimals: int) -> float:
         return safe_float(raw)
 
 
-def parse_operations_for_pool(
-    tx_data: dict,
-    pool_address: str,
-) -> Tuple[str, str, float, float]:
-    operations = tx_data.get("operations", [])
-    sender = tx_data.get("sender", "")
-    user_wallet = sender or "unknown"
-
-    woody_out = 0.0
-    woody_in = 0.0
-    egld_out = 0.0
-    egld_in = 0.0
-
-    for op in operations:
-        token_id = op.get("identifier") or op.get("tokenIdentifier") or ""
-        raw_value = op.get("value", "0")
-        decimals = int(op.get("decimals", 18))
-        amount = normalize_amount(raw_value, decimals)
-
-        op_sender = op.get("sender", "")
-        op_receiver = op.get("receiver", "")
-
-        for addr in [op_sender, op_receiver]:
-            if addr and addr != pool_address and not addr.startswith("erd1qqqqqqqqqqqqqpgq"):
-                user_wallet = addr
-
-        if token_id == WOODY_TOKEN_ID:
-            if op_sender == pool_address:
-                woody_out += amount
-            if op_receiver == pool_address:
-                woody_in += amount
-
-        if token_id == WEGLD_TOKEN_ID:
-            if op_sender == pool_address:
-                egld_out += amount
-            if op_receiver == pool_address:
-                egld_in += amount
-
-    if woody_out > 0 and egld_in > 0:
-        return "BUY", user_wallet, woody_out, egld_in
-
-    if woody_in > 0 and egld_out > 0:
-        return "SELL", user_wallet, woody_in, egld_out
-
-    woody_amount = max(woody_out, woody_in)
-    egld_amount = max(egld_in, egld_out)
-    return "SWAP", user_wallet, woody_amount, egld_amount
+def get_tx_hash(tx_data: dict) -> str:
+    return (
+        tx_data.get("txHash")
+        or tx_data.get("txHashString")
+        or tx_data.get("hash")
+        or tx_data.get("originalTxHash")
+        or ""
+    )
 
 
-def fetch_pool_transactions(pool_address: str, size: int = 15) -> List[dict]:
+def fetch_pool_transactions(pool_address: str, size: int = 20) -> List[dict]:
     if not pool_address:
         return []
 
@@ -489,9 +457,88 @@ def fetch_pool_transactions(pool_address: str, size: int = 15) -> List[dict]:
         "size": size,
     }
     data = get_json(url, params=params)
-    if isinstance(data, list):
-        return data
-    return []
+    return data if isinstance(data, list) else []
+
+
+def parse_operations_for_pool(
+    tx_data: dict,
+    pool_address: str,
+    pair_token_id: str,
+) -> Tuple[Optional[str], str, float, float]:
+    """
+    Return:
+    (tx_type, wallet, woody_amount, pair_amount)
+
+    tx_type in: BUY / SELL / SWAP / None
+    """
+    operations = tx_data.get("operations", [])
+    if not isinstance(operations, list) or not operations:
+        return None, "unknown", 0.0, 0.0
+
+    user_wallet = tx_data.get("sender", "") or "unknown"
+
+    woody_out = 0.0
+    woody_in = 0.0
+    pair_out = 0.0
+    pair_in = 0.0
+
+    found_woody = False
+    found_pair = False
+
+    for op in operations:
+        token_id = op.get("identifier") or op.get("tokenIdentifier") or ""
+        raw_value = op.get("value", "0")
+        decimals = int(op.get("decimals", 18))
+        amount = normalize_amount(raw_value, decimals)
+
+        op_sender = op.get("sender", "") or ""
+        op_receiver = op.get("receiver", "") or ""
+
+        # caută un wallet real, diferit de pool și de adrese tehnice
+        for addr in [op_sender, op_receiver]:
+            if (
+                addr
+                and addr != pool_address
+                and not addr.startswith("erd1qqqqqqqqqqqqqpgq")
+            ):
+                user_wallet = addr
+
+        if token_id == WOODY_TOKEN_ID:
+            found_woody = True
+            if op_sender == pool_address:
+                woody_out += amount
+            if op_receiver == pool_address:
+                woody_in += amount
+
+        if pair_token_id and token_id == pair_token_id:
+            found_pair = True
+            if op_sender == pool_address:
+                pair_out += amount
+            if op_receiver == pool_address:
+                pair_in += amount
+
+    woody_amount = max(woody_out, woody_in)
+    pair_amount = max(pair_in, pair_out)
+
+    # filtru strict: fără WOODY > 0, fără alertă
+    if not found_woody or woody_amount <= 0:
+        return None, user_wallet, 0.0, 0.0
+
+    # filtru strict: fără pair token > 0, fără alertă
+    if pair_token_id and (not found_pair or pair_amount <= 0):
+        return None, user_wallet, woody_amount, 0.0
+
+    if woody_out > 0 and pair_in > 0:
+        return "BUY", user_wallet, woody_out, pair_in
+
+    if woody_in > 0 and pair_out > 0:
+        return "SELL", user_wallet, woody_in, pair_out
+
+    if woody_amount > 0 and pair_amount > 0:
+        return "SWAP", user_wallet, woody_amount, pair_amount
+
+    return None, user_wallet, woody_amount, pair_amount
+
 
 # =========================
 # TELEGRAM HANDLERS
@@ -581,6 +628,7 @@ async def welcome_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE
             continue
         await update.message.reply_text(random.choice(WELCOME_NEW_MEMBER_MESSAGES))
 
+
 # =========================
 # BACKGROUND JOBS
 # =========================
@@ -625,34 +673,59 @@ async def process_pool_swaps(
     pool_address: str,
     dex_name: str,
     pair_name: str,
+    pair_token_id: str,
+    is_egld_pair: bool = False,
 ) -> None:
-    txs = fetch_pool_transactions(pool_address, size=15)
+    txs = fetch_pool_transactions(pool_address, size=20)
     if not txs:
         return
 
     for tx in reversed(txs):
-        tx_hash = tx.get("txHash") or tx.get("txHashString") or tx.get("hash")
+        tx_hash = get_tx_hash(tx)
         if not tx_hash:
             continue
 
         if has_seen_tx(tx_hash):
             continue
 
-        tx_type, wallet, woody_amount, egld_amount = parse_operations_for_pool(tx, pool_address)
+        tx_type, wallet, woody_amount, pair_amount = parse_operations_for_pool(
+            tx,
+            pool_address,
+            pair_token_id,
+        )
 
-        if woody_amount < SWAP_MIN_WOODY and egld_amount < SWAP_MIN_EGLD:
+        # dacă nu există WOODY real în tranzacție, ignoră complet
+        if tx_type is None or woody_amount <= 0 or pair_amount <= 0:
             add_seen_tx(tx_hash)
             continue
 
+        # pentru pair EGLD/WEGLD filtrăm și după pragul de EGLD
+        if is_egld_pair:
+            if woody_amount < SWAP_MIN_WOODY and pair_amount < SWAP_MIN_EGLD:
+                add_seen_tx(tx_hash)
+                continue
+            egld_amount = pair_amount
+        else:
+            # pentru non-EGLD, filtrăm doar după WOODY
+            if woody_amount < SWAP_MIN_WOODY:
+                add_seen_tx(tx_hash)
+                continue
+            egld_amount = 0.0
+
         title = choose_title("BUY" if tx_type == "BUY" else "SELL", egld_amount)
         image = choose_image("BUY" if tx_type == "BUY" else "SELL", egld_amount)
+
+        if is_egld_pair:
+            value_line = f"💰 EGLD: {pair_amount:.6f}"
+        else:
+            value_line = f"💰 {pair_name.split('/')[-1].strip()}: {pair_amount:,.6f}"
 
         caption = (
             f"{title}\n\n"
             f"🔁 Type: {tx_type}\n"
             f"👤 Wallet: {short_wallet(wallet)}\n"
             f"🪙 WOODY: {woody_amount:,.2f}\n"
-            f"💰 EGLD: {egld_amount:.6f}\n"
+            f"{value_line}\n"
             f"💱 Pair: {pair_name}\n"
             f"🏦 DEX: {dex_name}\n"
             f"🔗 https://explorer.multiversx.com/transactions/{tx_hash}"
@@ -666,8 +739,9 @@ async def process_pool_swaps(
                 "type": tx_type,
                 "wallet": wallet,
                 "woody": woody_amount,
-                "egld": egld_amount,
+                "pairAmount": pair_amount,
                 "pair": pair_name,
+                "pairToken": pair_token_id,
                 "dex": dex_name,
                 "timestamp": tx.get("timestamp"),
                 "explorer": f"https://explorer.multiversx.com/transactions/{tx_hash}",
@@ -680,44 +754,66 @@ async def process_pool_swaps(
 async def check_swaps(context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("Checking swaps...")
 
-    await process_pool_swaps(
-        context,
-        XEXCHANGE_POOL_ADDRESS,
-        "xExchange",
-        "WOODY / EGLD",
-    )
+    if XEXCHANGE_POOL_ADDRESS:
+        await process_pool_swaps(
+            context=context,
+            pool_address=XEXCHANGE_POOL_ADDRESS,
+            dex_name="xExchange",
+            pair_name="WOODY / EGLD",
+            pair_token_id=WEGLD_TOKEN_ID,
+            is_egld_pair=True,
+        )
 
     if ONEDEX_POOL_ADDRESS:
         await process_pool_swaps(
-            context,
-            ONEDEX_POOL_ADDRESS,
-            "OneDex",
-            "WOODY / EGLD",
+            context=context,
+            pool_address=ONEDEX_POOL_ADDRESS,
+            dex_name="OneDex",
+            pair_name="WOODY / EGLD",
+            pair_token_id=WEGLD_TOKEN_ID,
+            is_egld_pair=True,
         )
 
-    if WOODY_MEX_POOL_ADDRESS:
+    if WOODY_USDC_POOL_ADDRESS:
         await process_pool_swaps(
-            context,
-            WOODY_MEX_POOL_ADDRESS,
-            "xExchange",
-            "WOODY / MEX",
+            context=context,
+            pool_address=WOODY_USDC_POOL_ADDRESS,
+            dex_name="xExchange / Aggregator",
+            pair_name="WOODY / USDC",
+            pair_token_id=USDC_TOKEN_ID,
+            is_egld_pair=False,
         )
 
-    if WOODY_BOBER_POOL_ADDRESS:
+    if WOODY_MEX_POOL_ADDRESS and MEX_TOKEN_ID:
         await process_pool_swaps(
-            context,
-            WOODY_BOBER_POOL_ADDRESS,
-            "JEX / Other",
-            "WOODY / BOBER",
+            context=context,
+            pool_address=WOODY_MEX_POOL_ADDRESS,
+            dex_name="xExchange",
+            pair_name="WOODY / MEX",
+            pair_token_id=MEX_TOKEN_ID,
+            is_egld_pair=False,
         )
 
-    if WOODY_JEX_POOL_ADDRESS:
+    if WOODY_BOBER_POOL_ADDRESS and BOBER_TOKEN_ID:
         await process_pool_swaps(
-            context,
-            WOODY_JEX_POOL_ADDRESS,
-            "JEX / Other",
-            "WOODY / JEX",
+            context=context,
+            pool_address=WOODY_BOBER_POOL_ADDRESS,
+            dex_name="JEX / Other",
+            pair_name="WOODY / BOBER",
+            pair_token_id=BOBER_TOKEN_ID,
+            is_egld_pair=False,
         )
+
+    if WOODY_JEX_POOL_ADDRESS and JEX_TOKEN_ID:
+        await process_pool_swaps(
+            context=context,
+            pool_address=WOODY_JEX_POOL_ADDRESS,
+            dex_name="JEX / Other",
+            pair_name="WOODY / JEX",
+            pair_token_id=JEX_TOKEN_ID,
+            is_egld_pair=False,
+        )
+
 
 # =========================
 # MAIN
