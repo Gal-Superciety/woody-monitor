@@ -1,18 +1,12 @@
 import json
 import logging
 import os
-import random
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 from dotenv import load_dotenv
-from telegram import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    InputFile,
-    Update,
-)
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -43,7 +37,6 @@ TWITTER_URL = os.getenv("TWITTER_URL", "https://x.com/WOODY_EX").strip()
 BUY_XEXCHANGE_URL = os.getenv("BUY_XEXCHANGE_URL", "https://xexchange.com").strip()
 BUY_XOXNO_URL = os.getenv("BUY_XOXNO_URL", "https://xoxno.com").strip()
 
-# Known pools / contracts
 XEXCHANGE_POOL_ADDRESS = os.getenv(
     "XEXCHANGE_POOL_ADDRESS",
     "erd1qqqqqqqqqqqqqpgqq66xk9gfr4esuhem3jru86wg5hvp33a62jps2fy57p",
@@ -112,63 +105,19 @@ logging.basicConfig(
 logger = logging.getLogger("WOODY_MONITOR")
 
 # =========================
-# RANDOM TEXTS
+# STATIC TEXT
 # =========================
 GREETING_REPLIES = [
     "👋 Welcome to the WOODY community!",
     "🪶 Glad to see you here in WOODY.",
     "☀️ GM! Welcome to WOODY.",
     "🚀 Welcome! The WOODY ecosystem keeps growing.",
-    "🔥 Another legend just said hello in WOODY.",
 ]
 
 WELCOME_NEW_MEMBER_MESSAGES = [
     "🪶 Welcome to the WOODY community!\n\nStay tuned for updates, trades and ecosystem news.",
     "🚀 A new WOODY has landed!\n\nWelcome to the community.",
     "👋 Welcome! WOODY Monitor is watching the ecosystem 24/7.",
-    "🔥 Great to have you here!\n\nYou’re now part of the WOODY community.",
-]
-
-BUY_ALERT_TITLES = [
-    "🟢 WOODY BUY ALERT",
-    "🚀 Fresh WOODY buy detected!",
-    "🔥 Someone just grabbed more WOODY!",
-]
-
-SELL_ALERT_TITLES = [
-    "🔴 WOODY SELL ALERT",
-    "⚠️ WOODY sell detected!",
-    "📉 A WOODY sell just happened!",
-]
-
-BIG_BUY_TITLES = [
-    "🚨 WOODY BIG BUY",
-    "🔥 BIG BUY DETECTED",
-    "💚 STRONG BUY MOMENTUM",
-]
-
-BIG_SELL_TITLES = [
-    "💥 WOODY BIG SELL",
-    "⚠️ BIG SELL DETECTED",
-    "🔻 HEAVY SELL PRESSURE",
-]
-
-WHALE_BUY_TITLES = [
-    "🐋 WOODY WHALE BUY",
-    "🌊 WHALE ALERT",
-    "🚀 MAJOR ACCUMULATION DETECTED",
-]
-
-WHALE_SELL_TITLES = [
-    "🐋 WOODY WHALE SELL",
-    "🌊 WHALE SELL ALERT",
-    "⚠️ LARGE SELL PRESSURE DETECTED",
-]
-
-SUPER_WHALE_TITLES = [
-    "👑 WOODY SUPER WHALE",
-    "🚀 LEGENDARY BUY DETECTED",
-    "💎 MONSTER ACCUMULATION ALERT",
 ]
 
 # =========================
@@ -189,6 +138,7 @@ KNOWN_POOL_ADDRESSES = {x for x in KNOWN_POOL_ADDRESSES if x}
 
 TOKEN_PRICE_CACHE: Dict[str, Dict[str, float]] = {}
 TOKEN_PRICE_CACHE_TTL = 60
+
 
 # =========================
 # HELPERS
@@ -212,7 +162,7 @@ def safe_float(value: Any) -> float:
 def short_wallet(addr: str) -> str:
     if not addr:
         return "unknown"
-    if len(addr) < 16:
+    if len(addr) < 18:
         return addr
     return f"{addr[:10]}...{addr[-8:]}"
 
@@ -258,7 +208,7 @@ def add_seen_tx(tx_hash: str) -> None:
     seen = load_json_file(SEEN_TX_FILE, [])
     if tx_hash not in seen:
         seen.append(tx_hash)
-        seen = seen[-1500:]
+        seen = seen[-3000:]
         save_json_file(SEEN_TX_FILE, seen)
 
 
@@ -270,7 +220,7 @@ def has_seen_tx(tx_hash: str) -> bool:
 def log_large_swap(entry: dict) -> None:
     rows = load_json_file(SWAP_LOG_FILE, [])
     rows.append(entry)
-    rows = rows[-1000:]
+    rows = rows[-1500:]
     save_json_file(SWAP_LOG_FILE, rows)
 
 
@@ -292,34 +242,81 @@ def get_holders_count() -> Optional[int]:
 
 def greeting_detected(text: str) -> bool:
     value = text.lower().strip()
-    greetings = {
-        "hello", "hi", "hey", "gm", "good morning", "salut", "buna", "bună"
-    }
+    greetings = {"hello", "hi", "hey", "gm", "good morning", "salut", "buna", "bună"}
     return value in greetings
 
 
-def choose_title(event_type: str, swap_usd_value: float) -> str:
-    if event_type == "BUY":
+def normalize_amount(raw: Any, decimals: int) -> float:
+    try:
+        return int(str(raw)) / (10 ** decimals)
+    except Exception:
+        return safe_float(raw)
+
+
+def get_token_usd_price(token_id: str) -> float:
+    if not token_id:
+        return 0.0
+
+    token_id = token_id.strip()
+    now_ts = time.time()
+
+    cached = TOKEN_PRICE_CACHE.get(token_id)
+    if cached and now_ts - cached.get("ts", 0) < TOKEN_PRICE_CACHE_TTL:
+        return cached.get("price", 0.0)
+
+    url = f"{MVX_API}/tokens/{token_id}"
+    data = get_json(url)
+
+    price = 0.0
+    if isinstance(data, dict):
+        for key in ("price", "usdPrice", "priceUsd", "priceUSD"):
+            if data.get(key) is not None:
+                price = safe_float(data.get(key))
+                break
+
+    TOKEN_PRICE_CACHE[token_id] = {"price": price, "ts": now_ts}
+    return price
+
+
+def get_swap_usd_value(parsed: Dict[str, Any]) -> float:
+    quote_token = (parsed.get("quote_token") or "").strip()
+    quote_amount = safe_float(parsed.get("quote_amount", 0.0))
+
+    if quote_amount <= 0 or not quote_token:
+        return 0.0
+
+    if "USDC" in quote_token.upper():
+        return quote_amount
+
+    token_price = get_token_usd_price(quote_token)
+    if token_price > 0:
+        return quote_amount * token_price
+
+    return 0.0
+
+
+def choose_title(tx_type: str, swap_usd_value: float) -> str:
+    if tx_type == "BUY":
         if swap_usd_value >= SUPER_WHALE_ALERT_USD:
-            return random.choice(SUPER_WHALE_TITLES)
+            return "👑 WOODY SUPER WHALE BUY"
         if swap_usd_value >= WHALE_ALERT_USD:
-            return random.choice(WHALE_BUY_TITLES)
+            return "🐋 WOODY WHALE BUY"
         if swap_usd_value >= BIG_ALERT_USD:
-            return random.choice(BIG_BUY_TITLES)
-        return random.choice(BUY_ALERT_TITLES)
+            return "🚨 WOODY BIG BUY"
+        return "🟢 WOODY BUY ALERT"
 
-    if event_type == "SELL":
+    if tx_type == "SELL":
         if swap_usd_value >= WHALE_ALERT_USD:
-            return random.choice(WHALE_SELL_TITLES)
+            return "🐋 WOODY WHALE SELL"
         if swap_usd_value >= BIG_ALERT_USD:
-            return random.choice(BIG_SELL_TITLES)
-        return random.choice(SELL_ALERT_TITLES)
+            return "💥 WOODY BIG SELL"
+        return "🔴 WOODY SELL ALERT"
 
-    return "💧 WOODY LIQUIDITY ALERT"
+    return "💧 WOODY LIQUIDITY ADDED"
 
 
-def choose_image(event_type: str, swap_usd_value: float) -> str:
-    if event_type == "BUY":
+def choose_image(tx_type: str, swap_usd_value: float) -> str:
+    if tx_type == "BUY":
         if swap_usd_value >= SUPER_WHALE_ALERT_USD:
             return SUPER_WHALE_IMAGE
         if swap_usd_value >= WHALE_ALERT_USD:
@@ -328,7 +325,7 @@ def choose_image(event_type: str, swap_usd_value: float) -> str:
             return BIG_BUY_IMAGE
         return BUY_IMAGE
 
-    if event_type == "SELL":
+    if tx_type == "SELL":
         if swap_usd_value >= BIG_ALERT_USD:
             return BIG_SELL_IMAGE
         return SELL_IMAGE
@@ -339,7 +336,7 @@ def choose_image(event_type: str, swap_usd_value: float) -> str:
 def format_liquidity_text() -> str:
     pools = [
         f"• xExchange pool: `{XEXCHANGE_POOL_ADDRESS}`",
-        f"• OneDex pool: `{ONEDEX_POOL_ADDRESS}`" if ONEDEX_POOL_ADDRESS else "• OneDex pool: not configured",
+        f"• OneDex pool: `{ONEDEX_POOL_ADDRESS}`",
         f"• WOODY/USDC pool: `{WOODY_USDC_POOL_ADDRESS}`",
     ]
     if WOODY_MEX_POOL_ADDRESS:
@@ -380,9 +377,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🟢 Buy xExchange", url=BUY_XEXCHANGE_URL),
             InlineKeyboardButton("🟢 Buy XOXNO", url=BUY_XOXNO_URL),
         ],
-        [
-            InlineKeyboardButton("𝕏 Twitter", url=TWITTER_URL),
-        ],
+        [InlineKeyboardButton("𝕏 Twitter", url=TWITTER_URL)],
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -439,20 +434,11 @@ async def send_alert_to_targets(
                     )
             else:
                 await context.bot.send_message(chat_id=target, text=caption)
-
-            logger.info("[OK] Sent alert to %s", target)
         except Exception as exc:
             logger.warning("[ALERT ERROR] %s -> %s", target, exc)
 
 
-def normalize_amount(raw: Any, decimals: int) -> float:
-    try:
-        return int(str(raw)) / (10 ** decimals)
-    except Exception:
-        return safe_float(raw)
-
-
-def fetch_recent_woody_transactions(size: int = 25) -> List[dict]:
+def fetch_recent_woody_transactions(size: int = 30) -> List[dict]:
     url = f"{MVX_API}/transactions"
     params = {
         "status": "success",
@@ -516,7 +502,6 @@ def detect_pair_and_dex(tx: dict) -> Tuple[str, str]:
 
     quote = quote_tokens[0] if quote_tokens else "?"
     pair = f"WOODY / {quote}"
-
     return pair, dex
 
 
@@ -585,51 +570,6 @@ def parse_tx_from_wallet_perspective(tx: dict) -> Optional[Dict[str, Any]]:
     }
 
 
-def get_token_usd_price(token_id: str) -> float:
-    if not token_id:
-        return 0.0
-
-    token_id = token_id.strip()
-    now_ts = time.time()
-
-    cached = TOKEN_PRICE_CACHE.get(token_id)
-    if cached and now_ts - cached.get("ts", 0) < TOKEN_PRICE_CACHE_TTL:
-        return cached.get("price", 0.0)
-
-    url = f"{MVX_API}/tokens/{token_id}"
-    data = get_json(url)
-
-    price = 0.0
-    if isinstance(data, dict):
-        for key in ("price", "usdPrice", "priceUsd", "priceUSD"):
-            if key in data and data[key] is not None:
-                price = safe_float(data[key])
-                break
-
-    TOKEN_PRICE_CACHE[token_id] = {
-        "price": price,
-        "ts": now_ts,
-    }
-    return price
-
-
-def get_swap_usd_value(parsed: Dict[str, Any]) -> float:
-    quote_token = (parsed.get("quote_token") or "").strip()
-    quote_amount = safe_float(parsed.get("quote_amount", 0.0))
-
-    if quote_amount <= 0 or not quote_token:
-        return 0.0
-
-    if "USDC" in quote_token.upper():
-        return quote_amount
-
-    token_price = get_token_usd_price(quote_token)
-    if token_price > 0:
-        return quote_amount * token_price
-
-    return 0.0
-
-
 def should_alert(parsed: Dict[str, Any]) -> bool:
     swap_usd_value = get_swap_usd_value(parsed)
     return swap_usd_value >= SWAP_MIN_USD
@@ -651,6 +591,7 @@ def build_swap_message(tx: dict, parsed: Dict[str, Any]) -> str:
         f"🏦 DEX: {parsed['dex']}\n"
         f"🔗 {explorer}"
     )
+
 
 # =========================
 # TELEGRAM HANDLERS
@@ -683,29 +624,19 @@ async def menu_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if query.data == "price":
         text = "💰 *WOODY Price*\n\nOpen the official chart / price source below."
-        keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("📈 Open Price", url=PRICE_URL)]]
-        )
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("📈 Open Price", url=PRICE_URL)]])
         await query.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
 
     elif query.data == "liquidity":
-        await query.message.reply_text(
-            format_liquidity_text(),
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        await query.message.reply_text(format_liquidity_text(), parse_mode=ParseMode.MARKDOWN)
 
     elif query.data == "holders":
         holders = get_holders_count()
-        await query.message.reply_text(
-            format_holders_text(holders),
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        await query.message.reply_text(format_holders_text(holders), parse_mode=ParseMode.MARKDOWN)
 
     elif query.data == "chart":
         text = "📈 *WOODY Chart*\n\nOpen the chart below."
-        keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("📊 Open Chart", url=CHART_URL)]]
-        )
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("📊 Open Chart", url=CHART_URL)]])
         await query.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
 
 
@@ -727,7 +658,7 @@ async def greeting_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     context.application.bot_data["last_greet_ts"] = now
-    await update.message.reply_text(random.choice(GREETING_REPLIES))
+    await update.message.reply_text(GREETING_REPLIES[int(now) % len(GREETING_REPLIES)])
 
 
 async def welcome_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -737,7 +668,8 @@ async def welcome_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE
     for member in update.message.new_chat_members:
         if member.is_bot:
             continue
-        await update.message.reply_text(random.choice(WELCOME_NEW_MEMBER_MESSAGES))
+        await update.message.reply_text(WELCOME_NEW_MEMBER_MESSAGES[int(time.time()) % len(WELCOME_NEW_MEMBER_MESSAGES)])
+
 
 # =========================
 # BACKGROUND JOBS
@@ -747,7 +679,6 @@ async def check_new_holders(context: ContextTypes.DEFAULT_TYPE):
     global pending_holder_value
 
     holders = get_holders_count()
-
     if holders is None:
         return
 
@@ -762,18 +693,14 @@ async def check_new_holders(context: ContextTypes.DEFAULT_TYPE):
 
         if holders == pending_holder_value:
             added = holders - last_known_holders
-
             caption = (
                 f"👤 WOODY NEW HOLDER\n\n"
                 f"Added holders: +{added}\n"
                 f"Total holders: {holders}"
             )
-
             await send_alert_to_targets(context, NEW_HOLDER_IMAGE, caption)
-
             last_known_holders = holders
             pending_holder_value = None
-
     else:
         pending_holder_value = None
 
@@ -781,8 +708,18 @@ async def check_new_holders(context: ContextTypes.DEFAULT_TYPE):
 async def check_swaps(context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("Checking WOODY token transactions...")
 
-    txs = fetch_recent_woody_transactions(size=25)
+    txs = fetch_recent_woody_transactions(size=30)
     if not txs:
+        return
+
+    # prima sincronizare: marcheaza ce exista deja, fara sa trimita spam
+    if not context.application.bot_data.get("swaps_initialized"):
+        for tx in txs:
+            tx_hash = tx.get("txHash") or tx.get("hash")
+            if tx_hash:
+                add_seen_tx(tx_hash)
+        context.application.bot_data["swaps_initialized"] = True
+        logger.info("Initial swap sync complete. Old transactions skipped.")
         return
 
     for tx in reversed(txs):
@@ -793,10 +730,9 @@ async def check_swaps(context: ContextTypes.DEFAULT_TYPE) -> None:
         if has_seen_tx(tx_hash):
             continue
 
-        parsed = parse_tx_from_wallet_perspective(tx)
-
         add_seen_tx(tx_hash)
 
+        parsed = parse_tx_from_wallet_perspective(tx)
         if not parsed:
             continue
 
@@ -825,6 +761,7 @@ async def check_swaps(context: ContextTypes.DEFAULT_TYPE) -> None:
             }
         )
 
+
 # =========================
 # MAIN
 # =========================
@@ -845,11 +782,7 @@ def main() -> None:
         raise RuntimeError("JobQueue is missing. Install python-telegram-bot[job-queue].")
 
     app.job_queue.run_repeating(check_swaps, interval=CHECK_INTERVAL_SECONDS, first=10)
-    app.job_queue.run_repeating(
-        check_new_holders,
-        interval=HOLDERS_CHECK_INTERVAL_SECONDS,
-        first=20,
-    )
+    app.job_queue.run_repeating(check_new_holders, interval=HOLDERS_CHECK_INTERVAL_SECONDS, first=20)
 
     logger.info("WOODY Monitor Bot started...")
     app.run_polling(drop_pending_updates=True)
