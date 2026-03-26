@@ -37,7 +37,7 @@ TWITTER_URL = os.getenv("TWITTER_URL", "https://x.com/WOODY_EX").strip()
 BUY_XEXCHANGE_URL = os.getenv("BUY_XEXCHANGE_URL", "https://xexchange.com").strip()
 BUY_XOXNO_URL = os.getenv("BUY_XOXNO_URL", "https://xoxno.com").strip()
 
-# Known pool/router/technical addresses
+# Known technical / pool addresses
 XEXCHANGE_POOL_ADDRESS = os.getenv(
     "XEXCHANGE_POOL_ADDRESS",
     "erd1qqqqqqqqqqqqqpgqq66xk9gfr4esuhem3jru86wg5hvp33a62jps2fy57p",
@@ -84,14 +84,14 @@ NEW_HOLDER_IMAGE = os.getenv("NEW_HOLDER_IMAGE", "new_holder.png").strip()
 # Thresholds
 SWAP_MIN_USD = float(os.getenv("SWAP_MIN_USD", "2"))
 
-# Intervals
+# Timing
 CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "8"))
 HOLDERS_CHECK_INTERVAL_SECONDS = int(os.getenv("HOLDERS_CHECK_INTERVAL_SECONDS", "180"))
 GREETING_COOLDOWN_SECONDS = int(os.getenv("GREETING_COOLDOWN_SECONDS", "120"))
+TOKEN_PRICE_CACHE_TTL = int(os.getenv("TOKEN_PRICE_CACHE_TTL", "60"))
 
 # Files
 SEEN_TX_FILE = os.getenv("SEEN_TX_FILE", "seen_swaps.json").strip()
-TOKEN_PRICE_CACHE_TTL = int(os.getenv("TOKEN_PRICE_CACHE_TTL", "60"))
 
 # =========================
 # LOGGING
@@ -284,7 +284,7 @@ def get_swap_usd_value(quote_token: str, quote_amount: float) -> float:
 
 
 # =========================
-# TX FETCHING
+# FETCH TX
 # =========================
 def fetch_recent_woody_transactions(size: int = 40) -> List[dict]:
     url = f"{MVX_API}/transactions"
@@ -366,19 +366,16 @@ def detect_pair_and_dex(tx: dict) -> Tuple[str, str]:
 def pick_real_wallet_candidates(tx: dict) -> List[str]:
     counts: Dict[str, int] = {}
 
-    # include tx sender/receiver if not technical
     for addr in [tx.get("sender", ""), tx.get("receiver", "")]:
         if addr and not is_technical_address(addr):
             counts[addr] = counts.get(addr, 0) + 2
 
-    # include operation sender/receiver if not technical
     for op in tx.get("operations", []):
         for field in ("sender", "receiver"):
             addr = op.get(field, "")
             if addr and not is_technical_address(addr):
                 counts[addr] = counts.get(addr, 0) + 1
 
-    # sort by score desc
     ordered = sorted(counts.items(), key=lambda x: x[1], reverse=True)
     return [addr for addr, _ in ordered]
 
@@ -392,12 +389,35 @@ def looks_like_lp_token(token_id: str) -> bool:
     return False
 
 
+def get_global_non_woody_flows(tx: dict) -> Tuple[Dict[str, float], Dict[str, float]]:
+    global_sent: Dict[str, float] = {}
+    global_received: Dict[str, float] = {}
+
+    for op in tx.get("operations", []):
+        token_id = (op.get("identifier") or op.get("tokenIdentifier") or "").strip()
+        if not token_id or token_id == WOODY_TOKEN_ID:
+            continue
+
+        amount = normalize_amount(op.get("value", "0"), int(op.get("decimals", 18)))
+        sender = op.get("sender", "")
+        receiver = op.get("receiver", "")
+
+        if sender and not is_technical_address(sender):
+            global_sent[token_id] = global_sent.get(token_id, 0.0) + amount
+
+        if receiver and not is_technical_address(receiver):
+            global_received[token_id] = global_received.get(token_id, 0.0) + amount
+
+    return global_sent, global_received
+
+
 def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
     candidates = pick_real_wallet_candidates(tx)
     if not candidates:
         return None
 
     pair, dex = detect_pair_and_dex(tx)
+    global_sent_non_woody, global_received_non_woody = get_global_non_woody_flows(tx)
 
     best_match = None
     best_score = -1.0
@@ -411,68 +431,60 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
         sent_non_woody = {k: v for k, v in sent.items() if k != WOODY_TOKEN_ID}
         received_non_woody = {k: v for k, v in received.items() if k != WOODY_TOKEN_ID}
 
+        tx_type = None
+        woody_amount = 0.0
+        quote_token = "?"
+        quote_amount = 0.0
+
         # BUY
-        if woody_received > 0 and received_non_woody is not None and sent_non_woody:
-            quote_token, quote_amount = max(sent_non_woody.items(), key=lambda x: x[1])
-            score = woody_received + quote_amount
-            if score > best_score:
-                best_score = score
-                best_match = {
-                    "wallet": wallet,
-                    "type": "BUY",
-                    "woody_amount": woody_received,
-                    "quote_token": quote_token,
-                    "quote_amount": quote_amount,
-                    "pair": pair,
-                    "dex": dex,
-                    "sent": sent,
-                    "received": received,
-                }
+        if woody_received > 0:
+            tx_type = "BUY"
+            woody_amount = woody_received
+
+            if sent_non_woody:
+                quote_token, quote_amount = max(sent_non_woody.items(), key=lambda x: x[1])
+            elif global_sent_non_woody:
+                quote_token, quote_amount = max(global_sent_non_woody.items(), key=lambda x: x[1])
+            else:
+                tx_type = None
 
         # SELL
-        if woody_sent > 0 and received_non_woody:
+        elif woody_sent > 0 and received_non_woody:
+            tx_type = "SELL"
+            woody_amount = woody_sent
             quote_token, quote_amount = max(received_non_woody.items(), key=lambda x: x[1])
-            score = woody_sent + quote_amount
-            if score > best_score:
-                best_score = score
-                best_match = {
-                    "wallet": wallet,
-                    "type": "SELL",
-                    "woody_amount": woody_sent,
-                    "quote_token": quote_token,
-                    "quote_amount": quote_amount,
-                    "pair": pair,
-                    "dex": dex,
-                    "sent": sent,
-                    "received": received,
-                }
 
         # LIQUIDITY
-        lp_received = any(looks_like_lp_token(token) for token in received.keys())
-        if woody_sent > 0 and sent_non_woody and lp_received:
-            quote_token, quote_amount = max(sent_non_woody.items(), key=lambda x: x[1])
-            score = woody_sent + quote_amount
-            if score > best_score:
-                best_score = score
-                best_match = {
-                    "wallet": wallet,
-                    "type": "LIQUIDITY",
-                    "woody_amount": woody_sent,
-                    "quote_token": quote_token,
-                    "quote_amount": quote_amount,
-                    "pair": pair,
-                    "dex": dex,
-                    "sent": sent,
-                    "received": received,
-                }
+        elif woody_sent > 0 and sent_non_woody:
+            lp_received = any(looks_like_lp_token(token) for token in received.keys())
+            if lp_received:
+                tx_type = "LIQUIDITY"
+                woody_amount = woody_sent
+                quote_token, quote_amount = max(sent_non_woody.items(), key=lambda x: x[1])
 
-    if not best_match:
-        return None
+        if not tx_type or quote_amount <= 0:
+            continue
 
-    best_match["swap_usd_value"] = get_swap_usd_value(
-        best_match["quote_token"],
-        best_match["quote_amount"],
-    )
+        swap_usd_value = get_swap_usd_value(quote_token, quote_amount)
+        score = woody_amount + quote_amount + swap_usd_value
+
+        match = {
+            "wallet": wallet,
+            "type": tx_type,
+            "woody_amount": woody_amount,
+            "quote_token": quote_token,
+            "quote_amount": quote_amount,
+            "pair": pair,
+            "dex": dex,
+            "sent": sent,
+            "received": received,
+            "swap_usd_value": swap_usd_value,
+        }
+
+        if score > best_score:
+            best_score = score
+            best_match = match
+
     return best_match
 
 
@@ -625,7 +637,6 @@ async def send_alert_to_targets(
                         chat_id=target,
                         photo=InputFile(photo),
                         caption=caption,
-                        has_spoiler=False,
                     )
             else:
                 await context.bot.send_message(
@@ -760,8 +771,8 @@ async def check_swaps(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     logger.info("Fetched %s WOODY transactions", len(txs))
 
-    # first sync: mark old as seen, no spam
     if not context.application.bot_data.get("swaps_initialized"):
+        logger.info("Initial sync starting...")
         for tx in txs:
             tx_hash = tx.get("txHash") or tx.get("hash")
             if tx_hash:
@@ -773,18 +784,33 @@ async def check_swaps(context: ContextTypes.DEFAULT_TYPE) -> None:
     for tx in reversed(txs):
         tx_hash = tx.get("txHash") or tx.get("hash")
         if not tx_hash:
+            logger.info("Skipped tx with no hash")
             continue
 
         if has_seen_tx(tx_hash):
+            logger.info("Already seen tx: %s", tx_hash)
             continue
 
+        logger.info("NEW TX FOUND: %s", tx_hash)
         add_seen_tx(tx_hash)
 
         parsed = classify_tx(tx)
-        logger.info("TX %s parsed -> %s", tx_hash, parsed)
+        logger.info("Parsed tx %s -> %s", tx_hash, parsed)
 
         if not parsed:
+            logger.info("Parsed is None for tx %s", tx_hash)
             continue
+
+        logger.info(
+            "TX %s -> type=%s wallet=%s woody=%.2f quote=%.6f %s usd=%.2f",
+            tx_hash,
+            parsed["type"],
+            parsed["wallet"],
+            parsed["woody_amount"],
+            parsed["quote_amount"],
+            parsed["quote_token"],
+            parsed["swap_usd_value"],
+        )
 
         if not should_alert(parsed):
             logger.info(
@@ -798,6 +824,7 @@ async def check_swaps(context: ContextTypes.DEFAULT_TYPE) -> None:
         caption = build_message(tx_hash, parsed)
         image = choose_image(parsed["type"])
 
+        logger.info("Sending alert for tx %s", tx_hash)
         await send_alert_to_targets(context, image, caption)
 
 
