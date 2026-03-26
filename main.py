@@ -43,7 +43,7 @@ TWITTER_URL = os.getenv("TWITTER_URL", "https://x.com/WOODY_EX").strip()
 BUY_XEXCHANGE_URL = os.getenv("BUY_XEXCHANGE_URL", "https://xexchange.com").strip()
 BUY_XOXNO_URL = os.getenv("BUY_XOXNO_URL", "https://xoxno.com").strip()
 
-# pools
+# Pools
 XEXCHANGE_POOL_ADDRESS = os.getenv(
     "XEXCHANGE_POOL_ADDRESS",
     "erd1qqqqqqqqqqqqqpgqq66xk9gfr4esuhem3jru86wg5hvp33a62jps2fy57p",
@@ -54,10 +54,8 @@ ONEDEX_POOL_ADDRESS = os.getenv(
     "erd1qqqqqqqqqqqqqpgqqz6vp9y50ep867vnr296mqf3dduh6guvmvlsu3sujc",
 ).strip()
 
-WOODY_MEX_POOL_ADDRESS = os.getenv(
-    "WOODY_MEX_POOL_ADDRESS",
-    "",
-).strip()
+# Leave empty until you confirm the real WOODY/MEX pool address
+WOODY_MEX_POOL_ADDRESS = os.getenv("WOODY_MEX_POOL_ADDRESS", "").strip()
 
 WOODY_BOBER_POOL_ADDRESS = os.getenv(
     "WOODY_BOBER_POOL_ADDRESS",
@@ -84,19 +82,18 @@ NEW_HOLDER_IMAGE = os.getenv("NEW_HOLDER_IMAGE", "new_holder.png").strip()
 WHALE_BUY_IMAGE = os.getenv("WHALE_BUY_IMAGE", "whale_buy.png").strip()
 SUPER_WHALE_IMAGE = os.getenv("SUPER_WHALE_IMAGE", "super_whale.png").strip()
 
-# thresholds
+# Thresholds
 SWAP_MIN_WOODY = float(os.getenv("SWAP_MIN_WOODY", "10000"))
 SWAP_MIN_EGLD = float(os.getenv("SWAP_MIN_EGLD", "0.2"))
 BIG_ALERT_EGLD = float(os.getenv("BIG_ALERT_EGLD", "1"))
 WHALE_ALERT_EGLD = float(os.getenv("WHALE_ALERT_EGLD", "3"))
 SUPER_WHALE_ALERT_EGLD = float(os.getenv("SUPER_WHALE_ALERT_EGLD", "10"))
 
-# intervals
 CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "20"))
 GREETING_COOLDOWN_SECONDS = int(os.getenv("GREETING_COOLDOWN_SECONDS", "120"))
 HOLDERS_CHECK_INTERVAL_SECONDS = int(os.getenv("HOLDERS_CHECK_INTERVAL_SECONDS", "180"))
 
-# storage
+# Local storage
 SEEN_TX_FILE = os.getenv("SEEN_TX_FILE", "seen_swaps.json").strip()
 SWAP_LOG_FILE = os.getenv("SWAP_LOG_FILE", "large_swaps.json").strip()
 
@@ -175,7 +172,6 @@ SUPER_WHALE_TITLES = [
 last_known_holders = None
 pending_holder_value = None
 
-
 # =========================
 # HELPERS
 # =========================
@@ -244,7 +240,6 @@ def add_seen_tx(tx_hash: str) -> None:
     seen = load_json_file(SEEN_TX_FILE, [])
     if tx_hash not in seen:
         seen.append(tx_hash)
-        # keep only latest 1000 hashes
         seen = seen[-1000:]
         save_json_file(SEEN_TX_FILE, seen)
 
@@ -377,7 +372,7 @@ def start_caption() -> str:
         "• Price\n"
         "• Liquidity status\n"
         "• Holders\n"
-        "• Buy & sell activity\n"
+        "• Swap activity\n"
         "• Big buys and whale alerts\n\n"
         "Choose an option below 👇"
     )
@@ -438,23 +433,14 @@ def parse_operations_for_pool(
     tx_data: dict,
     pool_address: str,
 ) -> Tuple[str, str, float, float]:
-    """
-    Returns:
-    (tx_type, wallet, woody_amount, egld_amount)
-
-    tx_type: BUY / SELL / SWAP
-    wallet: detected user wallet
-    """
     operations = tx_data.get("operations", [])
     sender = tx_data.get("sender", "")
-    receiver = tx_data.get("receiver", "")
+    user_wallet = sender or "unknown"
 
     woody_out = 0.0
     woody_in = 0.0
     egld_out = 0.0
     egld_in = 0.0
-
-    user_wallet = sender or "unknown"
 
     for op in operations:
         token_id = op.get("identifier") or op.get("tokenIdentifier") or ""
@@ -465,7 +451,6 @@ def parse_operations_for_pool(
         op_sender = op.get("sender", "")
         op_receiver = op.get("receiver", "")
 
-        # try to infer wallet (non-pool address)
         for addr in [op_sender, op_receiver]:
             if addr and addr != pool_address and not addr.startswith("erd1qqqqqqqqqqqqqpgq"):
                 user_wallet = addr
@@ -482,37 +467,31 @@ def parse_operations_for_pool(
             if op_receiver == pool_address:
                 egld_in += amount
 
-    # infer type
     if woody_out > 0 and egld_in > 0:
         return "BUY", user_wallet, woody_out, egld_in
 
     if woody_in > 0 and egld_out > 0:
         return "SELL", user_wallet, woody_in, egld_out
 
-    # fallback
     woody_amount = max(woody_out, woody_in)
     egld_amount = max(egld_in, egld_out)
     return "SWAP", user_wallet, woody_amount, egld_amount
 
 
 def fetch_pool_transactions(pool_address: str, size: int = 15) -> List[dict]:
-    """
-    Reads recent transactions for a pool account.
-    """
     if not pool_address:
         return []
 
     url = f"{MVX_API}/accounts/{pool_address}/transactions"
     params = {
-        "size": size,
-        "withOperations": "true",
         "status": "success",
+        "withOperations": "true",
+        "size": size,
     }
     data = get_json(url, params=params)
     if isinstance(data, list):
         return data
     return []
-
 
 # =========================
 # TELEGRAM HANDLERS
@@ -602,7 +581,6 @@ async def welcome_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE
             continue
         await update.message.reply_text(random.choice(WELCOME_NEW_MEMBER_MESSAGES))
 
-
 # =========================
 # BACKGROUND JOBS
 # =========================
@@ -662,7 +640,6 @@ async def process_pool_swaps(
 
         tx_type, wallet, woody_amount, egld_amount = parse_operations_for_pool(tx, pool_address)
 
-        # filter
         if woody_amount < SWAP_MIN_WOODY and egld_amount < SWAP_MIN_EGLD:
             add_seen_tx(tx_hash)
             continue
@@ -683,7 +660,6 @@ async def process_pool_swaps(
 
         await send_alert_to_targets(context, image, caption)
 
-        # save for future use (leaderboard / top buys / giveaway)
         log_large_swap(
             {
                 "txHash": tx_hash,
@@ -742,7 +718,6 @@ async def check_swaps(context: ContextTypes.DEFAULT_TYPE) -> None:
             "JEX / Other",
             "WOODY / JEX",
         )
-
 
 # =========================
 # MAIN
