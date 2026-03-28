@@ -43,32 +43,32 @@ JEX = os.getenv("JEX_TOKEN_ID", "JEX-9040ca").strip()
 MEX = os.getenv("MEX_TOKEN_ID", "MEX-455c57").strip()
 USDC_HINT = os.getenv("USDC_TOKEN_HINT", "USDC").strip()
 
-XEX = os.getenv(
+XEXCHANGE_POOL_ADDRESS = os.getenv(
     "XEXCHANGE_POOL_ADDRESS",
     "erd1qqqqqqqqqqqqqpgqvmgnk26tfvz6sj5yasw7p6yfvqpv628d2jpsnvmeaz",
 ).strip()
 
-ONEDX = os.getenv(
+ONEDEX_POOL_ADDRESS = os.getenv(
     "ONEDEX_POOL_ADDRESS",
     "erd1qqqqqqqqqqqqqpgqqz6vp9y50ep867vnr296mqf3dduh6guvmvlsu3sujc",
 ).strip()
 
-WOODY_BOBER = os.getenv(
+WOODY_BOBER_POOL_ADDRESS = os.getenv(
     "WOODY_BOBER_POOL_ADDRESS",
     "erd1qqqqqqqqqqqqqpgqvq8vtfn26fdezjm07a7yjqtgn3h02af86avs9vf6kw",
 ).strip()
 
-WOODY_JEX = os.getenv(
+WOODY_JEX_POOL_ADDRESS = os.getenv(
     "WOODY_JEX_POOL_ADDRESS",
     "erd1qqqqqqqqqqqqqpgqdz5vj73j7h2velx83xwrad6zz82q2njr6avsrkua0n",
 ).strip()
 
-WOODY_MEX = os.getenv(
+WOODY_MEX_POOL_ADDRESS = os.getenv(
     "WOODY_MEX_POOL_ADDRESS",
     "erd1qqqqqqqqqqqqqpgqzqtfej5s9hp7cg0ardy6mt3fvz4jrdsa2jpsdg959f",
 ).strip()
 
-WOODY_USDC = os.getenv(
+WOODY_USDC_POOL_ADDRESS = os.getenv(
     "WOODY_USDC_POOL_ADDRESS",
     "erd1qqqqqqqqqqqqqpgqjhy8hut0d9rzwqlz37e5nsmlj2rch6vd2jpss7a69j",
 ).strip()
@@ -145,12 +145,12 @@ LAST_HOLDERS_COUNT: Optional[int] = None
 PENDING_HOLDER_VALUE: Optional[int] = None
 
 KNOWN_TECHNICAL_ADDRESSES = {
-    XEX,
-    ONEDX,
-    WOODY_BOBER,
-    WOODY_JEX,
-    WOODY_MEX,
-    WOODY_USDC,
+    XEXCHANGE_POOL_ADDRESS,
+    ONEDEX_POOL_ADDRESS,
+    WOODY_BOBER_POOL_ADDRESS,
+    WOODY_JEX_POOL_ADDRESS,
+    WOODY_MEX_POOL_ADDRESS,
+    WOODY_USDC_POOL_ADDRESS,
     ONEDEX_BURN_ADDRESS,
     *ROUTER_ADDRESSES,
 }
@@ -288,12 +288,16 @@ def chat_targets() -> List[str]:
 
 
 # =========================================================
-# PRICE / HOLDERS / RESERVES
+# RESERVES / PRICE / LIQUIDITY - PRO MAX
 # =========================================================
 def reserves(pair_address: str) -> Dict[str, float]:
+    if not pair_address:
+        return {}
+
     data = get_json(f"{MVX}/accounts/{pair_address}/tokens")
     if not isinstance(data, list):
         return {}
+
     out: Dict[str, float] = {}
     for t in data:
         identifier = str(t.get("identifier") or "")
@@ -320,23 +324,19 @@ def egld_usd() -> float:
     return price
 
 
-def price_egld() -> Optional[float]:
-    r = reserves(XEX)
-    woody = r.get(WOODY, 0.0)
-    wegld = r.get(WEGLD, 0.0)
-    if woody > 0:
-        return wegld / woody
-    return None
+def find_token_amount(pool_reserves: Dict[str, float], token_hint: str) -> float:
+    if not pool_reserves or not token_hint:
+        return 0.0
 
+    if token_hint in pool_reserves:
+        return safe_float(pool_reserves[token_hint])
 
-def holders() -> Optional[int]:
-    data = get_json(f"{MVX}/tokens/{WOODY}")
-    if not isinstance(data, dict):
-        return None
-    try:
-        return int(data["accounts"])
-    except Exception:
-        return None
+    hint_upper = token_hint.upper()
+    for token_id, amount in pool_reserves.items():
+        if hint_upper in token_id.upper():
+            return safe_float(amount)
+
+    return 0.0
 
 
 def quote_to_wegld(token: str) -> float:
@@ -359,15 +359,121 @@ def quote_to_wegld(token: str) -> float:
         return 0.0
 
 
+def get_price_from_wegld_pool(pair_address: str, source_name: str) -> Optional[Dict[str, Any]]:
+    r = reserves(pair_address)
+    woody = find_token_amount(r, WOODY)
+    wegld = find_token_amount(r, WEGLD)
+
+    if woody > 0 and wegld > 0:
+        p_egld = wegld / woody
+        p_usd = p_egld * egld_usd()
+        return {
+            "price_egld": p_egld,
+            "price_usd": p_usd,
+            "source": source_name,
+            "woody_reserve": woody,
+            "quote_reserve": wegld,
+            "quote_symbol": "WEGLD",
+        }
+
+    return None
+
+
+def get_price_from_usdc_pool(pair_address: str, source_name: str) -> Optional[Dict[str, Any]]:
+    r = reserves(pair_address)
+    woody = find_token_amount(r, WOODY)
+
+    usdc_amount = 0.0
+    for token_id, amount in r.items():
+        if USDC_HINT.upper() in token_id.upper():
+            usdc_amount = safe_float(amount)
+            break
+
+    if woody > 0 and usdc_amount > 0:
+        p_usd = usdc_amount / woody
+        egld_price = egld_usd()
+        p_egld = p_usd / egld_price if egld_price > 0 else 0.0
+
+        return {
+            "price_egld": p_egld,
+            "price_usd": p_usd,
+            "source": source_name,
+            "woody_reserve": woody,
+            "quote_reserve": usdc_amount,
+            "quote_symbol": "USDC",
+        }
+
+    return None
+
+
+def get_price_from_other_pool(pair_address: str, quote_token: str, source_name: str) -> Optional[Dict[str, Any]]:
+    r = reserves(pair_address)
+    woody = find_token_amount(r, WOODY)
+    quote_amount = find_token_amount(r, quote_token)
+
+    if woody <= 0 or quote_amount <= 0:
+        return None
+
+    quote_in_wegld = quote_to_wegld(quote_token)
+    if quote_in_wegld <= 0:
+        return None
+
+    total_quote_wegld = quote_amount * quote_in_wegld
+    p_egld = total_quote_wegld / woody
+    p_usd = p_egld * egld_usd()
+
+    return {
+        "price_egld": p_egld,
+        "price_usd": p_usd,
+        "source": source_name,
+        "woody_reserve": woody,
+        "quote_reserve": quote_amount,
+        "quote_symbol": symbol(quote_token),
+    }
+
+
+def get_best_price() -> Optional[Dict[str, Any]]:
+    candidates = [
+        get_price_from_wegld_pool(XEXCHANGE_POOL_ADDRESS, "xExchange WOODY/WEGLD"),
+        get_price_from_usdc_pool(WOODY_USDC_POOL_ADDRESS, "xExchange WOODY/USDC"),
+        get_price_from_other_pool(WOODY_MEX_POOL_ADDRESS, MEX, "xExchange WOODY/MEX"),
+        get_price_from_other_pool(WOODY_JEX_POOL_ADDRESS, JEX, "WOODY/JEX"),
+        get_price_from_other_pool(WOODY_BOBER_POOL_ADDRESS, BOBER, "WOODY/BOBER"),
+    ]
+
+    if ONEDEX_POOL_ADDRESS:
+        candidates.append(get_price_from_wegld_pool(ONEDEX_POOL_ADDRESS, "OneDex WOODY/WEGLD"))
+
+    for item in candidates:
+        if item and item.get("price_egld", 0) > 0:
+            return item
+
+    return None
+
+
+def price_egld() -> Optional[float]:
+    best = get_best_price()
+    if not best:
+        return None
+    return safe_float(best["price_egld"])
+
+
+def price_usd() -> Optional[float]:
+    best = get_best_price()
+    if not best:
+        return None
+    return safe_float(best["price_usd"])
+
+
 def liq_wegld(pair_address: str) -> Optional[float]:
     r = reserves(pair_address)
-    wegld = r.get(WEGLD, 0.0)
+    wegld = find_token_amount(r, WEGLD)
     return 2 * wegld if wegld > 0 else None
 
 
 def liq_other(pair_address: str, token: str) -> Optional[float]:
     r = reserves(pair_address)
-    amount = r.get(token, 0.0)
+    amount = find_token_amount(r, token)
     if amount <= 0:
         return None
     quote = quote_to_wegld(token)
@@ -382,15 +488,15 @@ def all_liq() -> Tuple[List[str], float, float]:
     lines = []
 
     sources = [
-        ("WOODY/EGLD xExchange", liq_wegld(XEX)),
-        ("WOODY/EGLD OneDex", liq_wegld(ONEDX)),
-        ("WOODY/BOBER", liq_other(WOODY_BOBER, BOBER)),
-        ("WOODY/JEX", liq_other(WOODY_JEX, JEX)),
-        ("WOODY/MEX", liq_other(WOODY_MEX, MEX)),
+        ("WOODY/EGLD xExchange", liq_wegld(XEXCHANGE_POOL_ADDRESS)),
+        ("WOODY/USDC", liq_other(WOODY_USDC_POOL_ADDRESS, USDC_HINT)),
+        ("WOODY/BOBER", liq_other(WOODY_BOBER_POOL_ADDRESS, BOBER)),
+        ("WOODY/JEX", liq_other(WOODY_JEX_POOL_ADDRESS, JEX)),
+        ("WOODY/MEX", liq_other(WOODY_MEX_POOL_ADDRESS, MEX)),
     ]
 
-    if WOODY_USDC:
-        sources.append(("WOODY/USDC", liq_other(WOODY_USDC, USDC_HINT)))
+    if ONEDEX_POOL_ADDRESS:
+        sources.append(("WOODY/EGLD OneDex", liq_wegld(ONEDEX_POOL_ADDRESS)))
 
     for name, value in sources:
         if value is not None and value > 0:
@@ -400,6 +506,45 @@ def all_liq() -> Tuple[List[str], float, float]:
             lines.append(f"• {name}: N/A")
 
     return lines, total, usd
+
+
+def format_price_text() -> str:
+    best = get_best_price()
+    if not best:
+        return "💰 *WOODY Price*\n\nN/A"
+
+    return (
+        "💰 *WOODY Price*\n\n"
+        f"Price: *{best['price_egld']:.12f} EGLD*\n"
+        f"USD: *${best['price_usd']:.10f}*\n"
+        f"Source: *{best['source']}*\n"
+        f"WOODY Reserve: *{best['woody_reserve']:,.2f}*\n"
+        f"{best['quote_symbol']} Reserve: *{best['quote_reserve']:,.6f}*"
+    )
+
+
+def format_liquidity_text() -> str:
+    lines, total, usd = all_liq()
+    best = get_best_price()
+
+    price_line = ""
+    if best:
+        price_line = (
+            f"\n*Live price source:* `{best['source']}`"
+            f"\n*Live price:* `{best['price_egld']:.12f} EGLD (${best['price_usd']:.10f})`"
+        )
+
+    return (
+        "💧 *WOODY Liquidity*\n\n"
+        + "\n".join(lines)
+        + f"\n\n*TOTAL:* `{total:.3f} EGLD (${total * usd:,.2f})`"
+        + price_line
+        + f"\n\n🔒 *OneDex burn wallet:*\n`{ONEDEX_BURN_ADDRESS}`"
+    )
+
+
+def format_holders_text(value: Optional[int]) -> str:
+    return f"👥 *WOODY Holders*\n\nCurrent holders: *{value if value is not None else 'N/A'}*"
 
 
 # =========================================================
@@ -506,17 +651,17 @@ def detect_pair_and_dex(tx: dict, quote_token: str) -> Tuple[str, str]:
             addresses.add(receiver)
 
     dex = "Aggregator"
-    if XEX in addresses:
+    if XEXCHANGE_POOL_ADDRESS in addresses:
         dex = "xExchange"
-    elif ONEDX in addresses:
+    elif ONEDEX_POOL_ADDRESS in addresses:
         dex = "OneDex"
-    elif WOODY_USDC in addresses:
+    elif WOODY_USDC_POOL_ADDRESS in addresses:
         dex = "WOODY/USDC"
-    elif WOODY_BOBER in addresses:
+    elif WOODY_BOBER_POOL_ADDRESS in addresses:
         dex = "WOODY/BOBER"
-    elif WOODY_JEX in addresses:
+    elif WOODY_JEX_POOL_ADDRESS in addresses:
         dex = "WOODY/JEX"
-    elif WOODY_MEX in addresses:
+    elif WOODY_MEX_POOL_ADDRESS in addresses:
         dex = "WOODY/MEX"
 
     pair = f"WOODY / {symbol(quote_token)}"
@@ -539,13 +684,17 @@ def tx_touches_known_dex(tx: dict) -> bool:
             addresses.add(receiver)
 
     known = {
-        XEX, ONEDX, WOODY_USDC, WOODY_BOBER, WOODY_JEX, WOODY_MEX
+        XEXCHANGE_POOL_ADDRESS,
+        ONEDEX_POOL_ADDRESS,
+        WOODY_USDC_POOL_ADDRESS,
+        WOODY_BOBER_POOL_ADDRESS,
+        WOODY_JEX_POOL_ADDRESS,
+        WOODY_MEX_POOL_ADDRESS,
     }
     return any(addr in known for addr in addresses)
 
 
 def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
-    # ignoră tranzacții care nici măcar nu ating unul dintre DEX-urile urmărite
     if not tx_touches_known_dex(tx):
         return None
 
@@ -578,7 +727,6 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
         quote_token = "?"
         quote_amount = 0.0
 
-        # BUY real: wallet primește WOODY și dă alt token
         if woody_received > 0:
             tx_type = "BUY"
             woody_amount = woody_received
@@ -590,7 +738,6 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
             else:
                 tx_type = None
 
-        # SELL real: wallet trimite WOODY și primește alt token
         elif woody_sent > 0:
             tx_type = "SELL"
             woody_amount = woody_sent
@@ -605,17 +752,14 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
         if not tx_type:
             continue
 
-        # filtru important: ignoră mișcări interne fără valoare reală utilă
         if woody_amount <= 0 or quote_amount <= 0:
             continue
 
         pair, dex = detect_pair_and_dex(tx, quote_token)
 
-        # dacă încă iese "Aggregator", dar nu avem wallet clar și quote clar, ignorăm
         if dex == "Aggregator" and is_technical_address(wallet):
             continue
 
-        # USD value
         if USDC_HINT.upper() in quote_token.upper():
             usd_value = quote_amount
         elif quote_token == WEGLD or symbol(quote_token).upper() == "WEGLD":
@@ -753,33 +897,6 @@ def start_caption() -> str:
         "*Automatic liquidity alerts are disabled* to avoid false alerts.\n\n"
         "Choose an option below 👇"
     )
-
-
-def format_price_text() -> str:
-    p = price_egld()
-    if p is None:
-        return "💰 *WOODY Price*\n\nN/A"
-    usd = egld_usd()
-    return (
-        "💰 *WOODY Price*\n\n"
-        f"Price: *{p:.12f} EGLD*\n"
-        f"USD: *${(p * usd):.10f}*"
-    )
-
-
-def format_liquidity_text() -> str:
-    lines, total, usd = all_liq()
-    return (
-        "💧 *WOODY Liquidity*\n\n"
-        + "\n".join(lines)
-        + f"\n\n*TOTAL:* `{total:.3f} EGLD (${total * usd:,.2f})`\n\n"
-        + "🔒 *OneDex burn wallet:*\n"
-        + f"`{ONEDEX_BURN_ADDRESS}`"
-    )
-
-
-def format_holders_text(value: Optional[int]) -> str:
-    return f"👥 *WOODY Holders*\n\nCurrent holders: *{value if value is not None else 'N/A'}*"
 
 
 async def send_start_menu(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
