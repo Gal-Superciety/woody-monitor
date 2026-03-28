@@ -2,6 +2,7 @@ import os
 import re
 import time
 import json
+import base64
 import logging
 from typing import Dict, Optional, Tuple, List, Any, Set
 
@@ -29,7 +30,8 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 PRIVATE_CHAT_ID = os.getenv("TELEGRAM_PRIVATE_CHAT_ID", "").strip()
 GROUP_CHAT_ID = os.getenv("TELEGRAM_GROUP_CHAT_ID", "").strip()
 
-MVX = os.getenv("MVX_API", "https://api.multiversx.com").strip()
+MVX_API = os.getenv("MVX_API", "https://api.multiversx.com").strip()
+MVX_GATEWAY = os.getenv("MVX_GATEWAY", "https://gateway.multiversx.com").strip()
 XOXNO_QUOTE_API = os.getenv("XOXNO_QUOTE_API", "https://swap.xoxno.com/api/v1/quote").strip()
 COINGECKO_EGLD_API = os.getenv(
     "COINGECKO_EGLD_API",
@@ -53,6 +55,11 @@ ONEDEX_POOL_ADDRESS = os.getenv(
     "erd1qqqqqqqqqqqqqpgqqz6vp9y50ep867vnr296mqf3dduh6guvmvlsu3sujc",
 ).strip()
 
+WOODY_USDC_POOL_ADDRESS = os.getenv(
+    "WOODY_USDC_POOL_ADDRESS",
+    "erd1qqqqqqqqqqqqqpgqjhy8hut0d9rzwqlz37e5nsmlj2rch6vd2jpss7a69j",
+).strip()
+
 WOODY_BOBER_POOL_ADDRESS = os.getenv(
     "WOODY_BOBER_POOL_ADDRESS",
     "erd1qqqqqqqqqqqqqpgqvq8vtfn26fdezjm07a7yjqtgn3h02af86avs9vf6kw",
@@ -66,11 +73,6 @@ WOODY_JEX_POOL_ADDRESS = os.getenv(
 WOODY_MEX_POOL_ADDRESS = os.getenv(
     "WOODY_MEX_POOL_ADDRESS",
     "erd1qqqqqqqqqqqqqpgqzqtfej5s9hp7cg0ardy6mt3fvz4jrdsa2jpsdg959f",
-).strip()
-
-WOODY_USDC_POOL_ADDRESS = os.getenv(
-    "WOODY_USDC_POOL_ADDRESS",
-    "erd1qqqqqqqqqqqqqpgqjhy8hut0d9rzwqlz37e5nsmlj2rch6vd2jpss7a69j",
 ).strip()
 
 ONEDEX_BURN_ADDRESS = os.getenv(
@@ -106,8 +108,8 @@ CHECK_SWAPS_INTERVAL = int(os.getenv("CHECK_SWAPS_INTERVAL", "10"))
 CHECK_HOLDERS_INTERVAL = int(os.getenv("CHECK_HOLDERS_INTERVAL", "120"))
 GREETING_COOLDOWN_SECONDS = int(os.getenv("GREETING_COOLDOWN_SECONDS", "120"))
 
-RECENT_TX_COUNT = int(os.getenv("RECENT_TX_COUNT", "120"))
 SEEN_TX_FILE = os.getenv("SEEN_TX_FILE", "seen_swaps.json").strip()
+RECENT_PER_POOL = int(os.getenv("RECENT_PER_POOL", "20"))
 
 # =========================================================
 # LOGGING
@@ -116,12 +118,17 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
     level=logging.INFO,
 )
-logger = logging.getLogger("WOODY_MONITOR_PROMAX_V2")
+logger = logging.getLogger("WOODY_PROMAX_GATEWAY")
 
 # =========================================================
-# GLOBAL STATE
+# GLOBALS
 # =========================================================
-UA = {"User-Agent": "WOODY ProMax V2 Bot"}
+UA = {"User-Agent": "WOODY ProMax Gateway Bot"}
+
+PRICE_CACHE: Dict[str, Tuple[float, float]] = {}
+SEEN_TX_CACHE: Set[str] = set()
+LAST_HOLDERS_COUNT: Optional[int] = None
+PENDING_HOLDER_VALUE: Optional[int] = None
 
 GREETING_REPLIES = [
     "Hey! Welcome to WOODY 👋",
@@ -138,26 +145,29 @@ WELCOME_MESSAGES = [
 GREET = re.compile(r"\b(hi|hello|gm|salut|buna|bună|hey)\b", re.I)
 SPAM = re.compile(r"airdrop|claim|seed|100x|double", re.I)
 
-PRICE_CACHE: Dict[str, Tuple[float, float]] = {}
-SEEN_TX_CACHE: Set[str] = set()
-
-LAST_HOLDERS_COUNT: Optional[int] = None
-PENDING_HOLDER_VALUE: Optional[int] = None
-
 KNOWN_TECHNICAL_ADDRESSES = {
     XEXCHANGE_POOL_ADDRESS,
     ONEDEX_POOL_ADDRESS,
+    WOODY_USDC_POOL_ADDRESS,
     WOODY_BOBER_POOL_ADDRESS,
     WOODY_JEX_POOL_ADDRESS,
     WOODY_MEX_POOL_ADDRESS,
-    WOODY_USDC_POOL_ADDRESS,
     ONEDEX_BURN_ADDRESS,
     *ROUTER_ADDRESSES,
 }
 KNOWN_TECHNICAL_ADDRESSES = {x for x in KNOWN_TECHNICAL_ADDRESSES if x}
 
+WATCHED_POOLS = [
+    ("xExchange", XEXCHANGE_POOL_ADDRESS),
+    ("OneDex", ONEDEX_POOL_ADDRESS),
+    ("WOODY/USDC", WOODY_USDC_POOL_ADDRESS),
+    ("WOODY/BOBER", WOODY_BOBER_POOL_ADDRESS),
+    ("WOODY/JEX", WOODY_JEX_POOL_ADDRESS),
+    ("WOODY/MEX", WOODY_MEX_POOL_ADDRESS),
+]
+
 # =========================================================
-# HELPERS
+# BASIC HELPERS
 # =========================================================
 def require_token() -> None:
     if not TOKEN:
@@ -200,6 +210,12 @@ def short_wallet(addr: str) -> str:
     return f"{addr[:10]}...{addr[-8:]}"
 
 
+def symbol(token_id: str) -> str:
+    if not token_id:
+        return "?"
+    return token_id.split("-")[0]
+
+
 def file_exists(path: str) -> bool:
     if not path:
         return False
@@ -220,22 +236,6 @@ def get_json(url: str, params: Optional[dict] = None) -> Optional[Any]:
     except Exception as exc:
         logger.warning("GET JSON failed for %s -> %s", url, exc)
         return None
-
-
-def symbol(token_id: str) -> str:
-    if not token_id:
-        return "?"
-    return token_id.split("-")[0]
-
-
-def is_technical_address(addr: str) -> bool:
-    if not addr:
-        return False
-    if addr in KNOWN_TECHNICAL_ADDRESSES:
-        return True
-    if addr.startswith("erd1qqqqqqqqqqqqqpgq"):
-        return True
-    return False
 
 
 def load_json_file(path: str, default: Any) -> Any:
@@ -287,17 +287,80 @@ def chat_targets() -> List[str]:
     return targets
 
 
+def is_technical_address(addr: str) -> bool:
+    if not addr:
+        return False
+    if addr in KNOWN_TECHNICAL_ADDRESSES:
+        return True
+    if addr.startswith("erd1qqqqqqqqqqqqqpgq"):
+        return True
+    return False
+
+
 # =========================================================
-# RESERVES / PRICE / LIQUIDITY - PRO MAX
+# BECH32 FOR MULTIVERSX ADDRESS DECODING
+# =========================================================
+CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+
+def bech32_polymod(values):
+    generator = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3]
+    chk = 1
+    for value in values:
+        b = chk >> 25
+        chk = ((chk & 0x1FFFFFF) << 5) ^ value
+        for i in range(5):
+            chk ^= generator[i] if ((b >> i) & 1) else 0
+    return chk
+
+def bech32_hrp_expand(hrp):
+    return [ord(x) >> 5 for x in hrp] + [0] + [ord(x) & 31 for x in hrp]
+
+def bech32_create_checksum(hrp, data):
+    values = bech32_hrp_expand(hrp) + data
+    polymod = bech32_polymod(values + [0, 0, 0, 0, 0, 0]) ^ 1
+    return [(polymod >> 5 * (5 - i)) & 31 for i in range(6)]
+
+def bech32_encode(hrp, data):
+    combined = data + bech32_create_checksum(hrp, data)
+    return hrp + "1" + "".join([CHARSET[d] for d in combined])
+
+def convertbits(data, frombits, tobits, pad=True):
+    acc = 0
+    bits = 0
+    ret = []
+    maxv = (1 << tobits) - 1
+    for value in data:
+        if value < 0 or (value >> frombits):
+            return None
+        acc = (acc << frombits) | value
+        bits += frombits
+        while bits >= tobits:
+            bits -= tobits
+            ret.append((acc >> bits) & maxv)
+    if pad:
+        if bits:
+            ret.append((acc << (tobits - bits)) & maxv)
+    elif bits >= frombits or ((acc << (tobits - bits)) & maxv):
+        return None
+    return ret
+
+def bytes_to_erd_address(raw: bytes) -> Optional[str]:
+    if not raw:
+        return None
+    data5 = convertbits(list(raw), 8, 5, True)
+    if data5 is None:
+        return None
+    return bech32_encode("erd", data5)
+
+# =========================================================
+# PRICE / HOLDERS / RESERVES
 # =========================================================
 def reserves(pair_address: str) -> Dict[str, float]:
     if not pair_address:
         return {}
-
-    data = get_json(f"{MVX}/accounts/{pair_address}/tokens")
+    data = get_json(f"{MVX_API}/accounts/{pair_address}/tokens")
     if not isinstance(data, list):
         return {}
-
     out: Dict[str, float] = {}
     for t in data:
         identifier = str(t.get("identifier") or "")
@@ -327,7 +390,6 @@ def egld_usd() -> float:
 def find_token_amount(pool_reserves: Dict[str, float], token_hint: str) -> float:
     if not pool_reserves or not token_hint:
         return 0.0
-
     if token_hint in pool_reserves:
         return safe_float(pool_reserves[token_hint])
 
@@ -335,7 +397,6 @@ def find_token_amount(pool_reserves: Dict[str, float], token_hint: str) -> float
     for token_id, amount in pool_reserves.items():
         if hint_upper in token_id.upper():
             return safe_float(amount)
-
     return 0.0
 
 
@@ -352,7 +413,6 @@ def quote_to_wegld(token: str) -> float:
     out = None
     if isinstance(q, dict):
         out = q.get("amountOut") or q.get("toAmount")
-
     try:
         return int(str(out)) / (10**18) if out else 0.0
     except Exception:
@@ -363,7 +423,6 @@ def get_price_from_wegld_pool(pair_address: str, source_name: str) -> Optional[D
     r = reserves(pair_address)
     woody = find_token_amount(r, WOODY)
     wegld = find_token_amount(r, WEGLD)
-
     if woody > 0 and wegld > 0:
         p_egld = wegld / woody
         p_usd = p_egld * egld_usd()
@@ -375,14 +434,12 @@ def get_price_from_wegld_pool(pair_address: str, source_name: str) -> Optional[D
             "quote_reserve": wegld,
             "quote_symbol": "WEGLD",
         }
-
     return None
 
 
 def get_price_from_usdc_pool(pair_address: str, source_name: str) -> Optional[Dict[str, Any]]:
     r = reserves(pair_address)
     woody = find_token_amount(r, WOODY)
-
     usdc_amount = 0.0
     for token_id, amount in r.items():
         if USDC_HINT.upper() in token_id.upper():
@@ -393,7 +450,6 @@ def get_price_from_usdc_pool(pair_address: str, source_name: str) -> Optional[Di
         p_usd = usdc_amount / woody
         egld_price = egld_usd()
         p_egld = p_usd / egld_price if egld_price > 0 else 0.0
-
         return {
             "price_egld": p_egld,
             "price_usd": p_usd,
@@ -402,7 +458,6 @@ def get_price_from_usdc_pool(pair_address: str, source_name: str) -> Optional[Di
             "quote_reserve": usdc_amount,
             "quote_symbol": "USDC",
         }
-
     return None
 
 
@@ -410,7 +465,6 @@ def get_price_from_other_pool(pair_address: str, quote_token: str, source_name: 
     r = reserves(pair_address)
     woody = find_token_amount(r, WOODY)
     quote_amount = find_token_amount(r, quote_token)
-
     if woody <= 0 or quote_amount <= 0:
         return None
 
@@ -440,29 +494,23 @@ def get_best_price() -> Optional[Dict[str, Any]]:
         get_price_from_other_pool(WOODY_JEX_POOL_ADDRESS, JEX, "WOODY/JEX"),
         get_price_from_other_pool(WOODY_BOBER_POOL_ADDRESS, BOBER, "WOODY/BOBER"),
     ]
-
     if ONEDEX_POOL_ADDRESS:
         candidates.append(get_price_from_wegld_pool(ONEDEX_POOL_ADDRESS, "OneDex WOODY/WEGLD"))
 
     for item in candidates:
         if item and item.get("price_egld", 0) > 0:
             return item
-
     return None
 
 
-def price_egld() -> Optional[float]:
-    best = get_best_price()
-    if not best:
+def holders() -> Optional[int]:
+    data = get_json(f"{MVX_API}/tokens/{WOODY}")
+    if not isinstance(data, dict):
         return None
-    return safe_float(best["price_egld"])
-
-
-def price_usd() -> Optional[float]:
-    best = get_best_price()
-    if not best:
+    try:
+        return int(data["accounts"])
+    except Exception:
         return None
-    return safe_float(best["price_usd"])
 
 
 def liq_wegld(pair_address: str) -> Optional[float]:
@@ -494,7 +542,6 @@ def all_liq() -> Tuple[List[str], float, float]:
         ("WOODY/JEX", liq_other(WOODY_JEX_POOL_ADDRESS, JEX)),
         ("WOODY/MEX", liq_other(WOODY_MEX_POOL_ADDRESS, MEX)),
     ]
-
     if ONEDEX_POOL_ADDRESS:
         sources.append(("WOODY/EGLD OneDex", liq_wegld(ONEDEX_POOL_ADDRESS)))
 
@@ -504,7 +551,6 @@ def all_liq() -> Tuple[List[str], float, float]:
             lines.append(f"• {name}: {value:.3f} EGLD (${value * usd:,.2f})")
         else:
             lines.append(f"• {name}: N/A")
-
     return lines, total, usd
 
 
@@ -526,7 +572,6 @@ def format_price_text() -> str:
 def format_liquidity_text() -> str:
     lines, total, usd = all_liq()
     best = get_best_price()
-
     price_line = ""
     if best:
         price_line = (
@@ -548,107 +593,197 @@ def format_holders_text(value: Optional[int]) -> str:
 
 
 # =========================================================
-# REAL TX FETCH / CLASSIFY
+# SWAP DISCOVERY VIA GATEWAY
 # =========================================================
-def fetch_recent_transactions(size: int = RECENT_TX_COUNT) -> List[dict]:
-    params = {
-        "status": "success",
-        "withOperations": "true",
-        "withScResults": "true",
-        "size": size,
-    }
-    data = get_json(f"{MVX}/transactions", params=params)
-    return data if isinstance(data, list) else []
+def gateway_address_transactions(address: str) -> List[dict]:
+    """
+    Deprecated endpoint, but used here as a workaround to discover recent tx hashes for watched pools.
+    """
+    if not address:
+        return []
+
+    data = get_json(f"{MVX_GATEWAY}/address/{address}/transactions")
+    if isinstance(data, dict):
+        txs = ((data.get("data") or {}).get("transactions") or [])
+        if isinstance(txs, list):
+            return txs[:RECENT_PER_POOL]
+    return []
 
 
-def merge_token_items(items: List[Dict[str, Any]]) -> Dict[str, float]:
-    merged: Dict[str, float] = {}
-    for item in items:
-        merged[item["token"]] = merged.get(item["token"], 0.0) + safe_float(item["amount"])
-    return merged
+def gateway_transaction_by_hash(tx_hash: str) -> Optional[dict]:
+    data = get_json(f"{MVX_GATEWAY}/transaction/{tx_hash}", {"withResults": "true"})
+    if not isinstance(data, dict):
+        return None
+    tx = (data.get("data") or {}).get("transaction")
+    return tx if isinstance(tx, dict) else None
 
 
-def looks_like_lp_token(token_id: str) -> bool:
-    token_upper = token_id.upper()
-    if "LP" in token_upper:
-        return True
-    if "WOODY" in token_upper and (
-        "WEGLD" in token_upper or "USDC" in token_upper or "BOBER" in token_upper or "JEX" in token_upper or "MEX" in token_upper
-    ):
-        return True
-    return False
+def collect_recent_hashes_from_pools() -> List[str]:
+    hashes: List[str] = []
+    seen_local: Set[str] = set()
+
+    for _, pool_address in WATCHED_POOLS:
+        for tx in gateway_address_transactions(pool_address):
+            tx_hash = str(tx.get("hash") or "")
+            if tx_hash and tx_hash not in seen_local:
+                hashes.append(tx_hash)
+                seen_local.add(tx_hash)
+
+    return hashes
 
 
-def get_sent_received_for_wallet(tx: dict, wallet: str) -> Tuple[Dict[str, float], Dict[str, float]]:
-    sent_items: List[Dict[str, Any]] = []
-    received_items: List[Dict[str, Any]] = []
+def get_all_event_sources(tx: dict) -> List[dict]:
+    sources: List[dict] = []
 
-    for op in (tx.get("operations") or []):
-        token_id = (op.get("identifier") or op.get("tokenIdentifier") or "").strip()
-        if not token_id:
+    logs = tx.get("logs") or {}
+    events = logs.get("events") or []
+    if isinstance(events, list):
+        sources.extend(events)
+
+    for scr in (tx.get("smartContractResults") or []):
+        scr_logs = (scr.get("logs") or {})
+        scr_events = scr_logs.get("events") or []
+        if isinstance(scr_events, list):
+            sources.extend(scr_events)
+
+    for scr in (tx.get("scResults") or []):
+        scr_logs = (scr.get("logs") or {})
+        scr_events = scr_logs.get("events") or []
+        if isinstance(scr_events, list):
+            sources.extend(scr_events)
+
+    return sources
+
+
+def decode_topic_b64_str(topic: Any) -> str:
+    try:
+        raw = base64.b64decode(topic)
+        return raw.decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+
+
+def decode_topic_b64_int(topic: Any) -> int:
+    try:
+        raw = base64.b64decode(topic)
+        if not raw:
+            return 0
+        return int.from_bytes(raw, byteorder="big", signed=False)
+    except Exception:
+        return 0
+
+
+def decode_topic_b64_address(topic: Any) -> Optional[str]:
+    try:
+        raw = base64.b64decode(topic)
+        return bytes_to_erd_address(raw)
+    except Exception:
+        return None
+
+
+def parse_data_field_for_outgoing_token(tx: dict) -> Tuple[Optional[str], float]:
+    """
+    Încearcă să extragă tokenul trimis de wallet din tx.data.
+    Funcționează pentru cazurile simple de ESDTTransfer.
+    """
+    data_field = tx.get("data") or ""
+    if not isinstance(data_field, str) or not data_field:
+        return None, 0.0
+
+    # format de tip ESDTTransfer@TOKENHEX@AMOUNTHEX@...
+    if data_field.startswith("ESDTTransfer@"):
+        parts = data_field.split("@")
+        if len(parts) >= 3:
+            try:
+                token_id = bytes.fromhex(parts[1]).decode("utf-8", errors="ignore")
+                amount_int = int(parts[2], 16)
+                # decimals unknown here -> fallback by token-specific guess later
+                return token_id, float(amount_int)
+            except Exception:
+                return None, 0.0
+
+    return None, 0.0
+
+
+def token_decimals_from_api(token_id: str) -> int:
+    if not token_id:
+        return 18
+    data = get_json(f"{MVX_API}/tokens/{token_id}")
+    if isinstance(data, dict):
+        return safe_int(data.get("decimals", 18))
+    return 18
+
+
+def normalize_token_raw(token_id: str, raw_amount: float) -> float:
+    decimals = token_decimals_from_api(token_id)
+    try:
+        return raw_amount / (10 ** decimals)
+    except Exception:
+        return 0.0
+
+
+def parse_transfers_for_wallet(tx: dict, wallet: str) -> Tuple[Dict[str, float], Dict[str, float]]:
+    """
+    Aggregate transfers relevant to wallet:
+    - received[token] from logs recipient == wallet
+    - sent[token] from tx.data simple ESDTTransfer or EGLD tx.value
+    """
+    received: Dict[str, float] = {}
+    sent: Dict[str, float] = {}
+
+    # native EGLD send
+    tx_value = safe_float(tx.get("value", "0"))
+    if tx_value > 0:
+        sent["EGLD"] = tx_value / (10 ** 18)
+
+    # data-field token send (simple ESDTTransfer)
+    sent_token, raw_sent_amount = parse_data_field_for_outgoing_token(tx)
+    if sent_token and raw_sent_amount > 0:
+        sent[sent_token] = sent.get(sent_token, 0.0) + normalize_token_raw(sent_token, raw_sent_amount)
+
+    # logs / scResults events -> received by wallet
+    for event in get_all_event_sources(tx):
+        identifier = event.get("identifier") or ""
+        topics = event.get("topics") or []
+
+        if identifier not in {"ESDTTransfer", "ESDTNFTTransfer"}:
+            continue
+        if len(topics) < 4:
             continue
 
-        amount = normalize_amount(op.get("value", "0"), op.get("decimals", 18))
-        sender = op.get("sender", "")
-        receiver = op.get("receiver", "")
+        token_id = decode_topic_b64_str(topics[0])
+        amount_int = decode_topic_b64_int(topics[2])
+        recipient = decode_topic_b64_address(topics[3])
 
-        if sender == wallet:
-            sent_items.append({"token": token_id, "amount": amount})
-        if receiver == wallet:
-            received_items.append({"token": token_id, "amount": amount})
-
-    return merge_token_items(sent_items), merge_token_items(received_items)
-
-
-def pick_real_wallet_candidates(tx: dict) -> List[str]:
-    counts: Dict[str, int] = {}
-
-    for addr in [tx.get("sender", ""), tx.get("receiver", "")]:
-        if addr and not is_technical_address(addr):
-            counts[addr] = counts.get(addr, 0) + 3
-
-    for op in (tx.get("operations") or []):
-        for field in ("sender", "receiver"):
-            addr = op.get(field, "")
-            if addr and not is_technical_address(addr):
-                counts[addr] = counts.get(addr, 0) + 1
-
-    ordered = sorted(counts.items(), key=lambda x: x[1], reverse=True)
-    return [addr for addr, _ in ordered]
-
-
-def get_global_non_woody_flows(tx: dict) -> Tuple[Dict[str, float], Dict[str, float]]:
-    global_sent: Dict[str, float] = {}
-    global_received: Dict[str, float] = {}
-
-    for op in (tx.get("operations") or []):
-        token_id = (op.get("identifier") or op.get("tokenIdentifier") or "").strip()
-        if not token_id or token_id == WOODY or looks_like_lp_token(token_id):
+        if not token_id or amount_int <= 0:
             continue
 
-        amount = normalize_amount(op.get("value", "0"), op.get("decimals", 18))
-        sender = op.get("sender", "")
-        receiver = op.get("receiver", "")
+        amount = normalize_token_raw(token_id, float(amount_int))
+        if recipient == wallet:
+            received[token_id] = received.get(token_id, 0.0) + amount
 
-        if sender and not is_technical_address(sender):
-            global_sent[token_id] = global_sent.get(token_id, 0.0) + amount
-
-        if receiver and not is_technical_address(receiver):
-            global_received[token_id] = global_received.get(token_id, 0.0) + amount
-
-    return global_sent, global_received
+    return sent, received
 
 
-def detect_pair_and_dex(tx: dict, quote_token: str) -> Tuple[str, str]:
+def detect_pair_and_dex_from_tx(tx: dict, quote_token: str) -> Tuple[str, str]:
     addresses = set()
 
-    for op in (tx.get("operations") or []):
-        sender = op.get("sender", "")
-        receiver = op.get("receiver", "")
-        if sender:
-            addresses.add(sender)
-        if receiver:
-            addresses.add(receiver)
+    for field in ("sender", "receiver"):
+        v = tx.get(field) or ""
+        if v:
+            addresses.add(v)
+
+    for scr in (tx.get("smartContractResults") or []):
+        for field in ("sender", "receiver"):
+            v = scr.get(field) or ""
+            if v:
+                addresses.add(v)
+
+    for scr in (tx.get("scResults") or []):
+        for field in ("sender", "receiver"):
+            v = scr.get(field) or ""
+            if v:
+                addresses.add(v)
 
     dex = "Aggregator"
     if XEXCHANGE_POOL_ADDRESS in addresses:
@@ -664,103 +799,29 @@ def detect_pair_and_dex(tx: dict, quote_token: str) -> Tuple[str, str]:
     elif WOODY_MEX_POOL_ADDRESS in addresses:
         dex = "WOODY/MEX"
 
-    pair = f"WOODY / {symbol(quote_token)}"
-    return pair, dex
-
-
-def tx_touches_known_dex(tx: dict) -> bool:
-    addresses = set()
-
-    for addr in [tx.get("sender", ""), tx.get("receiver", "")]:
-        if addr:
-            addresses.add(addr)
-
-    for op in (tx.get("operations") or []):
-        sender = op.get("sender", "")
-        receiver = op.get("receiver", "")
-        if sender:
-            addresses.add(sender)
-        if receiver:
-            addresses.add(receiver)
-
-    known = {
-        XEXCHANGE_POOL_ADDRESS,
-        ONEDEX_POOL_ADDRESS,
-        WOODY_USDC_POOL_ADDRESS,
-        WOODY_BOBER_POOL_ADDRESS,
-        WOODY_JEX_POOL_ADDRESS,
-        WOODY_MEX_POOL_ADDRESS,
-    }
-    return any(addr in known for addr in addresses)
+    return f"WOODY / {symbol(quote_token)}", dex
 
 
 def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
-    if not tx_touches_known_dex(tx):
+    wallet = str(tx.get("sender") or "").strip()
+    if not wallet or is_technical_address(wallet):
         return None
 
-    candidates = pick_real_wallet_candidates(tx)
-    if not candidates:
-        return None
+    sent, received = parse_transfers_for_wallet(tx, wallet)
 
-    global_sent_non_woody, global_received_non_woody = get_global_non_woody_flows(tx)
+    woody_received = safe_float(received.get(WOODY, 0.0))
+    woody_sent = safe_float(sent.get(WOODY, 0.0))
 
-    best_match = None
-    best_score = -1.0
+    # BUY: wallet primește WOODY, plătește alt token
+    if woody_received > 0:
+        quote_candidates = {k: v for k, v in sent.items() if k != WOODY and v > 0}
+        if not quote_candidates:
+            return None
+        quote_token, quote_amount = max(quote_candidates.items(), key=lambda x: x[1])
 
-    for wallet in candidates:
-        sent, received = get_sent_received_for_wallet(tx, wallet)
-
-        woody_sent = safe_float(sent.get(WOODY, 0.0))
-        woody_received = safe_float(received.get(WOODY, 0.0))
-
-        sent_non_woody = {
-            k: v for k, v in sent.items()
-            if k != WOODY and not looks_like_lp_token(k)
-        }
-        received_non_woody = {
-            k: v for k, v in received.items()
-            if k != WOODY and not looks_like_lp_token(k)
-        }
-
-        tx_type: Optional[str] = None
-        woody_amount = 0.0
-        quote_token = "?"
-        quote_amount = 0.0
-
-        if woody_received > 0:
-            tx_type = "BUY"
-            woody_amount = woody_received
-
-            if sent_non_woody:
-                quote_token, quote_amount = max(sent_non_woody.items(), key=lambda x: x[1])
-            elif global_sent_non_woody:
-                quote_token, quote_amount = max(global_sent_non_woody.items(), key=lambda x: x[1])
-            else:
-                tx_type = None
-
-        elif woody_sent > 0:
-            tx_type = "SELL"
-            woody_amount = woody_sent
-
-            if received_non_woody:
-                quote_token, quote_amount = max(received_non_woody.items(), key=lambda x: x[1])
-            elif global_received_non_woody:
-                quote_token, quote_amount = max(global_received_non_woody.items(), key=lambda x: x[1])
-            else:
-                tx_type = None
-
-        if not tx_type:
-            continue
-
-        if woody_amount <= 0 or quote_amount <= 0:
-            continue
-
-        pair, dex = detect_pair_and_dex(tx, quote_token)
-
-        if dex == "Aggregator" and is_technical_address(wallet):
-            continue
-
-        if USDC_HINT.upper() in quote_token.upper():
+        if quote_token == "EGLD":
+            usd_value = quote_amount * egld_usd()
+        elif USDC_HINT.upper() in quote_token.upper():
             usd_value = quote_amount
         elif quote_token == WEGLD or symbol(quote_token).upper() == "WEGLD":
             usd_value = quote_amount * egld_usd()
@@ -768,14 +829,13 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
             usd_value = quote_amount * quote_to_wegld(quote_token) * egld_usd()
 
         if usd_value < MIN_ALERT_USD:
-            continue
+            return None
 
-        score = usd_value + woody_amount
-
-        match = {
+        pair, dex = detect_pair_and_dex_from_tx(tx, quote_token)
+        return {
             "wallet": wallet,
-            "type": tx_type,
-            "woody_amount": woody_amount,
+            "type": "BUY",
+            "woody_amount": woody_received,
             "quote_token": quote_token,
             "quote_amount": quote_amount,
             "pair": pair,
@@ -783,15 +843,42 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
             "swap_usd_value": usd_value,
         }
 
-        if score > best_score:
-            best_score = score
-            best_match = match
+    # SELL: wallet trimite WOODY, primește alt token
+    if woody_sent > 0:
+        quote_candidates = {k: v for k, v in received.items() if k != WOODY and v > 0}
+        if not quote_candidates:
+            return None
+        quote_token, quote_amount = max(quote_candidates.items(), key=lambda x: x[1])
 
-    return best_match
+        if quote_token == "EGLD":
+            usd_value = quote_amount * egld_usd()
+        elif USDC_HINT.upper() in quote_token.upper():
+            usd_value = quote_amount
+        elif quote_token == WEGLD or symbol(quote_token).upper() == "WEGLD":
+            usd_value = quote_amount * egld_usd()
+        else:
+            usd_value = quote_amount * quote_to_wegld(quote_token) * egld_usd()
+
+        if usd_value < MIN_ALERT_USD:
+            return None
+
+        pair, dex = detect_pair_and_dex_from_tx(tx, quote_token)
+        return {
+            "wallet": wallet,
+            "type": "SELL",
+            "woody_amount": woody_sent,
+            "quote_token": quote_token,
+            "quote_amount": quote_amount,
+            "pair": pair,
+            "dex": dex,
+            "swap_usd_value": usd_value,
+        }
+
+    return None
 
 
 # =========================================================
-# ALERT FORMAT
+# ALERTS
 # =========================================================
 def alert_label(parsed: Dict[str, Any]) -> str:
     usd = safe_float(parsed.get("swap_usd_value", 0.0))
@@ -828,7 +915,6 @@ def choose_title(parsed: Dict[str, Any]) -> str:
 
 def choose_image(parsed: Dict[str, Any]) -> str:
     label = alert_label(parsed)
-
     if label in {"BIG BUY", "WHALE BUY", "SUPER WHALE BUY"}:
         return BIG_BUY_IMAGE
     if label in {"BIG SELL", "WHALE SELL", "SUPER WHALE SELL"}:
@@ -841,11 +927,11 @@ def choose_image(parsed: Dict[str, Any]) -> str:
 def build_swap_message(tx_hash: str, parsed: Dict[str, Any]) -> str:
     explorer = f"https://explorer.multiversx.com/transactions/{tx_hash}"
     title = choose_title(parsed)
-    current_price = price_egld()
+    best = get_best_price()
 
     price_line = ""
-    if current_price is not None:
-        price_line = f"📊 Price: {current_price:.12f} EGLD\n"
+    if best:
+        price_line = f"📊 Price: {best['price_egld']:.12f} EGLD (${best['price_usd']:.10f})\n"
 
     return (
         f"{title}\n\n"
@@ -861,7 +947,7 @@ def build_swap_message(tx_hash: str, parsed: Dict[str, Any]) -> str:
 
 
 # =========================================================
-# UI
+# TELEGRAM UI
 # =========================================================
 def kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -885,7 +971,7 @@ def kb() -> InlineKeyboardMarkup:
 
 def start_caption() -> str:
     return (
-        "🪶 *WOODY Monitor ProMax v2*\n\n"
+        "🪶 *WOODY Monitor ProMax (gateway mode)*\n\n"
         "Tracks:\n"
         "• Price\n"
         "• Liquidity view\n"
@@ -948,7 +1034,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
-        "✅ *WOODY Monitor ProMax v2 is running*\n\n"
+        "✅ *WOODY Monitor ProMax (gateway mode) is running*\n\n"
         f"Private alerts: *{'YES' if PRIVATE_CHAT_ID else 'NO'}*\n"
         f"Group alerts: *{'YES' if GROUP_CHAT_ID else 'NO'}*\n"
         f"Min alert: *${MIN_ALERT_USD}*\n"
@@ -1054,27 +1140,26 @@ async def welcome(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # =========================================================
 async def check_swaps(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
-        txs = fetch_recent_transactions()
-
-        if not txs:
-            logger.info("No recent tx fetched")
+        hashes = collect_recent_hashes_from_pools()
+        if not hashes:
+            logger.info("No recent tx hashes from pools")
             return
 
         if not context.application.bot_data.get("swaps_initialized"):
-            for tx in txs:
-                tx_hash = tx.get("txHash") or tx.get("hash")
-                if tx_hash:
-                    add_seen_tx(tx_hash)
+            for h in hashes:
+                add_seen_tx(h)
             context.application.bot_data["swaps_initialized"] = True
             logger.info("Initial tx sync completed")
             return
 
-        for tx in reversed(txs):
-            tx_hash = tx.get("txHash") or tx.get("hash")
-            if not tx_hash or has_seen_tx(tx_hash):
+        for tx_hash in reversed(hashes):
+            if has_seen_tx(tx_hash):
                 continue
 
             add_seen_tx(tx_hash)
+            tx = gateway_transaction_by_hash(tx_hash)
+            if not tx:
+                continue
 
             parsed = classify_tx(tx)
             if not parsed:
@@ -1154,7 +1239,7 @@ def main() -> None:
     app.job_queue.run_repeating(check_swaps, interval=CHECK_SWAPS_INTERVAL, first=10)
     app.job_queue.run_repeating(check_holders, interval=CHECK_HOLDERS_INTERVAL, first=20)
 
-    logger.info("WOODY Monitor ProMax v2 started...")
+    logger.info("WOODY Monitor ProMax (gateway mode) started...")
     app.run_polling(drop_pending_updates=True)
 
 
