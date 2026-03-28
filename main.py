@@ -37,7 +37,7 @@ TWITTER_URL = os.getenv("TWITTER_URL", "https://x.com/WOODY_EX").strip()
 BUY_XEXCHANGE_URL = os.getenv("BUY_XEXCHANGE_URL", "https://xexchange.com").strip()
 BUY_XOXNO_URL = os.getenv("BUY_XOXNO_URL", "https://xoxno.com").strip()
 
-# known technical addresses
+# Known technical addresses / pools
 XEXCHANGE_POOL_ADDRESS = os.getenv(
     "XEXCHANGE_POOL_ADDRESS",
     "erd1qqqqqqqqqqqqqpgqq66xk9gfr4esuhem3jru86wg5hvp33a62jps2fy57p",
@@ -74,7 +74,7 @@ ROUTER_ADDRESSES = {
     if x.strip()
 }
 
-# images
+# Images
 BANNER_IMAGE = os.getenv("BANNER_IMAGE", "banner.png").strip()
 BUY_IMAGE = os.getenv("BUY_IMAGE", "buy.png").strip()
 SELL_IMAGE = os.getenv("SELL_IMAGE", "sell.png").strip()
@@ -83,19 +83,19 @@ NEW_HOLDER_IMAGE = os.getenv("NEW_HOLDER_IMAGE", "new_holder.png").strip()
 BIG_BUY_IMAGE = os.getenv("BIG_BUY_IMAGE", "big_buy.png").strip()
 BIG_SELL_IMAGE = os.getenv("BIG_SELL_IMAGE", "big_sell.png").strip()
 
-# thresholds
+# Thresholds
 SWAP_MIN_USD = float(os.getenv("SWAP_MIN_USD", "2"))
 BIG_ALERT_USD = float(os.getenv("BIG_ALERT_USD", "10"))
 WHALE_ALERT_USD = float(os.getenv("WHALE_ALERT_USD", "100"))
 SUPER_WHALE_ALERT_USD = float(os.getenv("SUPER_WHALE_ALERT_USD", "500"))
 
-# timing
+# Timing
 CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "8"))
 HOLDERS_CHECK_INTERVAL_SECONDS = int(os.getenv("HOLDERS_CHECK_INTERVAL_SECONDS", "180"))
 GREETING_COOLDOWN_SECONDS = int(os.getenv("GREETING_COOLDOWN_SECONDS", "120"))
 TOKEN_PRICE_CACHE_TTL = int(os.getenv("TOKEN_PRICE_CACHE_TTL", "60"))
 
-# files
+# Files
 SEEN_TX_FILE = os.getenv("SEEN_TX_FILE", "seen_swaps.json").strip()
 
 # =========================================================
@@ -298,12 +298,13 @@ def looks_like_lp_token(token_id: str) -> bool:
 # =========================================================
 # FETCH TRANSACTIONS
 # =========================================================
-def fetch_recent_woody_transactions(size: int = 40) -> List[dict]:
+def fetch_recent_woody_transactions(size: int = 60) -> List[dict]:
     url = f"{MVX_API}/transactions"
     params = {
         "status": "success",
-        "token": WOODY_TOKEN_ID,
         "withOperations": "true",
+        "withScResults": "true",
+        "token": WOODY_TOKEN_ID,
         "size": size,
     }
     data = get_json(url, params=params)
@@ -326,7 +327,7 @@ def get_sent_received_for_wallet(tx: dict, wallet: str) -> Tuple[Dict[str, float
     sent_items: List[Dict[str, Any]] = []
     received_items: List[Dict[str, Any]] = []
 
-    for op in tx.get("operations", []):
+    for op in (tx.get("operations") or []):
         token_id = (op.get("identifier") or op.get("tokenIdentifier") or "").strip()
         if not token_id:
             continue
@@ -350,7 +351,7 @@ def pick_real_wallet_candidates(tx: dict) -> List[str]:
         if addr and not is_technical_address(addr):
             counts[addr] = counts.get(addr, 0) + 3
 
-    for op in tx.get("operations", []):
+    for op in (tx.get("operations") or []):
         for field in ("sender", "receiver"):
             addr = op.get(field, "")
             if addr and not is_technical_address(addr):
@@ -364,7 +365,7 @@ def get_global_non_woody_flows(tx: dict) -> Tuple[Dict[str, float], Dict[str, fl
     global_sent: Dict[str, float] = {}
     global_received: Dict[str, float] = {}
 
-    for op in tx.get("operations", []):
+    for op in (tx.get("operations") or []):
         token_id = (op.get("identifier") or op.get("tokenIdentifier") or "").strip()
         if not token_id or token_id == WOODY_TOKEN_ID or looks_like_lp_token(token_id):
             continue
@@ -384,14 +385,14 @@ def get_global_non_woody_flows(tx: dict) -> Tuple[Dict[str, float], Dict[str, fl
 
 def tx_function_name(tx: dict) -> str:
     fn = str(tx.get("function") or "").lower()
-    action_name = str(tx.get("action", {}).get("name") or "").lower()
+    action_name = str((tx.get("action") or {}).get("name") or "").lower()
     data_field = str(tx.get("data") or "").lower()
     return " | ".join(x for x in [fn, action_name, data_field] if x)
 
 
 def detect_pair_and_dex(tx: dict, quote_token: str) -> Tuple[str, str]:
     addresses = set()
-    for op in tx.get("operations", []):
+    for op in (tx.get("operations") or []):
         sender = op.get("sender", "")
         receiver = op.get("receiver", "")
         if sender:
@@ -590,7 +591,7 @@ def build_message(tx_hash: str, parsed: Dict[str, Any]) -> str:
         f"🏦 DEX: {parsed['dex']}\n\n"
         f"⬅️ Sent:\n{format_token_map(parsed['sent'])}\n\n"
         f"➡️ Received:\n{format_token_map(parsed['received'])}\n\n"
-        f"🔗 {explorer}"
+        f"🔗 Explorer: {explorer}"
     )
 
 
@@ -703,6 +704,7 @@ async def send_alert_to_targets(
                     text=caption,
                     disable_web_page_preview=True,
                 )
+            logger.info("Alert sent to %s", target)
         except Exception as exc:
             logger.warning("[ALERT ERROR] %s -> %s", target, exc)
 
@@ -723,6 +725,15 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"Min swap value: *${SWAP_MIN_USD}*"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+
+async def testalert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    caption = (
+        "🧪 WOODY TEST ALERT\n\n"
+        "If you received this, Telegram sending works correctly."
+    )
+    await send_alert_to_targets(context, BUY_IMAGE, caption)
+    await update.message.reply_text("Test alert sent.")
 
 
 async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -824,7 +835,7 @@ async def check_new_holders(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def check_swaps(context: ContextTypes.DEFAULT_TYPE) -> None:
-    txs = fetch_recent_woody_transactions(size=40)
+    txs = fetch_recent_woody_transactions(size=60)
     if not txs:
         logger.info("No WOODY tx fetched")
         return
@@ -844,21 +855,18 @@ async def check_swaps(context: ContextTypes.DEFAULT_TYPE) -> None:
     for tx in reversed(txs):
         tx_hash = tx.get("txHash") or tx.get("hash")
         if not tx_hash:
-            logger.info("Skipped tx with no hash")
             continue
 
         if has_seen_tx(tx_hash):
-            logger.info("Already seen tx: %s", tx_hash)
             continue
 
-        logger.info("NEW TX FOUND: %s", tx_hash)
         add_seen_tx(tx_hash)
+        logger.info("NEW TX FOUND: %s", tx_hash)
 
         parsed = classify_tx(tx)
         logger.info("Parsed tx %s -> %s", tx_hash, parsed)
 
         if not parsed:
-            logger.info("Parsed is None for tx %s", tx_hash)
             continue
 
         logger.info(
@@ -898,6 +906,7 @@ def main() -> None:
 
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("testalert", testalert_command))
     app.add_handler(CommandHandler("id", id_command))
     app.add_handler(CallbackQueryHandler(menu_callbacks))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, greeting_handler))
