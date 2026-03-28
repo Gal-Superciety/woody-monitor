@@ -2,7 +2,8 @@ import json
 import logging
 import os
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import requests
 from dotenv import load_dotenv
@@ -30,6 +31,7 @@ MVX_API = os.getenv("MVX_API", "https://api.multiversx.com").strip()
 
 WOODY_TOKEN_ID = os.getenv("WOODY_TOKEN_ID", "WOODY-5f9d9c").strip()
 WEGLD_TOKEN_ID = os.getenv("WEGLD_TOKEN_ID", "WEGLD-bd4d79").strip()
+USDC_TOKEN_HINT = os.getenv("USDC_TOKEN_HINT", "USDC").strip()
 
 PRICE_URL = os.getenv("PRICE_URL", "https://e-compass.io/token/WOODY-5f9d9c").strip()
 CHART_URL = os.getenv("CHART_URL", PRICE_URL).strip()
@@ -37,7 +39,6 @@ TWITTER_URL = os.getenv("TWITTER_URL", "https://x.com/WOODY_EX").strip()
 BUY_XEXCHANGE_URL = os.getenv("BUY_XEXCHANGE_URL", "https://xexchange.com").strip()
 BUY_XOXNO_URL = os.getenv("BUY_XOXNO_URL", "https://xoxno.com").strip()
 
-# Known technical addresses / pools
 XEXCHANGE_POOL_ADDRESS = os.getenv(
     "XEXCHANGE_POOL_ADDRESS",
     "erd1qqqqqqqqqqqqqpgqq66xk9gfr4esuhem3jru86wg5hvp33a62jps2fy57p",
@@ -94,6 +95,8 @@ CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "8"))
 HOLDERS_CHECK_INTERVAL_SECONDS = int(os.getenv("HOLDERS_CHECK_INTERVAL_SECONDS", "180"))
 GREETING_COOLDOWN_SECONDS = int(os.getenv("GREETING_COOLDOWN_SECONDS", "120"))
 TOKEN_PRICE_CACHE_TTL = int(os.getenv("TOKEN_PRICE_CACHE_TTL", "60"))
+POOL_CACHE_TTL = int(os.getenv("POOL_CACHE_TTL", "90"))
+HOLDERS_CACHE_TTL = int(os.getenv("HOLDERS_CACHE_TTL", "90"))
 
 # Files
 SEEN_TX_FILE = os.getenv("SEEN_TX_FILE", "seen_swaps.json").strip()
@@ -110,8 +113,9 @@ logger = logging.getLogger("WOODY_MONITOR")
 # =========================================================
 # GLOBALS
 # =========================================================
-last_known_holders = None
-pending_holder_value = None
+last_known_holders: Optional[int] = None
+pending_holder_value: Optional[int] = None
+SEEN_TX_CACHE: Set[str] = set()
 
 KNOWN_TECHNICAL_ADDRESSES = {
     XEXCHANGE_POOL_ADDRESS,
@@ -125,6 +129,8 @@ KNOWN_TECHNICAL_ADDRESSES = {
 KNOWN_TECHNICAL_ADDRESSES = {x for x in KNOWN_TECHNICAL_ADDRESSES if x}
 
 TOKEN_PRICE_CACHE: Dict[str, Dict[str, float]] = {}
+POOL_CACHE: Dict[str, Dict[str, Any]] = {}
+HOLDERS_CACHE: Dict[str, Any] = {}
 
 GREETING_REPLIES = [
     "👋 Welcome to the WOODY community!",
@@ -138,6 +144,24 @@ WELCOME_NEW_MEMBER_MESSAGES = [
     "🚀 A new WOODY has landed!\n\nWelcome to the community.",
     "👋 Welcome! WOODY Monitor is watching the ecosystem 24/7.",
 ]
+
+
+# =========================================================
+# DATA MODELS
+# =========================================================
+@dataclass
+class ParsedTx:
+    wallet: str
+    tx_type: str
+    woody_amount: float
+    quote_token: str
+    quote_amount: float
+    pair: str
+    dex: str
+    sent: Dict[str, float]
+    received: Dict[str, float]
+    swap_usd_value: float
+
 
 # =========================================================
 # BASIC HELPERS
@@ -156,6 +180,13 @@ def safe_float(value: Any) -> float:
         return float(value)
     except Exception:
         return 0.0
+
+
+def safe_int(value: Any) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return 0
 
 
 def normalize_amount(raw: Any, decimals: int) -> float:
@@ -183,6 +214,16 @@ def is_technical_address(addr: str) -> bool:
     return False
 
 
+def format_compact_number(value: float) -> str:
+    if value >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.2f}B"
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.2f}M"
+    if value >= 1_000:
+        return f"{value / 1_000:.2f}K"
+    return f"{value:.2f}"
+
+
 def get_json(url: str, params: Optional[dict] = None) -> Optional[Any]:
     try:
         response = requests.get(url, params=params, timeout=25)
@@ -204,24 +245,34 @@ def load_json_file(path: str, default: Any) -> Any:
 
 
 def save_json_file(path: str, data: Any) -> None:
+    temp_path = f"{path}.tmp"
     try:
-        with open(path, "w", encoding="utf-8") as f:
+        with open(temp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(temp_path, path)
     except Exception as exc:
         logger.warning("Could not save %s -> %s", path, exc)
 
 
+def init_seen_cache() -> None:
+    global SEEN_TX_CACHE
+    loaded = load_json_file(SEEN_TX_FILE, [])
+    if isinstance(loaded, list):
+        SEEN_TX_CACHE = set(str(x) for x in loaded if x)
+    else:
+        SEEN_TX_CACHE = set()
+
+
 def add_seen_tx(tx_hash: str) -> None:
-    seen = load_json_file(SEEN_TX_FILE, [])
-    if tx_hash not in seen:
-        seen.append(tx_hash)
-        seen = seen[-5000:]
-        save_json_file(SEEN_TX_FILE, seen)
+    global SEEN_TX_CACHE
+    if tx_hash not in SEEN_TX_CACHE:
+        SEEN_TX_CACHE.add(tx_hash)
+        recent = list(SEEN_TX_CACHE)[-5000:]
+        save_json_file(SEEN_TX_FILE, recent)
 
 
 def has_seen_tx(tx_hash: str) -> bool:
-    seen = load_json_file(SEEN_TX_FILE, [])
-    return tx_hash in seen
+    return tx_hash in SEEN_TX_CACHE
 
 
 def chat_targets() -> List[str]:
@@ -233,20 +284,40 @@ def chat_targets() -> List[str]:
     return targets
 
 
-def get_holders_count() -> Optional[int]:
+# =========================================================
+# TOKEN / HOLDERS / POOLS
+# =========================================================
+def get_woody_token_data() -> Optional[dict]:
     url = f"{MVX_API}/tokens/{WOODY_TOKEN_ID}"
     data = get_json(url)
+    if isinstance(data, dict):
+        return data
+    return None
+
+
+def get_holders_count() -> Optional[int]:
+    now_ts = time.time()
+    cached = HOLDERS_CACHE.get("holders")
+    if cached and now_ts - cached.get("ts", 0) < HOLDERS_CACHE_TTL:
+        return cached.get("value")
+
+    data = get_woody_token_data()
     if not isinstance(data, dict):
         return None
 
     accounts = data.get("accounts")
-    if isinstance(accounts, int):
-        return accounts
+    value: Optional[int] = None
 
-    try:
-        return int(accounts)
-    except Exception:
-        return None
+    if isinstance(accounts, int):
+        value = accounts
+    else:
+        try:
+            value = int(accounts)
+        except Exception:
+            value = None
+
+    HOLDERS_CACHE["holders"] = {"value": value, "ts": now_ts}
+    return value
 
 
 def get_token_usd_price(token_id: str) -> float:
@@ -276,7 +347,7 @@ def get_quote_usd_value(quote_token: str, quote_amount: float) -> float:
     if quote_amount <= 0 or not quote_token or quote_token == "?":
         return 0.0
 
-    if "USDC" in quote_token.upper():
+    if USDC_TOKEN_HINT.upper() in quote_token.upper():
         return quote_amount
 
     price = get_token_usd_price(quote_token)
@@ -290,9 +361,180 @@ def looks_like_lp_token(token_id: str) -> bool:
     token_upper = token_id.upper()
     if "LP" in token_upper:
         return True
-    if "WOODY" in token_upper and ("WEGLD" in token_upper or "USDC" in token_upper):
+    if WOODY_TOKEN_ID.split("-")[0].upper() in token_upper and (
+        "WEGLD" in token_upper or "USDC" in token_upper or "JEX" in token_upper or "BOBER" in token_upper
+    ):
         return True
     return False
+
+
+def get_account_tokens(address: str) -> List[dict]:
+    if not address:
+        return []
+
+    now_ts = time.time()
+    cached = POOL_CACHE.get(address)
+    if cached and now_ts - cached.get("ts", 0) < POOL_CACHE_TTL:
+        return cached.get("tokens", [])
+
+    url = f"{MVX_API}/accounts/{address}/tokens"
+    data = get_json(url)
+    tokens = data if isinstance(data, list) else []
+
+    POOL_CACHE[address] = {
+        "tokens": tokens,
+        "ts": now_ts,
+    }
+    return tokens
+
+
+def extract_amount_from_token_entry(entry: dict) -> float:
+    balance = entry.get("balance")
+    decimals = safe_int(entry.get("decimals"))
+    if balance is not None and decimals >= 0:
+        try:
+            return int(str(balance)) / (10 ** decimals)
+        except Exception:
+            pass
+
+    for key in ("balanceNum", "amount", "supply", "value"):
+        if entry.get(key) is not None:
+            return safe_float(entry.get(key))
+
+    return 0.0
+
+
+def find_token_amount(tokens: List[dict], token_hint: str) -> float:
+    token_hint_upper = token_hint.upper()
+    for entry in tokens:
+        identifier = str(entry.get("identifier") or entry.get("tokenIdentifier") or "").upper()
+        if token_hint_upper in identifier:
+            return extract_amount_from_token_entry(entry)
+    return 0.0
+
+
+def get_pool_snapshot(
+    name: str,
+    address: str,
+    base_token_hint: str,
+    quote_token_hint: str,
+) -> Dict[str, Any]:
+    tokens = get_account_tokens(address)
+    base_amount = find_token_amount(tokens, base_token_hint)
+    quote_amount = find_token_amount(tokens, quote_token_hint)
+
+    quote_price = 1.0 if quote_token_hint.upper() == USDC_TOKEN_HINT.upper() else get_token_usd_price(quote_token_hint)
+    quote_usd_value = quote_amount * quote_price if quote_amount > 0 else 0.0
+
+    # Pentru pool AMM clasic, totalul aproximativ în USD poate fi estimat ca 2 x partea quote
+    total_liquidity_usd = quote_usd_value * 2 if quote_usd_value > 0 else 0.0
+
+    return {
+        "name": name,
+        "address": address,
+        "base_amount": base_amount,
+        "quote_amount": quote_amount,
+        "quote_token": quote_token_hint,
+        "quote_usd_value": quote_usd_value,
+        "total_liquidity_usd": total_liquidity_usd,
+    }
+
+
+def get_all_pool_snapshots() -> List[Dict[str, Any]]:
+    pools = [
+        get_pool_snapshot("xExchange WOODY/WEGLD", XEXCHANGE_POOL_ADDRESS, WOODY_TOKEN_ID, WEGLD_TOKEN_ID),
+        get_pool_snapshot("OneDex WOODY/WEGLD", ONEDEX_POOL_ADDRESS, WOODY_TOKEN_ID, WEGLD_TOKEN_ID),
+        get_pool_snapshot("WOODY/USDC", WOODY_USDC_POOL_ADDRESS, WOODY_TOKEN_ID, USDC_TOKEN_HINT),
+    ]
+
+    if WOODY_BOBER_POOL_ADDRESS:
+        pools.append(get_pool_snapshot("WOODY/BOBER", WOODY_BOBER_POOL_ADDRESS, WOODY_TOKEN_ID, "BOBER"))
+    if WOODY_JEX_POOL_ADDRESS:
+        pools.append(get_pool_snapshot("WOODY/JEX", WOODY_JEX_POOL_ADDRESS, WOODY_TOKEN_ID, "JEX"))
+
+    return pools
+
+
+# =========================================================
+# FORMATTING
+# =========================================================
+def format_price_text() -> str:
+    data = get_woody_token_data()
+    if not data:
+        return "💰 *WOODY Price*\n\nCould not fetch price right now."
+
+    price = 0.0
+    for key in ("price", "usdPrice", "priceUsd", "priceUSD"):
+        if data.get(key) is not None:
+            price = safe_float(data.get(key))
+            break
+
+    change_24h = safe_float(
+        data.get("priceChange24hPercent")
+        or data.get("change24h")
+        or data.get("priceChange24h")
+    )
+
+    market_cap = safe_float(
+        data.get("marketCap")
+        or data.get("marketCapUsd")
+        or data.get("marketCapUSD")
+    )
+
+    supply = safe_float(
+        data.get("circulatingSupply")
+        or data.get("circulatingSupplyNum")
+        or data.get("supply")
+    )
+
+    holders = get_holders_count()
+    holders_text = str(holders) if holders is not None else "?"
+
+    return (
+        "💰 *WOODY Price*\n\n"
+        f"Price: *${price:,.10f}*\n"
+        f"24h Change: *{change_24h:+.2f}%*\n"
+        f"Market Cap: *${market_cap:,.2f}*\n"
+        f"Circulating Supply: *{format_compact_number(supply)}*\n"
+        f"Holders: *{holders_text}*"
+    )
+
+
+def format_liquidity_text() -> str:
+    pools = get_all_pool_snapshots()
+
+    lines = ["💧 *WOODY Liquidity*\n"]
+    total_usd = 0.0
+
+    for pool in pools:
+        total_usd += safe_float(pool["total_liquidity_usd"])
+        lines.append(
+            f"*{pool['name']}*\n"
+            f"WOODY: `{pool['base_amount']:,.2f}`\n"
+            f"{pool['quote_token']}: `{pool['quote_amount']:,.6f}`\n"
+            f"Est. Liquidity: `~${pool['total_liquidity_usd']:,.2f}`\n"
+        )
+
+    lines.append(f"*Estimated total liquidity:* `~${total_usd:,.2f}`\n")
+    lines.append("🔒 *OneDex burn wallet:*")
+    lines.append(f"`{ONEDEX_BURN_ADDRESS}`")
+
+    return "\n".join(lines)
+
+
+def format_holders_text(count: Optional[int]) -> str:
+    if count is None:
+        return "👥 *WOODY Holders*\n\nCould not fetch holders right now."
+    return f"👥 *WOODY Holders*\n\nCurrent holders: *{count}*"
+
+
+def format_token_map(items: Dict[str, float]) -> str:
+    if not items:
+        return "-"
+    lines = []
+    for token, amount in items.items():
+        lines.append(f"{amount:,.6f} {token}")
+    return "\n".join(lines)
 
 
 # =========================================================
@@ -314,7 +556,7 @@ def fetch_recent_woody_transactions(size: int = 60) -> List[dict]:
 
 
 # =========================================================
-# PARSING
+# PARSING HELPERS
 # =========================================================
 def merge_token_items(items: List[Dict[str, Any]]) -> Dict[str, float]:
     merged: Dict[str, float] = {}
@@ -332,7 +574,7 @@ def get_sent_received_for_wallet(tx: dict, wallet: str) -> Tuple[Dict[str, float
         if not token_id:
             continue
 
-        amount = normalize_amount(op.get("value", "0"), int(op.get("decimals", 18)))
+        amount = normalize_amount(op.get("value", "0"), safe_int(op.get("decimals", 18)))
         sender = op.get("sender", "")
         receiver = op.get("receiver", "")
 
@@ -361,6 +603,19 @@ def pick_real_wallet_candidates(tx: dict) -> List[str]:
     return [addr for addr, _ in ordered]
 
 
+def get_primary_user_wallet(tx: dict) -> Optional[str]:
+    sender = (tx.get("sender") or "").strip()
+    receiver = (tx.get("receiver") or "").strip()
+
+    if sender and not is_technical_address(sender):
+        return sender
+    if receiver and not is_technical_address(receiver):
+        return receiver
+
+    candidates = pick_real_wallet_candidates(tx)
+    return candidates[0] if candidates else None
+
+
 def get_global_non_woody_flows(tx: dict) -> Tuple[Dict[str, float], Dict[str, float]]:
     global_sent: Dict[str, float] = {}
     global_received: Dict[str, float] = {}
@@ -370,7 +625,7 @@ def get_global_non_woody_flows(tx: dict) -> Tuple[Dict[str, float], Dict[str, fl
         if not token_id or token_id == WOODY_TOKEN_ID or looks_like_lp_token(token_id):
             continue
 
-        amount = normalize_amount(op.get("value", "0"), int(op.get("decimals", 18)))
+        amount = normalize_amount(op.get("value", "0"), safe_int(op.get("decimals", 18)))
         sender = op.get("sender", "")
         receiver = op.get("receiver", "")
 
@@ -392,6 +647,7 @@ def tx_function_name(tx: dict) -> str:
 
 def detect_pair_and_dex(tx: dict, quote_token: str) -> Tuple[str, str]:
     addresses = set()
+
     for op in (tx.get("operations") or []):
         sender = op.get("sender", "")
         receiver = op.get("receiver", "")
@@ -416,15 +672,20 @@ def detect_pair_and_dex(tx: dict, quote_token: str) -> Tuple[str, str]:
     return pair, dex
 
 
-def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
+def classify_tx(tx: dict) -> Optional[ParsedTx]:
+    primary_wallet = get_primary_user_wallet(tx)
     candidates = pick_real_wallet_candidates(tx)
+
+    if primary_wallet and primary_wallet not in candidates:
+        candidates.insert(0, primary_wallet)
+
     if not candidates:
         return None
 
     global_sent_non_woody, global_received_non_woody = get_global_non_woody_flows(tx)
     fn_text = tx_function_name(tx)
 
-    best_match = None
+    best_match: Optional[ParsedTx] = None
     best_score = -1.0
 
     for wallet in candidates:
@@ -444,14 +705,17 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
 
         lp_received = any(looks_like_lp_token(token) for token in received.keys())
 
-        tx_type = None
+        tx_type: Optional[str] = None
         woody_amount = 0.0
         quote_token = "?"
         quote_amount = 0.0
 
         # LIQUIDITY
         if woody_sent > 0 and sent_non_woody and (
-            lp_received or "addliquidity" in fn_text or "multiaddliquidity" in fn_text
+            lp_received
+            or "addliquidity" in fn_text
+            or "multiaddliquidity" in fn_text
+            or "add liquidity" in fn_text
         ):
             tx_type = "LIQUIDITY"
             woody_amount = woody_sent
@@ -471,14 +735,15 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
 
         # SELL
         elif woody_sent > 0:
+            tx_type = "SELL"
+            woody_amount = woody_sent
+
             if received_non_woody:
-                tx_type = "SELL"
-                woody_amount = woody_sent
                 quote_token, quote_amount = max(received_non_woody.items(), key=lambda x: x[1])
             elif global_received_non_woody:
-                tx_type = "SELL"
-                woody_amount = woody_sent
                 quote_token, quote_amount = max(global_received_non_woody.items(), key=lambda x: x[1])
+            else:
+                tx_type = None
 
         if not tx_type or quote_amount <= 0:
             continue
@@ -494,18 +759,18 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
         elif tx_type == "SELL":
             score += 400
 
-        match = {
-            "wallet": wallet,
-            "type": tx_type,
-            "woody_amount": woody_amount,
-            "quote_token": quote_token,
-            "quote_amount": quote_amount,
-            "pair": pair,
-            "dex": dex,
-            "sent": sent,
-            "received": received,
-            "swap_usd_value": usd_value,
-        }
+        match = ParsedTx(
+            wallet=wallet,
+            tx_type=tx_type,
+            woody_amount=woody_amount,
+            quote_token=quote_token,
+            quote_amount=quote_amount,
+            pair=pair,
+            dex=dex,
+            sent=sent,
+            received=received,
+            swap_usd_value=usd_value,
+        )
 
         if score > best_score:
             best_score = score
@@ -514,13 +779,13 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
     return best_match
 
 
-def should_alert(parsed: Dict[str, Any]) -> bool:
-    return safe_float(parsed.get("swap_usd_value", 0.0)) >= SWAP_MIN_USD
+def should_alert(parsed: ParsedTx) -> bool:
+    return safe_float(parsed.swap_usd_value) >= SWAP_MIN_USD
 
 
-def alert_label(parsed: Dict[str, Any]) -> str:
-    usd = safe_float(parsed.get("swap_usd_value", 0.0))
-    tx_type = parsed.get("type", "")
+def alert_label(parsed: ParsedTx) -> str:
+    usd = safe_float(parsed.swap_usd_value)
+    tx_type = parsed.tx_type
 
     if usd >= SUPER_WHALE_ALERT_USD:
         return f"SUPER WHALE {tx_type}"
@@ -531,7 +796,7 @@ def alert_label(parsed: Dict[str, Any]) -> str:
     return tx_type
 
 
-def choose_title(parsed: Dict[str, Any]) -> str:
+def choose_title(parsed: ParsedTx) -> str:
     label = alert_label(parsed)
 
     if "LIQUIDITY" in label:
@@ -553,44 +818,34 @@ def choose_title(parsed: Dict[str, Any]) -> str:
     return "🔴 WOODY SELL ALERT"
 
 
-def choose_image(parsed: Dict[str, Any]) -> str:
+def choose_image(parsed: ParsedTx) -> str:
     label = alert_label(parsed)
-    tx_type = parsed.get("type", "")
 
-    if tx_type == "LIQUIDITY":
+    if parsed.tx_type == "LIQUIDITY":
         return LIQUIDITY_IMAGE
     if "BIG BUY" in label or "WHALE BUY" in label or "SUPER WHALE BUY" in label:
         return BIG_BUY_IMAGE if file_exists(BIG_BUY_IMAGE) else BUY_IMAGE
     if "BIG SELL" in label or "WHALE SELL" in label or "SUPER WHALE SELL" in label:
         return BIG_SELL_IMAGE if file_exists(BIG_SELL_IMAGE) else SELL_IMAGE
-    if tx_type == "BUY":
+    if parsed.tx_type == "BUY":
         return BUY_IMAGE
     return SELL_IMAGE
 
 
-def format_token_map(items: Dict[str, float]) -> str:
-    if not items:
-        return "-"
-    lines = []
-    for token, amount in items.items():
-        lines.append(f"{amount:,.6f} {token}")
-    return "\n".join(lines)
-
-
-def build_message(tx_hash: str, parsed: Dict[str, Any]) -> str:
+def build_message(tx_hash: str, parsed: ParsedTx) -> str:
     explorer = f"https://explorer.multiversx.com/transactions/{tx_hash}"
     title = choose_title(parsed)
 
     return (
         f"{title}\n\n"
-        f"👤 Wallet: {short_wallet(parsed['wallet'])}\n"
-        f"🪶 WOODY: {parsed['woody_amount']:,.2f}\n"
-        f"💵 Quote: {parsed['quote_amount']:,.6f} {parsed['quote_token']}\n"
-        f"💲 Value: ${parsed['swap_usd_value']:,.2f}\n"
-        f"💱 Pair: {parsed['pair']}\n"
-        f"🏦 DEX: {parsed['dex']}\n\n"
-        f"⬅️ Sent:\n{format_token_map(parsed['sent'])}\n\n"
-        f"➡️ Received:\n{format_token_map(parsed['received'])}\n\n"
+        f"👤 Wallet: {short_wallet(parsed.wallet)}\n"
+        f"🪶 WOODY: {parsed.woody_amount:,.2f}\n"
+        f"💵 Quote: {parsed.quote_amount:,.6f} {parsed.quote_token}\n"
+        f"💲 Value: ${parsed.swap_usd_value:,.2f}\n"
+        f"💱 Pair: {parsed.pair}\n"
+        f"🏦 DEX: {parsed.dex}\n\n"
+        f"⬅️ Sent:\n{format_token_map(parsed.sent)}\n\n"
+        f"➡️ Received:\n{format_token_map(parsed.received)}\n\n"
         f"🔗 Explorer: {explorer}"
     )
 
@@ -625,41 +880,12 @@ def start_caption() -> str:
         "Classic live tracker for the WOODY ecosystem.\n\n"
         "This bot monitors:\n"
         "• Price\n"
-        "• Liquidity status\n"
+        "• Liquidity\n"
         "• Holders\n"
         "• WOODY transactions\n"
         "• Buy / Sell / Liquidity alerts\n\n"
         "Choose an option below 👇"
     )
-
-
-def format_liquidity_text() -> str:
-    pools = [
-        f"• xExchange pool: `{XEXCHANGE_POOL_ADDRESS}`",
-        f"• OneDex pool: `{ONEDEX_POOL_ADDRESS}`",
-        f"• WOODY / USDC pool: `{WOODY_USDC_POOL_ADDRESS}`",
-    ]
-    if WOODY_BOBER_POOL_ADDRESS:
-        pools.append(f"• WOODY / BOBER pool: `{WOODY_BOBER_POOL_ADDRESS}`")
-    if WOODY_JEX_POOL_ADDRESS:
-        pools.append(f"• WOODY / JEX pool: `{WOODY_JEX_POOL_ADDRESS}`")
-
-    return "\n".join(
-        [
-            "💧 *WOODY Liquidity*",
-            "",
-            *pools,
-            "",
-            "🔒 OneDex LP burn wallet:",
-            f"`{ONEDEX_BURN_ADDRESS}`",
-        ]
-    )
-
-
-def format_holders_text(count: Optional[int]) -> str:
-    if count is None:
-        return "👥 *WOODY Holders*\n\nCould not fetch holders right now."
-    return f"👥 *WOODY Holders*\n\nCurrent holders: *{count}*"
 
 
 async def send_start_menu(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -710,7 +936,7 @@ async def send_alert_to_targets(
 
 
 # =========================================================
-# TELEGRAM HANDLERS
+# COMMAND HANDLERS
 # =========================================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await send_start_menu(update.effective_chat.id, context)
@@ -740,24 +966,69 @@ async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text(f"Chat ID: {update.effective_chat.id}")
 
 
+async def price_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📈 Chart", url=CHART_URL)],
+        [InlineKeyboardButton("🟢 Buy xExchange", url=BUY_XEXCHANGE_URL)],
+    ])
+    await update.message.reply_text(
+        format_price_text(),
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=keyboard,
+    )
+
+
+async def liquidity_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        format_liquidity_text(),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def holders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    holders = get_holders_count()
+    await update.message.reply_text(
+        format_holders_text(holders),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("📊 Open Chart", url=CHART_URL)]])
+    await update.message.reply_text(
+        "📈 *WOODY Chart*",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=keyboard,
+    )
+
+
 async def menu_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
 
     if query.data == "price":
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("📈 Open Price", url=PRICE_URL)]])
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📈 Chart", url=CHART_URL)],
+            [InlineKeyboardButton("🟢 Buy xExchange", url=BUY_XEXCHANGE_URL)],
+        ])
         await query.message.reply_text(
-            "💰 *WOODY Price*",
+            format_price_text(),
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=keyboard,
         )
 
     elif query.data == "liquidity":
-        await query.message.reply_text(format_liquidity_text(), parse_mode=ParseMode.MARKDOWN)
+        await query.message.reply_text(
+            format_liquidity_text(),
+            parse_mode=ParseMode.MARKDOWN,
+        )
 
     elif query.data == "holders":
         holders = get_holders_count()
-        await query.message.reply_text(format_holders_text(holders), parse_mode=ParseMode.MARKDOWN)
+        await query.message.reply_text(
+            format_holders_text(holders),
+            parse_mode=ParseMode.MARKDOWN,
+        )
 
     elif query.data == "chart":
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("📊 Open Chart", url=CHART_URL)]])
@@ -842,14 +1113,10 @@ async def check_swaps(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     logger.info("Fetched %s WOODY transactions", len(txs))
 
+    # Prima pornire: doar marchează că sistemul e inițializat, fără să consume tot istoric-ul.
     if not context.application.bot_data.get("swaps_initialized"):
-        logger.info("Initial sync starting...")
-        for tx in txs:
-            tx_hash = tx.get("txHash") or tx.get("hash")
-            if tx_hash:
-                add_seen_tx(tx_hash)
         context.application.bot_data["swaps_initialized"] = True
-        logger.info("Initial sync complete, old tx skipped")
+        logger.info("Initial sync complete")
         return
 
     for tx in reversed(txs):
@@ -864,27 +1131,38 @@ async def check_swaps(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.info("NEW TX FOUND: %s", tx_hash)
 
         parsed = classify_tx(tx)
-        logger.info("Parsed tx %s -> %s", tx_hash, parsed)
 
         if not parsed:
+            logger.warning("Could not classify tx %s", tx_hash)
+            logger.warning(
+                "TX sender=%s receiver=%s function=%s",
+                tx.get("sender"),
+                tx.get("receiver"),
+                tx.get("function"),
+            )
+            try:
+                ops_preview = json.dumps(tx.get("operations", []), ensure_ascii=False)[:3000]
+                logger.warning("Operations=%s", ops_preview)
+            except Exception:
+                pass
             continue
 
         logger.info(
             "TX %s -> type=%s wallet=%s woody=%.2f quote=%.6f %s usd=%.2f",
             tx_hash,
-            parsed["type"],
-            parsed["wallet"],
-            parsed["woody_amount"],
-            parsed["quote_amount"],
-            parsed["quote_token"],
-            parsed["swap_usd_value"],
+            parsed.tx_type,
+            parsed.wallet,
+            parsed.woody_amount,
+            parsed.quote_amount,
+            parsed.quote_token,
+            parsed.swap_usd_value,
         )
 
         if not should_alert(parsed):
             logger.info(
                 "TX %s skipped because value %.4f < %.2f",
                 tx_hash,
-                parsed.get("swap_usd_value", 0.0),
+                parsed.swap_usd_value,
                 SWAP_MIN_USD,
             )
             continue
@@ -901,6 +1179,7 @@ async def check_swaps(context: ContextTypes.DEFAULT_TYPE) -> None:
 # =========================================================
 def main() -> None:
     require_token()
+    init_seen_cache()
 
     app = Application.builder().token(TOKEN).build()
 
@@ -908,6 +1187,11 @@ def main() -> None:
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("testalert", testalert_command))
     app.add_handler(CommandHandler("id", id_command))
+    app.add_handler(CommandHandler("price", price_command))
+    app.add_handler(CommandHandler("liquidity", liquidity_command))
+    app.add_handler(CommandHandler("holders", holders_command))
+    app.add_handler(CommandHandler("chart", chart_command))
+
     app.add_handler(CallbackQueryHandler(menu_callbacks))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, greeting_handler))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_new_members))
