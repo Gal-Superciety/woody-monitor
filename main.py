@@ -82,33 +82,68 @@ def parse_tx(tx):
         if not tx_hash:
             return None
 
-        logs = tx.get("logs") or {}
-        events = logs.get("events") or []
+        url = f"{MVX_API}/transactions/{tx_hash}?withOperations=true"
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        data = r.json()
 
-        woody_found = False
-        wegld_found = False
-
-        for ev in events:
-            identifier = str(ev.get("identifier") or "")
-            topics = ev.get("topics") or []
-            data = str(ev.get("data") or "")
-
-            raw = f"{identifier} {' '.join(str(x) for x in topics)} {data}"
-
-            if WOODY in raw:
-                woody_found = True
-            if WEGLD in raw:
-                wegld_found = True
-
-        if not woody_found:
+        ops = data.get("operations", [])
+        if not ops:
             return None
 
-        return {
-            "tx_hash": tx_hash,
-            "is_buy_like": wegld_found and woody_found,
-        }
+        woody_in = 0
+        woody_out = 0
+        egld_in = 0
+        egld_out = 0
+
+        for op in ops:
+            token = op.get("identifier", "")
+            value = int(op.get("value", "0"))
+            sender = op.get("sender", "")
+            receiver = op.get("receiver", "")
+
+            # WOODY
+            if token == WOODY:
+                if receiver != sender:
+                    woody_in += value
+                else:
+                    woody_out += value
+
+            # EGLD / WEGLD
+            if token == WEGLD:
+                if receiver != sender:
+                    egld_in += value
+                else:
+                    egld_out += value
+
+        woody_in /= 10**18
+        woody_out /= 10**18
+        egld_in /= 10**18
+        egld_out /= 10**18
+
+        logger.info(f"DEBUG TX {tx_hash} -> WOODY in {woody_in} out {woody_out} | EGLD in {egld_in} out {egld_out}")
+
+        # 🔥 LOGICĂ SIMPLĂ ȘI CORECTĂ
+        if egld_out > 0 and woody_in > 0:
+            return {
+                "type": "BUY",
+                "egld": egld_out,
+                "woody": woody_in,
+                "tx": tx_hash
+            }
+
+        if woody_out > 0 and egld_in > 0:
+            return {
+                "type": "SELL",
+                "egld": egld_in,
+                "woody": woody_out,
+                "tx": tx_hash
+            }
+
+        return None
+
     except Exception as e:
-        logger.warning(f"parse_tx failed: {e}")
+        logger.warning(f"parse_tx error: {e}")
         return None
 
 
