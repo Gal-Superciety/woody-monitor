@@ -128,7 +128,8 @@ PRICE_CACHE: Dict[str, Tuple[float, float]] = {}
 LAST_HOLDERS_COUNT: Optional[int] = None
 PENDING_HOLDER_VALUE: Optional[int] = None
 
-PENDING_SWAPS: Dict[str, Dict[str, Any]] = {}
+# root hash -> transfer aggregate
+ROOT_STATE: Dict[str, Dict[str, Any]] = {}
 ALERTED_ROOT_HASHES: Set[str] = set()
 SEEN_TRANSFER_KEYS: Set[str] = set()
 
@@ -171,7 +172,6 @@ KNOWN_TECHNICAL_ADDRESSES = {
     *ROUTER_ADDRESSES,
 }
 KNOWN_TECHNICAL_ADDRESSES = {x for x in KNOWN_TECHNICAL_ADDRESSES if x}
-
 WATCHED_POOLS = [x for x in POOL_LABELS.keys() if x]
 
 # =========================================================
@@ -247,6 +247,10 @@ def is_technical_address(addr: str) -> bool:
     if addr.startswith("erd1qqqqqqqqqqqqqpgq"):
         return True
     return False
+
+
+def is_pool_address(addr: str) -> bool:
+    return addr in POOL_LABELS
 
 
 def chat_targets() -> List[str]:
@@ -563,11 +567,7 @@ async def send_photo_alert(context: ContextTypes.DEFAULT_TYPE, image_name: str, 
         try:
             if file_exists(image_name):
                 with open(image_path(image_name), "rb") as photo:
-                    await context.bot.send_photo(
-                        chat_id=target,
-                        photo=photo,
-                        caption=message,
-                    )
+                    await context.bot.send_photo(chat_id=target, photo=photo, caption=message)
             else:
                 await context.bot.send_message(chat_id=target, text=message, disable_web_page_preview=True)
             logger.info("Alert sent to %s", target)
@@ -580,11 +580,7 @@ async def send_photo_alert_app(app: Application, image_name: str, message: str) 
         try:
             if file_exists(image_name):
                 with open(image_path(image_name), "rb") as photo:
-                    await app.bot.send_photo(
-                        chat_id=target,
-                        photo=photo,
-                        caption=message,
-                    )
+                    await app.bot.send_photo(chat_id=target, photo=photo, caption=message)
             else:
                 await app.bot.send_message(chat_id=target, text=message, disable_web_page_preview=True)
             logger.info("WS alert sent to %s", target)
@@ -593,8 +589,19 @@ async def send_photo_alert_app(app: Application, image_name: str, message: str) 
 
 
 # =========================================================
-# SWAP STATE MACHINE
+# ROOT HASH AGGREGATION
 # =========================================================
+def cleanup_root_state() -> None:
+    now = time.time()
+    expired = [
+        root_hash
+        for root_hash, data in ROOT_STATE.items()
+        if now - safe_float(data.get("updated", now)) > PENDING_SWAP_TTL_SECONDS
+    ]
+    for root_hash in expired:
+        ROOT_STATE.pop(root_hash, None)
+
+
 def make_transfer_key(root_hash: str, sender: str, receiver: str, token: str, value: str) -> str:
     return f"{root_hash}|{sender}|{receiver}|{token}|{value}"
 
@@ -618,36 +625,100 @@ def detect_dex_from_addresses(sender: str, receiver: str) -> str:
     return "Aggregator"
 
 
-def cleanup_pending_swaps() -> None:
-    now = time.time()
-    expired = [
-        root_hash
-        for root_hash, data in PENDING_SWAPS.items()
-        if now - safe_float(data.get("updated", now)) > PENDING_SWAP_TTL_SECONDS
-    ]
-    for root_hash in expired:
-        PENDING_SWAPS.pop(root_hash, None)
+def add_leg_to_root(root_hash: str, sender: str, receiver: str, token: str, amount: float, dex: str) -> None:
+    state = ROOT_STATE.setdefault(root_hash, {"legs": [], "updated": time.time()})
+    state["updated"] = time.time()
+    state["legs"].append(
+        {
+            "sender": sender,
+            "receiver": receiver,
+            "token": token,
+            "amount": amount,
+            "dex": dex,
+        }
+    )
 
 
-def update_pending_swap(root_hash: str) -> Optional[Dict[str, Any]]:
-    data = PENDING_SWAPS.get(root_hash)
-    if not data:
+def score_wallet_candidates(root_hash: str, buy_mode: bool) -> Optional[str]:
+    state = ROOT_STATE.get(root_hash)
+    if not state:
         return None
 
-    if root_hash in ALERTED_ROOT_HASHES:
+    legs = state.get("legs", [])
+    scores: Dict[str, float] = {}
+
+    for leg in legs:
+        sender = leg["sender"]
+        receiver = leg["receiver"]
+        token = leg["token"]
+        amount = safe_float(leg["amount"])
+
+        # prefer non-tech non-pool addresses
+        if buy_mode:
+            if token == WOODY and is_pool_address(sender) and (not is_technical_address(receiver)):
+                scores[receiver] = scores.get(receiver, 0.0) + amount * 5
+            elif token != WOODY and is_pool_address(receiver) and (not is_technical_address(sender)):
+                scores[sender] = scores.get(sender, 0.0) + amount * 2
+        else:
+            if token == WOODY and is_pool_address(receiver) and (not is_technical_address(sender)):
+                scores[sender] = scores.get(sender, 0.0) + amount * 5
+            elif token != WOODY and is_pool_address(sender) and (not is_technical_address(receiver)):
+                scores[receiver] = scores.get(receiver, 0.0) + amount * 2
+
+    if not scores:
         return None
 
-    side = data.get("type")
-    wallet = data.get("wallet")
-    dex = data.get("dex")
-    woody_amount = safe_float(data.get("woody_amount", 0))
-    quote_token = data.get("quote_token")
-    quote_amount = safe_float(data.get("quote_amount", 0))
+    return max(scores.items(), key=lambda x: x[1])[0]
 
-    if not side or not wallet or not dex:
+
+def find_buy_from_root(root_hash: str) -> Optional[Dict[str, Any]]:
+    state = ROOT_STATE.get(root_hash)
+    if not state:
         return None
-    if woody_amount <= 0 or quote_amount <= 0 or not quote_token:
+
+    legs = state.get("legs", [])
+    if not legs:
         return None
+
+    # quote legs: user/router -> pool, token != WOODY
+    quote_legs = [leg for leg in legs if leg["token"] != WOODY and is_pool_address(leg["receiver"])]
+    # woody legs: pool -> user/router, token == WOODY
+    woody_legs = [leg for leg in legs if leg["token"] == WOODY and is_pool_address(leg["sender"])]
+
+    if not quote_legs or not woody_legs:
+        return None
+
+    # pick main quote token by largest total into pools
+    quote_by_token: Dict[str, float] = {}
+    for leg in quote_legs:
+        quote_by_token[leg["token"]] = quote_by_token.get(leg["token"], 0.0) + safe_float(leg["amount"])
+
+    quote_token, quote_amount = max(quote_by_token.items(), key=lambda x: x[1])
+
+    # woody total from pools
+    woody_amount = sum(safe_float(leg["amount"]) for leg in woody_legs if safe_float(leg["amount"]) > 1e-12)
+    if woody_amount <= 0:
+        return None
+
+    # wallet inference
+    wallet = score_wallet_candidates(root_hash, buy_mode=True)
+    if not wallet:
+        # fallback: try first non-tech woody receiver from pools
+        for leg in woody_legs:
+            if not is_technical_address(leg["receiver"]):
+                wallet = leg["receiver"]
+                break
+
+    if not wallet:
+        # last fallback: if only router visible, use quote sender with largest amount even if technical
+        biggest_quote_leg = max(quote_legs, key=lambda x: safe_float(x["amount"]))
+        wallet = biggest_quote_leg["sender"]
+
+    # dex inference: prefer the pool that sent most WOODY
+    dex_scores: Dict[str, float] = {}
+    for leg in woody_legs:
+        dex_scores[leg["dex"]] = dex_scores.get(leg["dex"], 0.0) + safe_float(leg["amount"])
+    dex = max(dex_scores.items(), key=lambda x: x[1])[0] if dex_scores else "Aggregator"
 
     if quote_token == "EGLD":
         usd_value = quote_amount * egld_usd()
@@ -661,11 +732,9 @@ def update_pending_swap(root_hash: str) -> Optional[Dict[str, Any]]:
     if usd_value < MIN_ALERT_USD:
         return None
 
-    ALERTED_ROOT_HASHES.add(root_hash)
-
     return {
         "wallet": wallet,
-        "type": side,
+        "type": "BUY",
         "woody_amount": woody_amount,
         "quote_token": quote_token,
         "quote_amount": quote_amount,
@@ -674,6 +743,100 @@ def update_pending_swap(root_hash: str) -> Optional[Dict[str, Any]]:
         "swap_usd_value": usd_value,
         "root_hash": root_hash,
     }
+
+
+def find_sell_from_root(root_hash: str) -> Optional[Dict[str, Any]]:
+    state = ROOT_STATE.get(root_hash)
+    if not state:
+        return None
+
+    legs = state.get("legs", [])
+    if not legs:
+        return None
+
+    # woody legs: user/router -> pool
+    woody_legs = [leg for leg in legs if leg["token"] == WOODY and is_pool_address(leg["receiver"])]
+    # quote legs: pool -> user/router, token != WOODY
+    quote_legs = [leg for leg in legs if leg["token"] != WOODY and is_pool_address(leg["sender"])]
+
+    if not quote_legs or not woody_legs:
+        return None
+
+    woody_amount = sum(safe_float(leg["amount"]) for leg in woody_legs if safe_float(leg["amount"]) > 1e-12)
+    if woody_amount <= 0:
+        return None
+
+    quote_by_token: Dict[str, float] = {}
+    for leg in quote_legs:
+        quote_by_token[leg["token"]] = quote_by_token.get(leg["token"], 0.0) + safe_float(leg["amount"])
+
+    quote_token, quote_amount = max(quote_by_token.items(), key=lambda x: x[1])
+
+    wallet = score_wallet_candidates(root_hash, buy_mode=False)
+    if not wallet:
+        for leg in quote_legs:
+            if not is_technical_address(leg["receiver"]):
+                wallet = leg["receiver"]
+                break
+
+    if not wallet:
+        biggest_woody_leg = max(woody_legs, key=lambda x: safe_float(x["amount"]))
+        wallet = biggest_woody_leg["sender"]
+
+    dex_scores: Dict[str, float] = {}
+    for leg in woody_legs:
+        dex_scores[leg["dex"]] = dex_scores.get(leg["dex"], 0.0) + safe_float(leg["amount"])
+    dex = max(dex_scores.items(), key=lambda x: x[1])[0] if dex_scores else "Aggregator"
+
+    if quote_token == "EGLD":
+        usd_value = quote_amount * egld_usd()
+    elif USDC_HINT.upper() in quote_token.upper():
+        usd_value = quote_amount
+    elif quote_token == WEGLD or symbol(quote_token).upper() == "WEGLD":
+        usd_value = quote_amount * egld_usd()
+    else:
+        usd_value = quote_amount * quote_to_wegld(quote_token) * egld_usd()
+
+    if usd_value < MIN_ALERT_USD:
+        return None
+
+    return {
+        "wallet": wallet,
+        "type": "SELL",
+        "woody_amount": woody_amount,
+        "quote_token": quote_token,
+        "quote_amount": quote_amount,
+        "pair": f"WOODY / {symbol(quote_token)}",
+        "dex": dex,
+        "swap_usd_value": usd_value,
+        "root_hash": root_hash,
+    }
+
+
+def classify_root_hash(root_hash: str) -> Optional[Dict[str, Any]]:
+    if root_hash in ALERTED_ROOT_HASHES:
+        return None
+
+    buy = find_buy_from_root(root_hash)
+    sell = find_sell_from_root(root_hash)
+
+    if buy and sell:
+        # choose stronger interpretation
+        if safe_float(buy["swap_usd_value"]) >= safe_float(sell["swap_usd_value"]):
+            ALERTED_ROOT_HASHES.add(root_hash)
+            return buy
+        ALERTED_ROOT_HASHES.add(root_hash)
+        return sell
+
+    if buy:
+        ALERTED_ROOT_HASHES.add(root_hash)
+        return buy
+
+    if sell:
+        ALERTED_ROOT_HASHES.add(root_hash)
+        return sell
+
+    return None
 
 
 def process_transfer_item(transfer: dict, item: dict) -> Optional[Dict[str, Any]]:
@@ -705,48 +868,10 @@ def process_transfer_item(transfer: dict, item: dict) -> Optional[Dict[str, Any]
         return None
     SEEN_TRANSFER_KEYS.add(transfer_key)
 
-    sender_is_pool = sender in POOL_LABELS
-    receiver_is_pool = receiver in POOL_LABELS
-    sender_is_tech = is_technical_address(sender)
-    receiver_is_tech = is_technical_address(receiver)
-
-    if not sender_is_pool and not receiver_is_pool:
-        return None
-
-    if (sender_is_tech and receiver_is_tech) and (sender_is_pool or receiver_is_pool):
-        return None
-
     dex = detect_dex_from_addresses(sender, receiver)
-    state = PENDING_SWAPS.setdefault(root_hash, {"updated": time.time(), "dex": dex})
-    state["updated"] = time.time()
-    state["dex"] = dex
+    add_leg_to_root(root_hash, sender, receiver, token, amount, dex)
 
-    if token == WOODY and sender_is_pool and not receiver_is_tech:
-        state["type"] = "BUY"
-        state["wallet"] = receiver
-        state["woody_amount"] = state.get("woody_amount", 0.0) + amount
-
-    elif token == WOODY and receiver_is_pool and not sender_is_tech:
-        state["type"] = "SELL"
-        state["wallet"] = sender
-        state["woody_amount"] = state.get("woody_amount", 0.0) + amount
-
-    elif token != WOODY and receiver_is_pool and not sender_is_tech:
-        if state.get("type") in (None, "BUY"):
-            state["type"] = "BUY"
-            state["wallet"] = sender
-            state["quote_token"] = token
-            state["quote_amount"] = state.get("quote_amount", 0.0) + amount
-
-    elif token != WOODY and sender_is_pool and not receiver_is_tech:
-        if state.get("type") in (None, "SELL"):
-            state["type"] = "SELL"
-            state["wallet"] = receiver
-            state["quote_token"] = token
-            state["quote_amount"] = state.get("quote_amount", 0.0) + amount
-
-    parsed = update_pending_swap(root_hash)
-
+    parsed = classify_root_hash(root_hash)
     if WS_DEBUG_LOG_TRANSFERS and parsed:
         logger.info("WS swap parsed successfully: %s", parsed)
 
@@ -902,7 +1027,7 @@ async def ws_connect_loop() -> None:
             async def on_custom_transfer_update(data):
                 try:
                     logger.info("customTransferUpdate raw payload received")
-                    cleanup_pending_swaps()
+                    cleanup_root_state()
 
                     transfers = extract_transfers_from_payload(data)
                     if not transfers:
