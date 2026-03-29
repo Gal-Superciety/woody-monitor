@@ -1,7 +1,6 @@
 import os
 import re
 import time
-import json
 import logging
 import asyncio
 from typing import Dict, Optional, Tuple, List, Any, Set
@@ -109,6 +108,7 @@ GREETING_COOLDOWN_SECONDS = int(os.getenv("GREETING_COOLDOWN_SECONDS", "120"))
 
 PENDING_SWAP_TTL_SECONDS = int(os.getenv("PENDING_SWAP_TTL_SECONDS", "180"))
 WS_RECONNECT_DELAY = int(os.getenv("WS_RECONNECT_DELAY", "8"))
+WS_DEBUG_LOG_TRANSFERS = os.getenv("WS_DEBUG_LOG_TRANSFERS", "0").strip() == "1"
 
 # =========================================================
 # LOGGING
@@ -128,7 +128,7 @@ PRICE_CACHE: Dict[str, Tuple[float, float]] = {}
 LAST_HOLDERS_COUNT: Optional[int] = None
 PENDING_HOLDER_VALUE: Optional[int] = None
 
-# tx root hash -> partial swap state
+# root hash -> partial swap
 PENDING_SWAPS: Dict[str, Dict[str, Any]] = {}
 ALERTED_ROOT_HASHES: Set[str] = set()
 SEEN_TRANSFER_KEYS: Set[str] = set()
@@ -188,6 +188,13 @@ def safe_float(value: Any) -> float:
         return float(value)
     except Exception:
         return 0.0
+
+
+def safe_int(value: Any) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return 0
 
 
 def d(balance: Any, decimals: Any) -> float:
@@ -595,6 +602,17 @@ def detect_dex_from_addresses(sender: str, receiver: str) -> str:
     return "Aggregator"
 
 
+def cleanup_pending_swaps() -> None:
+    now = time.time()
+    expired = [
+        root_hash
+        for root_hash, data in PENDING_SWAPS.items()
+        if now - safe_float(data.get("updated", now)) > PENDING_SWAP_TTL_SECONDS
+    ]
+    for root_hash in expired:
+        PENDING_SWAPS.pop(root_hash, None)
+
+
 def update_pending_swap(root_hash: str) -> Optional[Dict[str, Any]]:
     data = PENDING_SWAPS.get(root_hash)
     if not data:
@@ -657,6 +675,12 @@ def process_transfer_item(transfer: dict, item: dict) -> Optional[Dict[str, Any]
     decimals = safe_int(item.get("decimals", 18))
     amount = d(value, decimals)
 
+    if WS_DEBUG_LOG_TRANSFERS:
+        logger.info(
+            "WS transfer | root=%s sender=%s receiver=%s token=%s value=%s decimals=%s amount=%s",
+            root_hash, sender, receiver, token, value, decimals, amount
+        )
+
     if not token or amount <= 0:
         return None
 
@@ -670,11 +694,11 @@ def process_transfer_item(transfer: dict, item: dict) -> Optional[Dict[str, Any]
     sender_is_tech = is_technical_address(sender)
     receiver_is_tech = is_technical_address(receiver)
 
-    # interesant doar dacă una dintre părți e pool cunoscut
+    # Only interesting if one side is a known pool
     if not sender_is_pool and not receiver_is_pool:
         return None
 
-    # ignorăm pool -> pool / tech -> tech
+    # Ignore pool->pool or technical->technical flows
     if (sender_is_tech and receiver_is_tech) and (sender_is_pool or receiver_is_pool):
         return None
 
@@ -712,17 +736,6 @@ def process_transfer_item(transfer: dict, item: dict) -> Optional[Dict[str, Any]
             state["quote_amount"] = state.get("quote_amount", 0.0) + amount
 
     return update_pending_swap(root_hash)
-
-
-def cleanup_pending_swaps() -> None:
-    now = time.time()
-    expired = [
-        root_hash
-        for root_hash, data in PENDING_SWAPS.items()
-        if now - safe_float(data.get("updated", now)) > PENDING_SWAP_TTL_SECONDS
-    ]
-    for root_hash in expired:
-        PENDING_SWAPS.pop(root_hash, None)
 
 
 def alert_label(parsed: Dict[str, Any]) -> str:
@@ -815,6 +828,7 @@ async def ws_connect_loop() -> None:
                 continue
 
             logger.info("Connecting websocket to %s", endpoint)
+
             sio = socketio.AsyncClient(
                 reconnection=True,
                 reconnection_attempts=0,
@@ -827,10 +841,7 @@ async def ws_connect_loop() -> None:
             async def connect():
                 logger.info("WebSocket connected")
 
-                # 1) global WOODY transfers (preferred for token activity)
                 await sio.emit("subscribeCustomTransfers", {"token": WOODY})
-
-                # 2) each watched pool address, to catch quote legs too
                 for pool in WATCHED_POOLS:
                     await sio.emit("subscribeCustomTransfers", {"address": pool})
 
@@ -844,30 +855,49 @@ async def ws_connect_loop() -> None:
 
             @sio.on("customTransferUpdate")
             async def on_custom_transfer_update(data):
-                cleanup_pending_swaps()
+                try:
+                    cleanup_pending_swaps()
 
-                transfers = (data or {}).get("transfers") or []
-                if not isinstance(transfers, list):
-                    return
+                    transfers = (data or {}).get("transfers") or []
+                    if not isinstance(transfers, list):
+                        return
 
-                for transfer in transfers:
-                    items = get_transfers_from_action(transfer)
-                    if not items:
-                        continue
+                    if WS_DEBUG_LOG_TRANSFERS:
+                        logger.info("WS customTransferUpdate count=%s", len(transfers))
 
-                    for item in items:
-                        parsed = process_transfer_item(transfer, item)
-                        if parsed and APP_REF is not None:
-                            message = build_swap_message(parsed)
-                            await send_photo_alert(APP_REF, choose_image(parsed), message)
+                    for transfer in transfers:
+                        items = get_transfers_from_action(transfer)
+                        if not items:
+                            continue
 
-            await sio.connect(endpoint, socketio_path="/ws/subscription", transports=["websocket"])
+                        for item in items:
+                            try:
+                                parsed = process_transfer_item(transfer, item)
+                                if parsed and APP_REF is not None:
+                                    message = build_swap_message(parsed)
+                                    await send_photo_alert(APP_REF, choose_image(parsed), message)
+                            except Exception as item_exc:
+                                logger.exception("Transfer item processing error: %s", item_exc)
+                except Exception as exc:
+                    logger.exception("customTransferUpdate handler error: %s", exc)
+
+            await sio.connect(
+                endpoint,
+                socketio_path="/ws/subscription",
+                transports=["websocket"],
+                wait_timeout=20,
+            )
             await sio.wait()
 
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.warning("WebSocket loop error -> %s", exc)
+            try:
+                if WS_CLIENT:
+                    await WS_CLIENT.disconnect()
+            except Exception:
+                pass
             await asyncio.sleep(WS_RECONNECT_DELAY)
 
 
