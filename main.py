@@ -128,7 +128,6 @@ PRICE_CACHE: Dict[str, Tuple[float, float]] = {}
 LAST_HOLDERS_COUNT: Optional[int] = None
 PENDING_HOLDER_VALUE: Optional[int] = None
 
-# root hash -> partial swap
 PENDING_SWAPS: Dict[str, Dict[str, Any]] = {}
 ALERTED_ROOT_HASHES: Set[str] = set()
 SEEN_TRANSFER_KEYS: Set[str] = set()
@@ -576,6 +575,23 @@ async def send_photo_alert(context: ContextTypes.DEFAULT_TYPE, image_name: str, 
             logger.warning("[ALERT ERROR] %s -> %s", target, exc)
 
 
+async def send_photo_alert_app(app: Application, image_name: str, message: str) -> None:
+    for target in chat_targets():
+        try:
+            if file_exists(image_name):
+                with open(image_path(image_name), "rb") as photo:
+                    await app.bot.send_photo(
+                        chat_id=target,
+                        photo=photo,
+                        caption=message,
+                    )
+            else:
+                await app.bot.send_message(chat_id=target, text=message, disable_web_page_preview=True)
+            logger.info("WS alert sent to %s", target)
+        except Exception as exc:
+            logger.warning("[WS ALERT ERROR] %s -> %s", target, exc)
+
+
 # =========================================================
 # SWAP STATE MACHINE
 # =========================================================
@@ -694,11 +710,9 @@ def process_transfer_item(transfer: dict, item: dict) -> Optional[Dict[str, Any]
     sender_is_tech = is_technical_address(sender)
     receiver_is_tech = is_technical_address(receiver)
 
-    # Only interesting if one side is a known pool
     if not sender_is_pool and not receiver_is_pool:
         return None
 
-    # Ignore pool->pool or technical->technical flows
     if (sender_is_tech and receiver_is_tech) and (sender_is_pool or receiver_is_pool):
         return None
 
@@ -707,19 +721,16 @@ def process_transfer_item(transfer: dict, item: dict) -> Optional[Dict[str, Any]
     state["updated"] = time.time()
     state["dex"] = dex
 
-    # BUY woody leg: pool -> user, token WOODY
     if token == WOODY and sender_is_pool and not receiver_is_tech:
         state["type"] = "BUY"
         state["wallet"] = receiver
         state["woody_amount"] = state.get("woody_amount", 0.0) + amount
 
-    # SELL woody leg: user -> pool, token WOODY
     elif token == WOODY and receiver_is_pool and not sender_is_tech:
         state["type"] = "SELL"
         state["wallet"] = sender
         state["woody_amount"] = state.get("woody_amount", 0.0) + amount
 
-    # BUY quote leg: user -> pool, token != WOODY
     elif token != WOODY and receiver_is_pool and not sender_is_tech:
         if state.get("type") in (None, "BUY"):
             state["type"] = "BUY"
@@ -727,7 +738,6 @@ def process_transfer_item(transfer: dict, item: dict) -> Optional[Dict[str, Any]
             state["quote_token"] = token
             state["quote_amount"] = state.get("quote_amount", 0.0) + amount
 
-    # SELL quote leg: pool -> user, token != WOODY
     elif token != WOODY and sender_is_pool and not receiver_is_tech:
         if state.get("type") in (None, "SELL"):
             state["type"] = "SELL"
@@ -735,7 +745,12 @@ def process_transfer_item(transfer: dict, item: dict) -> Optional[Dict[str, Any]
             state["quote_token"] = token
             state["quote_amount"] = state.get("quote_amount", 0.0) + amount
 
-    return update_pending_swap(root_hash)
+    parsed = update_pending_swap(root_hash)
+
+    if WS_DEBUG_LOG_TRANSFERS and parsed:
+        logger.info("WS swap parsed successfully: %s", parsed)
+
+    return parsed
 
 
 def alert_label(parsed: Dict[str, Any]) -> str:
@@ -817,6 +832,33 @@ async def ws_get_endpoint() -> Optional[str]:
     return None
 
 
+def extract_transfers_from_payload(data: Any) -> List[dict]:
+    if isinstance(data, dict):
+        transfers = data.get("transfers")
+        if isinstance(transfers, list):
+            return transfers
+
+        if isinstance(data.get("transfer"), dict):
+            return [data["transfer"]]
+
+        if isinstance(data.get("data"), dict):
+            inner = data["data"].get("transfers")
+            if isinstance(inner, list):
+                return inner
+
+        if "sender" in data and "receiver" in data:
+            return [data]
+
+    elif isinstance(data, list):
+        result = []
+        for item in data:
+            if isinstance(item, dict):
+                result.append(item)
+        return result
+
+    return []
+
+
 async def ws_connect_loop() -> None:
     global WS_CLIENT
     while True:
@@ -842,8 +884,11 @@ async def ws_connect_loop() -> None:
                 logger.info("WebSocket connected")
 
                 await sio.emit("subscribeCustomTransfers", {"token": WOODY})
+                logger.info("Subscribed custom transfers for token: %s", WOODY)
+
                 for pool in WATCHED_POOLS:
                     await sio.emit("subscribeCustomTransfers", {"address": pool})
+                    logger.info("Subscribed custom transfers for address: %s", pool)
 
             @sio.event
             async def disconnect():
@@ -856,18 +901,23 @@ async def ws_connect_loop() -> None:
             @sio.on("customTransferUpdate")
             async def on_custom_transfer_update(data):
                 try:
+                    logger.info("customTransferUpdate raw payload received")
                     cleanup_pending_swaps()
 
-                    transfers = (data or {}).get("transfers") or []
-                    if not isinstance(transfers, list):
+                    transfers = extract_transfers_from_payload(data)
+                    if not transfers:
+                        logger.info("customTransferUpdate payload has no usable transfers")
+                        if WS_DEBUG_LOG_TRANSFERS:
+                            logger.info("RAW PAYLOAD: %s", data)
                         return
 
-                    if WS_DEBUG_LOG_TRANSFERS:
-                        logger.info("WS customTransferUpdate count=%s", len(transfers))
+                    logger.info("customTransferUpdate transfers count=%s", len(transfers))
 
                     for transfer in transfers:
                         items = get_transfers_from_action(transfer)
                         if not items:
+                            if WS_DEBUG_LOG_TRANSFERS:
+                                logger.info("Transfer without action.arguments.transfers: %s", transfer)
                             continue
 
                         for item in items:
@@ -875,7 +925,7 @@ async def ws_connect_loop() -> None:
                                 parsed = process_transfer_item(transfer, item)
                                 if parsed and APP_REF is not None:
                                     message = build_swap_message(parsed)
-                                    await send_photo_alert(APP_REF, choose_image(parsed), message)
+                                    await send_photo_alert_app(APP_REF, choose_image(parsed), message)
                             except Exception as item_exc:
                                 logger.exception("Transfer item processing error: %s", item_exc)
                 except Exception as exc:
