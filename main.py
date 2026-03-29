@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-CHAT_ID = int(os.getenv("TELEGRAM_GROUP_CHAT_ID"))
+CHAT_ID = int(os.getenv("TELEGRAM_PRIVATE_CHAT_ID"))
 
 WOODY_TOKEN = "WOODY-5f9d9c"
 
