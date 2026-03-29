@@ -98,21 +98,20 @@ BIG_BUY_IMAGE = os.getenv("BIG_BUY_IMAGE", "big_buy.png").strip()
 BIG_SELL_IMAGE = os.getenv("BIG_SELL_IMAGE", "big_sell.png").strip()
 NEW_HOLDER_IMAGE = os.getenv("NEW_HOLDER_IMAGE", "new_holder.png").strip()
 
+# praguri
 MIN_ALERT_USD = float(os.getenv("MIN_ALERT_USD", "2"))
 BIG_ALERT_USD = float(os.getenv("BIG_ALERT_USD", "10"))
 WHALE_ALERT_USD = float(os.getenv("WHALE_ALERT_USD", "100"))
 SUPER_WHALE_ALERT_USD = float(os.getenv("SUPER_WHALE_ALERT_USD", "500"))
 
+MIN_WOODY_AMOUNT = float(os.getenv("MIN_WOODY_AMOUNT", "1"))
+MIN_QUOTE_AMOUNT = float(os.getenv("MIN_QUOTE_AMOUNT", "0.0001"))
+
 CHECK_HOLDERS_INTERVAL = int(os.getenv("CHECK_HOLDERS_INTERVAL", "120"))
 GREETING_COOLDOWN_SECONDS = int(os.getenv("GREETING_COOLDOWN_SECONDS", "120"))
-
-PENDING_SWAP_TTL_SECONDS = int(os.getenv("PENDING_SWAP_TTL_SECONDS", "180"))
+ROOT_STATE_TTL_SECONDS = int(os.getenv("ROOT_STATE_TTL_SECONDS", "180"))
 WS_RECONNECT_DELAY = int(os.getenv("WS_RECONNECT_DELAY", "8"))
 WS_DEBUG_LOG_TRANSFERS = os.getenv("WS_DEBUG_LOG_TRANSFERS", "0").strip() == "1"
-
-# filtre
-MIN_WOODY_AMOUNT = float(os.getenv("MIN_WOODY_AMOUNT", "0.000001"))
-MIN_QUOTE_AMOUNT = float(os.getenv("MIN_QUOTE_AMOUNT", "0.00000001"))
 
 # =========================================================
 # LOGGING
@@ -133,8 +132,8 @@ LAST_HOLDERS_COUNT: Optional[int] = None
 PENDING_HOLDER_VALUE: Optional[int] = None
 
 ROOT_STATE: Dict[str, Dict[str, Any]] = {}
-ALERTED_ROOT_HASHES: Set[str] = set()
 SEEN_TRANSFER_KEYS: Set[str] = set()
+ALERTED_ROOT_HASHES: Set[str] = set()
 
 WS_CLIENT: Optional[socketio.AsyncClient] = None
 WS_TASK: Optional[asyncio.Task] = None
@@ -287,15 +286,14 @@ def transfer_has_liquidity_signature(transfer: dict) -> bool:
     data_field = str(transfer.get("data") or "").lower()
 
     hay = " | ".join([function_name, action_name, data_field])
-
-    liquidity_keywords = [
+    keywords = [
         "addliquidity",
         "multiaddliquidity",
         "removeliquidity",
         "add_liquidity",
         "remove_liquidity",
     ]
-    return any(keyword in hay for keyword in liquidity_keywords)
+    return any(k in hay for k in keywords)
 
 
 # =========================================================
@@ -355,19 +353,34 @@ def quote_to_wegld(token: str) -> float:
         return 1.0
 
     if USDC_HINT.upper() in token.upper():
-        usd = 1.0
         egld = egld_usd()
-        return usd / egld if egld > 0 else 0.0
+        return 1.0 / egld if egld > 0 else 0.0
 
     q = get_json(XOXNO_QUOTE_API, {"from": token, "to": WEGLD, "amountIn": str(10**18)})
     out = None
     if isinstance(q, dict):
         out = q.get("amountOut") or q.get("toAmount")
-
     try:
         return int(str(out)) / (10**18) if out else 0.0
     except Exception:
         return 0.0
+
+
+def quote_to_usd(token: str, amount: float) -> float:
+    if amount <= 0:
+        return 0.0
+
+    if token == "EGLD":
+        return amount * egld_usd()
+    if token == WEGLD or symbol(token).upper() == "WEGLD":
+        return amount * egld_usd()
+    if USDC_HINT.upper() in token.upper():
+        return amount
+
+    wegld_equiv = quote_to_wegld(token)
+    if wegld_equiv <= 0:
+        return 0.0
+    return amount * wegld_equiv * egld_usd()
 
 
 def get_price_from_wegld_pool(pair_address: str, source_name: str) -> Optional[Dict[str, Any]]:
@@ -426,8 +439,7 @@ def get_price_from_other_pool(pair_address: str, quote_token: str, source_name: 
     if quote_in_wegld <= 0:
         return None
 
-    total_quote_wegld = quote_amount * quote_in_wegld
-    p_egld = total_quote_wegld / woody
+    p_egld = (quote_amount * quote_in_wegld) / woody
     p_usd = p_egld * egld_usd()
 
     return {
@@ -625,14 +637,14 @@ async def send_photo_alert_app(app: Application, image_name: str, message: str) 
 
 
 # =========================================================
-# ROOT HASH AGGREGATION
+# ROOT HASH / WALLET-CENTRIC AGGREGATION
 # =========================================================
 def cleanup_root_state() -> None:
     now = time.time()
     expired = [
         root_hash
         for root_hash, data in ROOT_STATE.items()
-        if now - safe_float(data.get("updated", now)) > PENDING_SWAP_TTL_SECONDS
+        if now - safe_float(data.get("updated", now)) > ROOT_STATE_TTL_SECONDS
     ]
     for root_hash in expired:
         ROOT_STATE.pop(root_hash, None)
@@ -662,7 +674,14 @@ def detect_dex_from_addresses(sender: str, receiver: str) -> str:
 
 
 def add_leg_to_root(root_hash: str, sender: str, receiver: str, token: str, amount: float, dex: str) -> None:
-    state = ROOT_STATE.setdefault(root_hash, {"legs": [], "updated": time.time()})
+    state = ROOT_STATE.setdefault(
+        root_hash,
+        {
+            "legs": [],
+            "wallet_net": {},   # wallet -> token -> net
+            "updated": time.time(),
+        },
+    )
     state["updated"] = time.time()
     state["legs"].append(
         {
@@ -674,81 +693,107 @@ def add_leg_to_root(root_hash: str, sender: str, receiver: str, token: str, amou
         }
     )
 
+    # wallet-centric net in/out only for non-technical addresses
+    if not is_technical_address(sender):
+        state["wallet_net"].setdefault(sender, {})
+        state["wallet_net"][sender][token] = state["wallet_net"][sender].get(token, 0.0) - amount
 
-def score_wallet_candidates(root_hash: str, buy_mode: bool) -> Optional[str]:
+    if not is_technical_address(receiver):
+        state["wallet_net"].setdefault(receiver, {})
+        state["wallet_net"][receiver][token] = state["wallet_net"][receiver].get(token, 0.0) + amount
+
+
+def dominant_wallet_for_buy(root_hash: str) -> Optional[str]:
     state = ROOT_STATE.get(root_hash)
     if not state:
         return None
 
-    legs = state.get("legs", [])
-    scores: Dict[str, float] = {}
+    best_wallet = None
+    best_score = 0.0
+    for wallet, nets in state["wallet_net"].items():
+        woody_net = safe_float(nets.get(WOODY, 0.0))
+        quote_out_usd = 0.0
+        for token, net in nets.items():
+            if token == WOODY:
+                continue
+            if net < 0:
+                quote_out_usd += quote_to_usd(token, abs(net))
+        score = woody_net + (quote_out_usd * 1000)
+        if woody_net > MIN_WOODY_AMOUNT and quote_out_usd >= MIN_ALERT_USD and score > best_score:
+            best_score = score
+            best_wallet = wallet
+    return best_wallet
 
-    for leg in legs:
-        sender = leg["sender"]
-        receiver = leg["receiver"]
-        token = leg["token"]
-        amount = safe_float(leg["amount"])
 
-        if buy_mode:
-            if token == WOODY and is_pool_address(sender) and not is_technical_address(receiver):
-                scores[receiver] = scores.get(receiver, 0.0) + amount * 6
-            elif token != WOODY and is_pool_address(receiver) and not is_technical_address(sender):
-                scores[sender] = scores.get(sender, 0.0) + amount * 2
-        else:
-            if token == WOODY and is_pool_address(receiver) and not is_technical_address(sender):
-                scores[sender] = scores.get(sender, 0.0) + amount * 6
-            elif token != WOODY and is_pool_address(sender) and not is_technical_address(receiver):
-                scores[receiver] = scores.get(receiver, 0.0) + amount * 2
-
-    if not scores:
+def dominant_wallet_for_sell(root_hash: str) -> Optional[str]:
+    state = ROOT_STATE.get(root_hash)
+    if not state:
         return None
-    return max(scores.items(), key=lambda x: x[1])[0]
+
+    best_wallet = None
+    best_score = 0.0
+    for wallet, nets in state["wallet_net"].items():
+        woody_out = abs(min(safe_float(nets.get(WOODY, 0.0)), 0.0))
+        quote_in_usd = 0.0
+        for token, net in nets.items():
+            if token == WOODY:
+                continue
+            if net > 0:
+                quote_in_usd += quote_to_usd(token, net)
+        score = woody_out + (quote_in_usd * 1000)
+        if woody_out > MIN_WOODY_AMOUNT and quote_in_usd >= MIN_ALERT_USD and score > best_score:
+            best_score = score
+            best_wallet = wallet
+    return best_wallet
 
 
-def dominant_quote_token(legs: List[dict]) -> Optional[Tuple[str, float]]:
-    token_totals: Dict[str, float] = {}
-    for leg in legs:
-        token = leg["token"]
-        amount = safe_float(leg["amount"])
+def dominant_quote_from_wallet_nets(nets: Dict[str, float], want_positive: bool) -> Optional[Tuple[str, float]]:
+    candidates: Dict[str, float] = {}
+    for token, net in nets.items():
         if token == WOODY:
             continue
         if looks_like_lp_token(token):
             continue
+
+        amount = 0.0
+        if want_positive and net > 0:
+            amount = net
+        elif (not want_positive) and net < 0:
+            amount = abs(net)
+
         if amount <= MIN_QUOTE_AMOUNT:
             continue
-        token_totals[token] = token_totals.get(token, 0.0) + amount
+        candidates[token] = candidates.get(token, 0.0) + amount
 
-    if not token_totals:
+    if not candidates:
         return None
-    return max(token_totals.items(), key=lambda x: x[1])
+    return max(candidates.items(), key=lambda x: quote_to_usd(x[0], x[1]))
 
 
-def dominant_woody_total(legs: List[dict]) -> float:
-    total = 0.0
-    for leg in legs:
-        if leg["token"] != WOODY:
-            continue
-        if safe_float(leg["amount"]) <= MIN_WOODY_AMOUNT:
-            continue
-        total += safe_float(leg["amount"])
-    return total
+def dominant_dex_for_buy(root_hash: str) -> str:
+    state = ROOT_STATE.get(root_hash)
+    if not state:
+        return "Aggregator"
 
-
-def detect_dominant_dex(legs: List[dict], woody_from_pool_direction: bool) -> str:
     dex_scores: Dict[str, float] = {}
-    for leg in legs:
-        token = leg["token"]
-        amount = safe_float(leg["amount"])
-        sender = leg["sender"]
-        receiver = leg["receiver"]
+    for leg in state["legs"]:
+        if leg["token"] == WOODY and is_pool_address(leg["sender"]):
+            dex_scores[leg["dex"]] = dex_scores.get(leg["dex"], 0.0) + safe_float(leg["amount"])
 
-        if token != WOODY or amount <= MIN_WOODY_AMOUNT:
-            continue
+    if not dex_scores:
+        return "Aggregator"
+    return max(dex_scores.items(), key=lambda x: x[1])[0]
 
-        if woody_from_pool_direction and is_pool_address(sender):
-            dex_scores[leg["dex"]] = dex_scores.get(leg["dex"], 0.0) + amount
-        elif (not woody_from_pool_direction) and is_pool_address(receiver):
-            dex_scores[leg["dex"]] = dex_scores.get(leg["dex"], 0.0) + amount
+
+def dominant_dex_for_sell(root_hash: str) -> str:
+    state = ROOT_STATE.get(root_hash)
+    if not state:
+        return "Aggregator"
+
+    dex_scores: Dict[str, float] = {}
+    for leg in state["legs"]:
+        if leg["token"] == WOODY and is_pool_address(leg["receiver"]):
+            dex_scores[leg["dex"]] = dex_scores.get(leg["dex"], 0.0) + safe_float(leg["amount"])
 
     if not dex_scores:
         return "Aggregator"
@@ -760,61 +805,21 @@ def find_buy_from_root(root_hash: str) -> Optional[Dict[str, Any]]:
     if not state:
         return None
 
-    legs = state.get("legs", [])
-    if not legs:
-        return None
-
-    # quote in -> pool
-    quote_legs = [
-        leg for leg in legs
-        if leg["token"] != WOODY
-        and not looks_like_lp_token(leg["token"])
-        and is_pool_address(leg["receiver"])
-        and safe_float(leg["amount"]) > MIN_QUOTE_AMOUNT
-    ]
-
-    # woody out of pool
-    woody_legs = [
-        leg for leg in legs
-        if leg["token"] == WOODY
-        and is_pool_address(leg["sender"])
-        and safe_float(leg["amount"]) > MIN_WOODY_AMOUNT
-    ]
-
-    if not quote_legs or not woody_legs:
-        return None
-
-    dominant_quote = dominant_quote_token(quote_legs)
-    if not dominant_quote:
-        return None
-    quote_token, quote_amount = dominant_quote
-
-    woody_amount = dominant_woody_total(woody_legs)
-    if woody_amount <= 0:
-        return None
-
-    wallet = score_wallet_candidates(root_hash, buy_mode=True)
+    wallet = dominant_wallet_for_buy(root_hash)
     if not wallet:
-        for leg in woody_legs:
-            if not is_technical_address(leg["receiver"]):
-                wallet = leg["receiver"]
-                break
-    if not wallet:
-        # fallback router address
-        biggest_quote_leg = max(quote_legs, key=lambda x: safe_float(x["amount"]))
-        wallet = biggest_quote_leg["sender"]
+        return None
 
-    dex = detect_dominant_dex(woody_legs, woody_from_pool_direction=True)
+    nets = state["wallet_net"].get(wallet, {})
+    woody_amount = safe_float(nets.get(WOODY, 0.0))
+    if woody_amount <= MIN_WOODY_AMOUNT:
+        return None
 
-    if quote_token == "EGLD":
-        usd_value = quote_amount * egld_usd()
-    elif USDC_HINT.upper() in quote_token.upper():
-        usd_value = quote_amount
-    elif quote_token == WEGLD or symbol(quote_token).upper() == "WEGLD":
-        usd_value = quote_amount * egld_usd()
-    else:
-        usd_value = quote_amount * quote_to_wegld(quote_token) * egld_usd()
+    quote = dominant_quote_from_wallet_nets(nets, want_positive=False)
+    if not quote:
+        return None
+    quote_token, quote_amount = quote
 
+    usd_value = quote_to_usd(quote_token, quote_amount)
     if usd_value < MIN_ALERT_USD:
         return None
 
@@ -825,7 +830,7 @@ def find_buy_from_root(root_hash: str) -> Optional[Dict[str, Any]]:
         "quote_token": quote_token,
         "quote_amount": quote_amount,
         "pair": f"WOODY / {symbol(quote_token)}",
-        "dex": dex,
+        "dex": dominant_dex_for_buy(root_hash),
         "swap_usd_value": usd_value,
         "root_hash": root_hash,
     }
@@ -836,58 +841,21 @@ def find_sell_from_root(root_hash: str) -> Optional[Dict[str, Any]]:
     if not state:
         return None
 
-    legs = state.get("legs", [])
-    if not legs:
-        return None
-
-    woody_legs = [
-        leg for leg in legs
-        if leg["token"] == WOODY
-        and is_pool_address(leg["receiver"])
-        and safe_float(leg["amount"]) > MIN_WOODY_AMOUNT
-    ]
-
-    quote_legs = [
-        leg for leg in legs
-        if leg["token"] != WOODY
-        and not looks_like_lp_token(leg["token"])
-        and is_pool_address(leg["sender"])
-        and safe_float(leg["amount"]) > MIN_QUOTE_AMOUNT
-    ]
-
-    if not woody_legs or not quote_legs:
-        return None
-
-    woody_amount = dominant_woody_total(woody_legs)
-    if woody_amount <= 0:
-        return None
-
-    dominant_quote = dominant_quote_token(quote_legs)
-    if not dominant_quote:
-        return None
-    quote_token, quote_amount = dominant_quote
-
-    wallet = score_wallet_candidates(root_hash, buy_mode=False)
+    wallet = dominant_wallet_for_sell(root_hash)
     if not wallet:
-        for leg in quote_legs:
-            if not is_technical_address(leg["receiver"]):
-                wallet = leg["receiver"]
-                break
-    if not wallet:
-        biggest_woody_leg = max(woody_legs, key=lambda x: safe_float(x["amount"]))
-        wallet = biggest_woody_leg["sender"]
+        return None
 
-    dex = detect_dominant_dex(woody_legs, woody_from_pool_direction=False)
+    nets = state["wallet_net"].get(wallet, {})
+    woody_amount = abs(min(safe_float(nets.get(WOODY, 0.0)), 0.0))
+    if woody_amount <= MIN_WOODY_AMOUNT:
+        return None
 
-    if quote_token == "EGLD":
-        usd_value = quote_amount * egld_usd()
-    elif USDC_HINT.upper() in quote_token.upper():
-        usd_value = quote_amount
-    elif quote_token == WEGLD or symbol(quote_token).upper() == "WEGLD":
-        usd_value = quote_amount * egld_usd()
-    else:
-        usd_value = quote_amount * quote_to_wegld(quote_token) * egld_usd()
+    quote = dominant_quote_from_wallet_nets(nets, want_positive=True)
+    if not quote:
+        return None
+    quote_token, quote_amount = quote
 
+    usd_value = quote_to_usd(quote_token, quote_amount)
     if usd_value < MIN_ALERT_USD:
         return None
 
@@ -898,7 +866,7 @@ def find_sell_from_root(root_hash: str) -> Optional[Dict[str, Any]]:
         "quote_token": quote_token,
         "quote_amount": quote_amount,
         "pair": f"WOODY / {symbol(quote_token)}",
-        "dex": dex,
+        "dex": dominant_dex_for_sell(root_hash),
         "swap_usd_value": usd_value,
         "root_hash": root_hash,
     }
@@ -956,7 +924,7 @@ def process_transfer_item(transfer: dict, item: dict) -> Optional[Dict[str, Any]
             root_hash, sender, receiver, token, value, decimals, amount
         )
 
-    # anti-LP token
+    # anti-LP
     if looks_like_lp_token(token):
         if WS_DEBUG_LOG_TRANSFERS:
             logger.info("Ignoring LP-like token root=%s token=%s", root_hash, token)
@@ -1080,11 +1048,7 @@ def extract_transfers_from_payload(data: Any) -> List[dict]:
             return [data]
 
     elif isinstance(data, list):
-        result = []
-        for item in data:
-            if isinstance(item, dict):
-                result.append(item)
-        return result
+        return [x for x in data if isinstance(x, dict)]
 
     return []
 
