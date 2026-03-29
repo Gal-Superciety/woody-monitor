@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import json
 import logging
 import asyncio
 from typing import Dict, Optional, Tuple, List, Any, Set
@@ -27,8 +28,12 @@ load_dotenv()
 # CONFIG
 # =========================================================
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+
 PRIVATE_CHAT_ID = os.getenv("TELEGRAM_PRIVATE_CHAT_ID", "").strip()
 GROUP_CHAT_ID = os.getenv("TELEGRAM_GROUP_CHAT_ID", "").strip()
+
+ENABLE_PRIVATE_ALERTS = os.getenv("ENABLE_PRIVATE_ALERTS", "true").strip().lower() == "true"
+ENABLE_GROUP_ALERTS = os.getenv("ENABLE_GROUP_ALERTS", "false").strip().lower() == "true"
 
 MVX_API = os.getenv("MVX_API", "https://api.multiversx.com").strip()
 XOXNO_QUOTE_API = os.getenv("XOXNO_QUOTE_API", "https://swap.xoxno.com/api/v1/quote").strip()
@@ -85,6 +90,12 @@ ROUTER_ADDRESSES = {
     if x.strip()
 }
 
+EXTRA_TECHNICAL_ADDRESSES = {
+    x.strip()
+    for x in os.getenv("EXTRA_TECHNICAL_ADDRESSES", "").split(",")
+    if x.strip()
+}
+
 PRICE_URL = os.getenv("PRICE_URL", "https://e-compass.io/token/WOODY-5f9d9c").strip()
 CHART_URL = os.getenv("CHART_URL", PRICE_URL).strip()
 TWITTER_URL = os.getenv("TWITTER_URL", "https://x.com/WOODY_EX").strip()
@@ -98,20 +109,19 @@ BIG_BUY_IMAGE = os.getenv("BIG_BUY_IMAGE", "big_buy.png").strip()
 BIG_SELL_IMAGE = os.getenv("BIG_SELL_IMAGE", "big_sell.png").strip()
 NEW_HOLDER_IMAGE = os.getenv("NEW_HOLDER_IMAGE", "new_holder.png").strip()
 
-# praguri
 MIN_ALERT_USD = float(os.getenv("MIN_ALERT_USD", "2"))
 BIG_ALERT_USD = float(os.getenv("BIG_ALERT_USD", "10"))
 WHALE_ALERT_USD = float(os.getenv("WHALE_ALERT_USD", "100"))
 SUPER_WHALE_ALERT_USD = float(os.getenv("SUPER_WHALE_ALERT_USD", "500"))
 
-MIN_WOODY_AMOUNT = float(os.getenv("MIN_WOODY_AMOUNT", "1"))
-MIN_QUOTE_AMOUNT = float(os.getenv("MIN_QUOTE_AMOUNT", "0.0001"))
-
 CHECK_HOLDERS_INTERVAL = int(os.getenv("CHECK_HOLDERS_INTERVAL", "120"))
 GREETING_COOLDOWN_SECONDS = int(os.getenv("GREETING_COOLDOWN_SECONDS", "120"))
-ROOT_STATE_TTL_SECONDS = int(os.getenv("ROOT_STATE_TTL_SECONDS", "180"))
+
+ROOT_SETTLE_SECONDS = int(os.getenv("ROOT_SETTLE_SECONDS", "8"))
+ROOT_MAX_AGE_SECONDS = int(os.getenv("ROOT_MAX_AGE_SECONDS", "120"))
+MIN_TRANSFER_DUST = float(os.getenv("MIN_TRANSFER_DUST", "0.000000000001"))
+MIN_WOODY_DIRECT = float(os.getenv("MIN_WOODY_DIRECT", "0.000001"))
 WS_RECONNECT_DELAY = int(os.getenv("WS_RECONNECT_DELAY", "8"))
-WS_DEBUG_LOG_TRANSFERS = os.getenv("WS_DEBUG_LOG_TRANSFERS", "0").strip() == "1"
 
 # =========================================================
 # LOGGING
@@ -120,20 +130,20 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
     level=logging.INFO,
 )
-logger = logging.getLogger("WOODY_WS_PROMAX")
+logger = logging.getLogger("WOODY_MONITOR_FINAL")
 
 # =========================================================
 # GLOBALS
 # =========================================================
-UA = {"User-Agent": "WOODY WS ProMax Bot"}
+UA = {"User-Agent": "WOODY Monitor Final"}
 
 PRICE_CACHE: Dict[str, Tuple[float, float]] = {}
 LAST_HOLDERS_COUNT: Optional[int] = None
 PENDING_HOLDER_VALUE: Optional[int] = None
 
-ROOT_STATE: Dict[str, Dict[str, Any]] = {}
-SEEN_TRANSFER_KEYS: Set[str] = set()
-ALERTED_ROOT_HASHES: Set[str] = set()
+ROOT_EVENTS: Dict[str, Dict[str, Any]] = {}
+ROOT_ALERTED: Set[str] = set()
+SEEN_ROOT_TRANSFER_KEYS: Set[str] = set()
 
 WS_CLIENT: Optional[socketio.AsyncClient] = None
 WS_TASK: Optional[asyncio.Task] = None
@@ -163,6 +173,14 @@ POOL_LABELS = {
     WOODY_MEX_POOL_ADDRESS: "WOODY/MEX",
 }
 
+DEFAULT_EXTRA_TECH = {
+    "erd1qqqqqqqqqqqqqpgq5rf2sppxk2xu4m0pkmugw2es4gak3rgjah0sxvajva",
+    "erd1xp9gdkln4s3t8qd2pw6sr7de6dfyy33yath48m6sc9ndt9jv08yqp84mtg",
+    "erd17dr22kal8p9halkyp0xxe9kf7euyvn9j0jyr67223k8ccdtgdnuq2wfu5s",
+    "erd1qqqqqqqqqqqqqpgqcc69ts8409p3h77q5chsaqz57y6hugvc4fvs64k74v",
+    "erd1qqqqqqqqqqqqqpgqjsnxqprks7qxfwkcg2m2v9hxkrchgm9akp2segrswt",
+}
+
 KNOWN_TECHNICAL_ADDRESSES = {
     XEXCHANGE_POOL_ADDRESS,
     ONEDEX_POOL_ADDRESS,
@@ -172,12 +190,15 @@ KNOWN_TECHNICAL_ADDRESSES = {
     WOODY_MEX_POOL_ADDRESS,
     ONEDEX_BURN_ADDRESS,
     *ROUTER_ADDRESSES,
+    *DEFAULT_EXTRA_TECH,
+    *EXTRA_TECHNICAL_ADDRESSES,
 }
 KNOWN_TECHNICAL_ADDRESSES = {x for x in KNOWN_TECHNICAL_ADDRESSES if x}
+
 WATCHED_POOLS = [x for x in POOL_LABELS.keys() if x]
 
 # =========================================================
-# HELPERS
+# BASIC HELPERS
 # =========================================================
 def require_token() -> None:
     if not TOKEN:
@@ -191,11 +212,11 @@ def safe_float(value: Any) -> float:
         return 0.0
 
 
-def safe_int(value: Any) -> int:
+def safe_int(value: Any, default: int = 0) -> int:
     try:
-        return int(value)
+        return int(str(value))
     except Exception:
-        return 0
+        return default
 
 
 def d(balance: Any, decimals: Any) -> float:
@@ -251,50 +272,28 @@ def is_technical_address(addr: str) -> bool:
     return False
 
 
-def is_pool_address(addr: str) -> bool:
-    return addr in POOL_LABELS
+def is_fee_or_helper_address(addr: str) -> bool:
+    return addr in {
+        "erd1xp9gdkln4s3t8qd2pw6sr7de6dfyy33yath48m6sc9ndt9jv08yqp84mtg",
+        "erd17dr22kal8p9halkyp0xxe9kf7euyvn9j0jyr67223k8ccdtgdnuq2wfu5s",
+        "erd1qqqqqqqqqqqqqpgqjsnxqprks7qxfwkcg2m2v9hxkrchgm9akp2segrswt",
+    }
+
+
+def is_real_user(addr: str) -> bool:
+    return bool(addr) and not is_technical_address(addr) and not is_fee_or_helper_address(addr)
 
 
 def chat_targets() -> List[str]:
     targets: List[str] = []
-    if PRIVATE_CHAT_ID:
+
+    if ENABLE_PRIVATE_ALERTS and PRIVATE_CHAT_ID:
         targets.append(PRIVATE_CHAT_ID)
-    if GROUP_CHAT_ID:
+
+    if ENABLE_GROUP_ALERTS and GROUP_CHAT_ID:
         targets.append(GROUP_CHAT_ID)
+
     return targets
-
-
-def looks_like_lp_token(token_id: str) -> bool:
-    token_upper = token_id.upper()
-    if "LP" in token_upper:
-        return True
-    if "WOODY" in token_upper and (
-        "WEGLD" in token_upper
-        or "USDC" in token_upper
-        or "BOBER" in token_upper
-        or "JEX" in token_upper
-        or "MEX" in token_upper
-    ):
-        return True
-    return False
-
-
-def transfer_has_liquidity_signature(transfer: dict) -> bool:
-    function_name = str(transfer.get("function") or "").lower()
-    action = transfer.get("action") or {}
-    action_name = str(action.get("name") or "").lower()
-    data_field = str(transfer.get("data") or "").lower()
-
-    hay = " | ".join([function_name, action_name, data_field])
-    keywords = [
-        "addliquidity",
-        "multiaddliquidity",
-        "removeliquidity",
-        "add_liquidity",
-        "remove_liquidity",
-    ]
-    return any(k in hay for k in keywords)
-
 
 # =========================================================
 # PRICE / HOLDERS / LIQUIDITY
@@ -349,38 +348,42 @@ def find_token_amount(pool_reserves: Dict[str, float], token_hint: str) -> float
 
 
 def quote_to_wegld(token: str) -> float:
-    if token == WEGLD or symbol(token).upper() == "WEGLD":
+    if token == WEGLD or symbol(token).upper() in {"WEGLD", "XEGLD", "EGLD"}:
         return 1.0
 
     if USDC_HINT.upper() in token.upper():
+        usd = 1.0
         egld = egld_usd()
-        return 1.0 / egld if egld > 0 else 0.0
+        return usd / egld if egld > 0 else 0.0
 
     q = get_json(XOXNO_QUOTE_API, {"from": token, "to": WEGLD, "amountIn": str(10**18)})
     out = None
     if isinstance(q, dict):
         out = q.get("amountOut") or q.get("toAmount")
+
     try:
         return int(str(out)) / (10**18) if out else 0.0
     except Exception:
         return 0.0
 
 
-def quote_to_usd(token: str, amount: float) -> float:
+def token_to_usd(token: str, amount: float) -> float:
     if amount <= 0:
         return 0.0
 
-    if token == "EGLD":
+    token_upper = token.upper()
+
+    if token == WEGLD or symbol(token).upper() in {"WEGLD", "XEGLD", "EGLD"}:
         return amount * egld_usd()
-    if token == WEGLD or symbol(token).upper() == "WEGLD":
-        return amount * egld_usd()
-    if USDC_HINT.upper() in token.upper():
+
+    if "USDC" in token_upper:
         return amount
 
-    wegld_equiv = quote_to_wegld(token)
-    if wegld_equiv <= 0:
-        return 0.0
-    return amount * wegld_equiv * egld_usd()
+    q = quote_to_wegld(token)
+    if q > 0:
+        return amount * q * egld_usd()
+
+    return 0.0
 
 
 def get_price_from_wegld_pool(pair_address: str, source_name: str) -> Optional[Dict[str, Any]]:
@@ -416,6 +419,7 @@ def get_price_from_usdc_pool(pair_address: str, source_name: str) -> Optional[Di
         p_usd = usdc_amount / woody
         egld_price = egld_usd()
         p_egld = p_usd / egld_price if egld_price > 0 else 0.0
+
         return {
             "price_egld": p_egld,
             "price_usd": p_usd,
@@ -439,7 +443,8 @@ def get_price_from_other_pool(pair_address: str, quote_token: str, source_name: 
     if quote_in_wegld <= 0:
         return None
 
-    p_egld = (quote_amount * quote_in_wegld) / woody
+    total_quote_wegld = quote_amount * quote_in_wegld
+    p_egld = total_quote_wegld / woody
     p_usd = p_egld * egld_usd()
 
     return {
@@ -517,6 +522,7 @@ def all_liq() -> Tuple[List[str], float, float]:
             lines.append(f"• {name}: {value:.3f} EGLD (${value * usd:,.2f})")
         else:
             lines.append(f"• {name}: N/A")
+
     return lines, total, usd
 
 
@@ -538,6 +544,7 @@ def format_price_text() -> str:
 def format_liquidity_text() -> str:
     lines, total, usd = all_liq()
     best = get_best_price()
+
     price_line = ""
     if best:
         price_line = (
@@ -557,24 +564,11 @@ def format_liquidity_text() -> str:
 def format_holders_text(value: Optional[int]) -> str:
     return f"👥 *WOODY Holders*\n\nCurrent holders: *{value if value is not None else 'N/A'}*"
 
-
 # =========================================================
-# TELEGRAM ALERT HELPERS
+# TELEGRAM ALERTS
 # =========================================================
-async def send_start_menu(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
-    caption = (
-        "🪶 *WOODY Monitor WS ProMax*\n\n"
-        "Tracks:\n"
-        "• WebSocket real-time swap alerts\n"
-        "• Price\n"
-        "• Liquidity view\n"
-        "• Holders\n"
-        "• Wallet short address\n"
-        "• Quote token used\n"
-        "• DEX detection\n\n"
-        "Choose an option below 👇"
-    )
-    keyboard = InlineKeyboardMarkup([
+def kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("💰 Price", callback_data="price"),
             InlineKeyboardButton("💧 Liquidity", callback_data="liquidity"),
@@ -592,65 +586,73 @@ async def send_start_menu(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> N
         ],
     ])
 
+
+def start_caption() -> str:
+    return (
+        "🪶 *WOODY Monitor Final*\n\n"
+        "Tracks:\n"
+        "• WebSocket real-time swap alerts\n"
+        "• Price\n"
+        "• Liquidity\n"
+        "• Holders\n"
+        "• Wallet short address\n"
+        "• Quote token used\n"
+        "• DEX detection\n\n"
+        "Choose an option below 👇"
+    )
+
+
+async def send_start_menu(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
     if file_exists(BANNER_IMAGE):
         with open(image_path(BANNER_IMAGE), "rb") as photo:
             await context.bot.send_photo(
                 chat_id=chat_id,
                 photo=InputFile(photo),
-                caption=caption,
+                caption=start_caption(),
                 parse_mode=ParseMode.MARKDOWN,
-                reply_markup=keyboard,
+                reply_markup=kb(),
             )
     else:
         await context.bot.send_message(
             chat_id=chat_id,
-            text=caption,
+            text=start_caption(),
             parse_mode=ParseMode.MARKDOWN,
-            reply_markup=keyboard,
+            reply_markup=kb(),
         )
 
 
 async def send_photo_alert(context: ContextTypes.DEFAULT_TYPE, image_name: str, message: str) -> None:
-    for target in chat_targets():
+    targets = chat_targets()
+
+    if not targets:
+        logger.warning("No alert targets configured.")
+        return
+
+    for target in targets:
         try:
             if file_exists(image_name):
                 with open(image_path(image_name), "rb") as photo:
-                    await context.bot.send_photo(chat_id=target, photo=photo, caption=message)
+                    await context.bot.send_photo(
+                        chat_id=target,
+                        photo=photo,
+                        caption=message,
+                    )
             else:
-                await context.bot.send_message(chat_id=target, text=message, disable_web_page_preview=True)
+                await context.bot.send_message(
+                    chat_id=target,
+                    text=message,
+                    disable_web_page_preview=True,
+                )
+
             logger.info("Alert sent to %s", target)
+
         except Exception as exc:
             logger.warning("[ALERT ERROR] %s -> %s", target, exc)
 
-
-async def send_photo_alert_app(app: Application, image_name: str, message: str) -> None:
-    for target in chat_targets():
-        try:
-            if file_exists(image_name):
-                with open(image_path(image_name), "rb") as photo:
-                    await app.bot.send_photo(chat_id=target, photo=photo, caption=message)
-            else:
-                await app.bot.send_message(chat_id=target, text=message, disable_web_page_preview=True)
-            logger.info("WS alert sent to %s", target)
-        except Exception as exc:
-            logger.warning("[WS ALERT ERROR] %s -> %s", target, exc)
-
-
 # =========================================================
-# ROOT HASH / WALLET-CENTRIC AGGREGATION
+# PARSER NOU PE ROOT HASH
 # =========================================================
-def cleanup_root_state() -> None:
-    now = time.time()
-    expired = [
-        root_hash
-        for root_hash, data in ROOT_STATE.items()
-        if now - safe_float(data.get("updated", now)) > ROOT_STATE_TTL_SECONDS
-    ]
-    for root_hash in expired:
-        ROOT_STATE.pop(root_hash, None)
-
-
-def make_transfer_key(root_hash: str, sender: str, receiver: str, token: str, value: str) -> str:
+def make_root_transfer_key(root_hash: str, sender: str, receiver: str, token: str, value: str) -> str:
     return f"{root_hash}|{sender}|{receiver}|{token}|{value}"
 
 
@@ -665,292 +667,236 @@ def get_transfers_from_action(transfer: dict) -> List[dict]:
     return transfers if isinstance(transfers, list) else []
 
 
-def detect_dex_from_addresses(sender: str, receiver: str) -> str:
-    if sender in POOL_LABELS:
-        return POOL_LABELS[sender]
-    if receiver in POOL_LABELS:
-        return POOL_LABELS[receiver]
-    return "Aggregator"
-
-
-def add_leg_to_root(root_hash: str, sender: str, receiver: str, token: str, amount: float, dex: str) -> None:
-    state = ROOT_STATE.setdefault(
-        root_hash,
-        {
-            "legs": [],
-            "wallet_net": {},   # wallet -> token -> net
-            "updated": time.time(),
-        },
-    )
-    state["updated"] = time.time()
-    state["legs"].append(
-        {
-            "sender": sender,
-            "receiver": receiver,
-            "token": token,
-            "amount": amount,
-            "dex": dex,
-        }
-    )
-
-    # wallet-centric net in/out only for non-technical addresses
-    if not is_technical_address(sender):
-        state["wallet_net"].setdefault(sender, {})
-        state["wallet_net"][sender][token] = state["wallet_net"][sender].get(token, 0.0) - amount
-
-    if not is_technical_address(receiver):
-        state["wallet_net"].setdefault(receiver, {})
-        state["wallet_net"][receiver][token] = state["wallet_net"][receiver].get(token, 0.0) + amount
-
-
-def dominant_wallet_for_buy(root_hash: str) -> Optional[str]:
-    state = ROOT_STATE.get(root_hash)
-    if not state:
-        return None
-
-    best_wallet = None
-    best_score = 0.0
-    for wallet, nets in state["wallet_net"].items():
-        woody_net = safe_float(nets.get(WOODY, 0.0))
-        quote_out_usd = 0.0
-        for token, net in nets.items():
-            if token == WOODY:
-                continue
-            if net < 0:
-                quote_out_usd += quote_to_usd(token, abs(net))
-        score = woody_net + (quote_out_usd * 1000)
-        if woody_net > MIN_WOODY_AMOUNT and quote_out_usd >= MIN_ALERT_USD and score > best_score:
-            best_score = score
-            best_wallet = wallet
-    return best_wallet
-
-
-def dominant_wallet_for_sell(root_hash: str) -> Optional[str]:
-    state = ROOT_STATE.get(root_hash)
-    if not state:
-        return None
-
-    best_wallet = None
-    best_score = 0.0
-    for wallet, nets in state["wallet_net"].items():
-        woody_out = abs(min(safe_float(nets.get(WOODY, 0.0)), 0.0))
-        quote_in_usd = 0.0
-        for token, net in nets.items():
-            if token == WOODY:
-                continue
-            if net > 0:
-                quote_in_usd += quote_to_usd(token, net)
-        score = woody_out + (quote_in_usd * 1000)
-        if woody_out > MIN_WOODY_AMOUNT and quote_in_usd >= MIN_ALERT_USD and score > best_score:
-            best_score = score
-            best_wallet = wallet
-    return best_wallet
-
-
-def dominant_quote_from_wallet_nets(nets: Dict[str, float], want_positive: bool) -> Optional[Tuple[str, float]]:
-    candidates: Dict[str, float] = {}
-    for token, net in nets.items():
-        if token == WOODY:
-            continue
-        if looks_like_lp_token(token):
-            continue
-
-        amount = 0.0
-        if want_positive and net > 0:
-            amount = net
-        elif (not want_positive) and net < 0:
-            amount = abs(net)
-
-        if amount <= MIN_QUOTE_AMOUNT:
-            continue
-        candidates[token] = candidates.get(token, 0.0) + amount
-
-    if not candidates:
-        return None
-    return max(candidates.items(), key=lambda x: quote_to_usd(x[0], x[1]))
-
-
-def dominant_dex_for_buy(root_hash: str) -> str:
-    state = ROOT_STATE.get(root_hash)
-    if not state:
-        return "Aggregator"
-
-    dex_scores: Dict[str, float] = {}
-    for leg in state["legs"]:
-        if leg["token"] == WOODY and is_pool_address(leg["sender"]):
-            dex_scores[leg["dex"]] = dex_scores.get(leg["dex"], 0.0) + safe_float(leg["amount"])
-
-    if not dex_scores:
-        return "Aggregator"
-    return max(dex_scores.items(), key=lambda x: x[1])[0]
-
-
-def dominant_dex_for_sell(root_hash: str) -> str:
-    state = ROOT_STATE.get(root_hash)
-    if not state:
-        return "Aggregator"
-
-    dex_scores: Dict[str, float] = {}
-    for leg in state["legs"]:
-        if leg["token"] == WOODY and is_pool_address(leg["receiver"]):
-            dex_scores[leg["dex"]] = dex_scores.get(leg["dex"], 0.0) + safe_float(leg["amount"])
-
-    if not dex_scores:
-        return "Aggregator"
-    return max(dex_scores.items(), key=lambda x: x[1])[0]
-
-
-def find_buy_from_root(root_hash: str) -> Optional[Dict[str, Any]]:
-    state = ROOT_STATE.get(root_hash)
-    if not state:
-        return None
-
-    wallet = dominant_wallet_for_buy(root_hash)
-    if not wallet:
-        return None
-
-    nets = state["wallet_net"].get(wallet, {})
-    woody_amount = safe_float(nets.get(WOODY, 0.0))
-    if woody_amount <= MIN_WOODY_AMOUNT:
-        return None
-
-    quote = dominant_quote_from_wallet_nets(nets, want_positive=False)
-    if not quote:
-        return None
-    quote_token, quote_amount = quote
-
-    usd_value = quote_to_usd(quote_token, quote_amount)
-    if usd_value < MIN_ALERT_USD:
-        return None
-
-    return {
-        "wallet": wallet,
-        "type": "BUY",
-        "woody_amount": woody_amount,
-        "quote_token": quote_token,
-        "quote_amount": quote_amount,
-        "pair": f"WOODY / {symbol(quote_token)}",
-        "dex": dominant_dex_for_buy(root_hash),
-        "swap_usd_value": usd_value,
-        "root_hash": root_hash,
-    }
-
-
-def find_sell_from_root(root_hash: str) -> Optional[Dict[str, Any]]:
-    state = ROOT_STATE.get(root_hash)
-    if not state:
-        return None
-
-    wallet = dominant_wallet_for_sell(root_hash)
-    if not wallet:
-        return None
-
-    nets = state["wallet_net"].get(wallet, {})
-    woody_amount = abs(min(safe_float(nets.get(WOODY, 0.0)), 0.0))
-    if woody_amount <= MIN_WOODY_AMOUNT:
-        return None
-
-    quote = dominant_quote_from_wallet_nets(nets, want_positive=True)
-    if not quote:
-        return None
-    quote_token, quote_amount = quote
-
-    usd_value = quote_to_usd(quote_token, quote_amount)
-    if usd_value < MIN_ALERT_USD:
-        return None
-
-    return {
-        "wallet": wallet,
-        "type": "SELL",
-        "woody_amount": woody_amount,
-        "quote_token": quote_token,
-        "quote_amount": quote_amount,
-        "pair": f"WOODY / {symbol(quote_token)}",
-        "dex": dominant_dex_for_sell(root_hash),
-        "swap_usd_value": usd_value,
-        "root_hash": root_hash,
-    }
-
-
-def classify_root_hash(root_hash: str) -> Optional[Dict[str, Any]]:
-    if root_hash in ALERTED_ROOT_HASHES:
-        return None
-
-    buy = find_buy_from_root(root_hash)
-    sell = find_sell_from_root(root_hash)
-
-    if buy and sell:
-        if safe_float(buy["swap_usd_value"]) >= safe_float(sell["swap_usd_value"]):
-            ALERTED_ROOT_HASHES.add(root_hash)
-            return buy
-        ALERTED_ROOT_HASHES.add(root_hash)
-        return sell
-
-    if buy:
-        ALERTED_ROOT_HASHES.add(root_hash)
-        return buy
-
-    if sell:
-        ALERTED_ROOT_HASHES.add(root_hash)
-        return sell
-
-    return None
-
-
-def process_transfer_item(transfer: dict, item: dict) -> Optional[Dict[str, Any]]:
+def get_transfer_item_fields(transfer: dict, item: dict) -> Optional[Dict[str, Any]]:
     root_hash = get_root_hash(transfer)
     if not root_hash:
         return None
 
-    # anti-liquidity
-    if transfer_has_liquidity_signature(transfer):
-        if WS_DEBUG_LOG_TRANSFERS:
-            logger.info("Ignoring liquidity event root=%s", root_hash)
-        return None
-
     sender = str(transfer.get("sender") or "")
     receiver = str(transfer.get("receiver") or "")
-    if not sender or not receiver:
-        return None
-
     token = str(item.get("token") or "")
-    value = str(item.get("value") or "0")
-    decimals = safe_int(item.get("decimals", 18))
-    amount = d(value, decimals)
+    raw_value = str(item.get("value") or "0")
+    decimals = safe_int(item.get("decimals", 18), 18)
+    amount = d(raw_value, decimals)
 
-    if WS_DEBUG_LOG_TRANSFERS:
-        logger.info(
-            "WS transfer | root=%s sender=%s receiver=%s token=%s value=%s decimals=%s amount=%s",
-            root_hash, sender, receiver, token, value, decimals, amount
-        )
-
-    # anti-LP
-    if looks_like_lp_token(token):
-        if WS_DEBUG_LOG_TRANSFERS:
-            logger.info("Ignoring LP-like token root=%s token=%s", root_hash, token)
+    if not sender or not receiver or not token:
         return None
 
-    # anti-dust
-    if token == WOODY and amount <= MIN_WOODY_AMOUNT:
-        return None
-    if token != WOODY and amount <= MIN_QUOTE_AMOUNT:
+    if amount <= MIN_TRANSFER_DUST:
         return None
 
-    transfer_key = make_transfer_key(root_hash, sender, receiver, token, value)
-    if transfer_key in SEEN_TRANSFER_KEYS:
+    return {
+        "root": root_hash,
+        "sender": sender,
+        "receiver": receiver,
+        "token": token,
+        "raw_value": raw_value,
+        "decimals": decimals,
+        "amount": amount,
+        "ts": time.time(),
+    }
+
+
+def ingest_root_transfer(entry: Dict[str, Any]) -> None:
+    root = entry["root"]
+    transfer_key = make_root_transfer_key(
+        root,
+        entry["sender"],
+        entry["receiver"],
+        entry["token"],
+        entry["raw_value"],
+    )
+
+    if transfer_key in SEEN_ROOT_TRANSFER_KEYS:
+        return
+    SEEN_ROOT_TRANSFER_KEYS.add(transfer_key)
+
+    root_obj = ROOT_EVENTS.setdefault(
+        root,
+        {
+            "created": time.time(),
+            "updated": time.time(),
+            "items": [],
+        },
+    )
+    root_obj["updated"] = time.time()
+    root_obj["items"].append(entry)
+
+
+def choose_best_quote_item(items: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not items:
         return None
-    SEEN_TRANSFER_KEYS.add(transfer_key)
 
-    dex = detect_dex_from_addresses(sender, receiver)
-    add_leg_to_root(root_hash, sender, receiver, token, amount, dex)
+    scored = []
+    for item in items:
+        usd = token_to_usd(item["token"], item["amount"])
+        scored.append((usd, item["amount"], item))
 
-    parsed = classify_root_hash(root_hash)
-    if WS_DEBUG_LOG_TRANSFERS and parsed:
-        logger.info("WS swap parsed successfully: %s", parsed)
-
-    return parsed
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return scored[0][2] if scored else None
 
 
+def finalize_root(root_hash: str) -> Optional[Dict[str, Any]]:
+    if root_hash in ROOT_ALERTED:
+        return None
+
+    data = ROOT_EVENTS.get(root_hash)
+    if not data:
+        return None
+
+    items: List[Dict[str, Any]] = data.get("items", [])
+    if not items:
+        return None
+
+    items = [x for x in items if x["amount"] > MIN_TRANSFER_DUST]
+    if not items:
+        return None
+
+    candidates: List[Dict[str, Any]] = []
+
+    for pool_addr in WATCHED_POOLS:
+        dex_name = POOL_LABELS.get(pool_addr, "Pool")
+
+        # BUY = pool -> user (WOODY)
+        buy_woody: Dict[str, float] = {}
+        for it in items:
+            if it["token"] != WOODY:
+                continue
+            if it["sender"] != pool_addr:
+                continue
+            if not is_real_user(it["receiver"]):
+                continue
+            if it["amount"] < MIN_WOODY_DIRECT:
+                continue
+
+            wallet = it["receiver"]
+            buy_woody[wallet] = buy_woody.get(wallet, 0.0) + it["amount"]
+
+        for wallet, woody_amount in buy_woody.items():
+            quote_candidates = []
+            for it in items:
+                if it["token"] == WOODY:
+                    continue
+                if it["receiver"] != pool_addr:
+                    continue
+                if it["amount"] <= MIN_TRANSFER_DUST:
+                    continue
+                if not (is_real_user(it["sender"]) or is_technical_address(it["sender"])):
+                    continue
+                quote_candidates.append(it)
+
+            quote_item = choose_best_quote_item(quote_candidates)
+            if quote_item:
+                usd_value = token_to_usd(quote_item["token"], quote_item["amount"])
+                candidates.append({
+                    "root_hash": root_hash,
+                    "type": "BUY",
+                    "wallet": wallet,
+                    "woody_amount": woody_amount,
+                    "quote_token": quote_item["token"],
+                    "quote_amount": quote_item["amount"],
+                    "pair": f"WOODY / {symbol(quote_item['token'])}",
+                    "dex": dex_name,
+                    "swap_usd_value": usd_value,
+                    "score": usd_value if usd_value > 0 else woody_amount,
+                })
+
+        # SELL = user -> pool (WOODY)
+        sell_woody: Dict[str, float] = {}
+        for it in items:
+            if it["token"] != WOODY:
+                continue
+            if it["receiver"] != pool_addr:
+                continue
+            if not is_real_user(it["sender"]):
+                continue
+            if it["amount"] < MIN_WOODY_DIRECT:
+                continue
+
+            wallet = it["sender"]
+            sell_woody[wallet] = sell_woody.get(wallet, 0.0) + it["amount"]
+
+        for wallet, woody_amount in sell_woody.items():
+            quote_candidates = []
+            for it in items:
+                if it["token"] == WOODY:
+                    continue
+                if it["sender"] != pool_addr:
+                    continue
+                if it["amount"] <= MIN_TRANSFER_DUST:
+                    continue
+                if not (is_real_user(it["receiver"]) or is_technical_address(it["receiver"])):
+                    continue
+                quote_candidates.append(it)
+
+            quote_item = choose_best_quote_item(quote_candidates)
+            if quote_item:
+                usd_value = token_to_usd(quote_item["token"], quote_item["amount"])
+                candidates.append({
+                    "root_hash": root_hash,
+                    "type": "SELL",
+                    "wallet": wallet,
+                    "woody_amount": woody_amount,
+                    "quote_token": quote_item["token"],
+                    "quote_amount": quote_item["amount"],
+                    "pair": f"WOODY / {symbol(quote_item['token'])}",
+                    "dex": dex_name,
+                    "swap_usd_value": usd_value,
+                    "score": usd_value if usd_value > 0 else woody_amount,
+                })
+
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda x: (
+            x["score"],
+            x["woody_amount"],
+            x["quote_amount"],
+        ),
+        reverse=True,
+    )
+
+    best = candidates[0]
+    if best["swap_usd_value"] < MIN_ALERT_USD:
+        return None
+
+    ROOT_ALERTED.add(root_hash)
+    return best
+
+
+def flush_ready_roots() -> List[Dict[str, Any]]:
+    now = time.time()
+    ready_alerts: List[Dict[str, Any]] = []
+    to_delete: List[str] = []
+
+    for root_hash, data in ROOT_EVENTS.items():
+        last_update = safe_float(data.get("updated", now))
+        created = safe_float(data.get("created", now))
+
+        is_settled = (now - last_update) >= ROOT_SETTLE_SECONDS
+        is_too_old = (now - created) >= ROOT_MAX_AGE_SECONDS
+
+        if is_settled or is_too_old:
+            parsed = finalize_root(root_hash)
+            if parsed:
+                ready_alerts.append(parsed)
+            to_delete.append(root_hash)
+
+    for root_hash in to_delete:
+        ROOT_EVENTS.pop(root_hash, None)
+
+    if len(SEEN_ROOT_TRANSFER_KEYS) > 50000:
+        SEEN_ROOT_TRANSFER_KEYS.clear()
+
+    if len(ROOT_ALERTED) > 5000:
+        ROOT_ALERTED.clear()
+
+    return ready_alerts
+
+# =========================================================
+# ALERT FORMATTING
+# =========================================================
 def alert_label(parsed: Dict[str, Any]) -> str:
     usd = safe_float(parsed.get("swap_usd_value", 0.0))
     tx_type = parsed.get("type", "")
@@ -998,8 +944,8 @@ def choose_image(parsed: Dict[str, Any]) -> str:
 def build_swap_message(parsed: Dict[str, Any]) -> str:
     explorer = f"https://explorer.multiversx.com/transactions/{parsed['root_hash']}"
     title = choose_title(parsed)
-    best = get_best_price()
 
+    best = get_best_price()
     price_line = ""
     if best:
         price_line = f"📊 Price: {best['price_egld']:.12f} EGLD (${best['price_usd']:.10f})\n"
@@ -1007,15 +953,14 @@ def build_swap_message(parsed: Dict[str, Any]) -> str:
     return (
         f"{title}\n\n"
         f"👤 Wallet: {short_wallet(parsed['wallet'])}\n"
-        f"🪶 WOODY: {parsed['woody_amount']:,.2f}\n"
-        f"💵 Token: {parsed['quote_amount']:,.6f} {symbol(parsed['quote_token'])}\n"
+        f"🪶 WOODY: {parsed['woody_amount']:,.6f}\n"
+        f"💵 Quote: {parsed['quote_amount']:,.6f} {symbol(parsed['quote_token'])}\n"
         f"💲 Value: ${parsed['swap_usd_value']:,.2f}\n"
-        f"💱 Pair: {parsed['pair']}\n"
         f"🏦 DEX: {parsed['dex']}\n"
+        f"💱 Pair: {parsed['pair']}\n"
         f"{price_line}"
         f"🔗 Explorer: {explorer}"
     )
-
 
 # =========================================================
 # WEBSOCKET
@@ -1030,31 +975,9 @@ async def ws_get_endpoint() -> Optional[str]:
     return None
 
 
-def extract_transfers_from_payload(data: Any) -> List[dict]:
-    if isinstance(data, dict):
-        transfers = data.get("transfers")
-        if isinstance(transfers, list):
-            return transfers
-
-        if isinstance(data.get("transfer"), dict):
-            return [data["transfer"]]
-
-        if isinstance(data.get("data"), dict):
-            inner = data["data"].get("transfers")
-            if isinstance(inner, list):
-                return inner
-
-        if "sender" in data and "receiver" in data:
-            return [data]
-
-    elif isinstance(data, list):
-        return [x for x in data if isinstance(x, dict)]
-
-    return []
-
-
 async def ws_connect_loop() -> None:
     global WS_CLIENT
+
     while True:
         try:
             endpoint = await ws_get_endpoint()
@@ -1076,74 +999,64 @@ async def ws_connect_loop() -> None:
             @sio.event
             async def connect():
                 logger.info("WebSocket connected")
-
-                await sio.emit("subscribeCustomTransfers", {"token": WOODY})
-                logger.info("Subscribed custom transfers for token: %s", WOODY)
+                try:
+                    await sio.emit("subscribeCustomTransfers", {"token": WOODY})
+                    logger.info("Subscribed custom transfers for token: %s", WOODY)
+                except Exception as exc:
+                    logger.warning("Failed token subscription -> %s", exc)
 
                 for pool in WATCHED_POOLS:
-                    await sio.emit("subscribeCustomTransfers", {"address": pool})
-                    logger.info("Subscribed custom transfers for address: %s", pool)
+                    try:
+                        await sio.emit("subscribeCustomTransfers", {"address": pool})
+                        logger.info("Subscribed custom transfers for address: %s", pool)
+                    except Exception as exc:
+                        logger.warning("Failed address subscription for %s -> %s", pool, exc)
 
             @sio.event
             async def disconnect():
                 logger.warning("WebSocket disconnected")
 
-            @sio.on("error")
-            async def on_error(data):
-                logger.warning("WebSocket server error payload: %s", data)
-
             @sio.on("customTransferUpdate")
             async def on_custom_transfer_update(data):
-                try:
-                    logger.info("customTransferUpdate raw payload received")
-                    cleanup_root_state()
+                logger.info("customTransferUpdate raw payload received")
 
-                    transfers = extract_transfers_from_payload(data)
-                    if not transfers:
-                        logger.info("customTransferUpdate payload has no usable transfers")
-                        if WS_DEBUG_LOG_TRANSFERS:
-                            logger.info("RAW PAYLOAD: %s", data)
-                        return
+                transfers = (data or {}).get("transfers") or []
+                logger.info("customTransferUpdate transfers count=%s", len(transfers))
 
-                    logger.info("customTransferUpdate transfers count=%s", len(transfers))
+                if not isinstance(transfers, list):
+                    return
 
-                    for transfer in transfers:
-                        items = get_transfers_from_action(transfer)
-                        if not items:
-                            if WS_DEBUG_LOG_TRANSFERS:
-                                logger.info("Transfer without action.arguments.transfers: %s", transfer)
+                for transfer in transfers:
+                    items = get_transfers_from_action(transfer)
+                    if not items:
+                        continue
+
+                    for item in items:
+                        entry = get_transfer_item_fields(transfer, item)
+                        if not entry:
                             continue
 
-                        for item in items:
-                            try:
-                                parsed = process_transfer_item(transfer, item)
-                                if parsed and APP_REF is not None:
-                                    message = build_swap_message(parsed)
-                                    await send_photo_alert_app(APP_REF, choose_image(parsed), message)
-                            except Exception as item_exc:
-                                logger.exception("Transfer item processing error: %s", item_exc)
-                except Exception as exc:
-                    logger.exception("customTransferUpdate handler error: %s", exc)
+                        logger.info(
+                            "WS transfer | root=%s sender=%s receiver=%s token=%s value=%s decimals=%s amount=%s",
+                            entry["root"],
+                            entry["sender"],
+                            entry["receiver"],
+                            entry["token"],
+                            entry["raw_value"],
+                            entry["decimals"],
+                            entry["amount"],
+                        )
 
-            await sio.connect(
-                endpoint,
-                socketio_path="/ws/subscription",
-                transports=["websocket"],
-                wait_timeout=20,
-            )
+                        ingest_root_transfer(entry)
+
+            await sio.connect(endpoint, socketio_path="/ws/subscription", transports=["websocket"])
             await sio.wait()
 
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.warning("WebSocket loop error -> %s", exc)
-            try:
-                if WS_CLIENT:
-                    await WS_CLIENT.disconnect()
-            except Exception:
-                pass
             await asyncio.sleep(WS_RECONNECT_DELAY)
-
 
 # =========================================================
 # COMMANDS / HANDLERS
@@ -1154,9 +1067,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
-        "✅ *WOODY Monitor WS ProMax is running*\n\n"
-        f"Private alerts: *{'YES' if PRIVATE_CHAT_ID else 'NO'}*\n"
-        f"Group alerts: *{'YES' if GROUP_CHAT_ID else 'NO'}*\n"
+        "✅ *WOODY Monitor Final is running*\n\n"
+        f"Private alerts: *{'YES' if (ENABLE_PRIVATE_ALERTS and PRIVATE_CHAT_ID) else 'NO'}*\n"
+        f"Group alerts: *{'YES' if (ENABLE_GROUP_ALERTS and GROUP_CHAT_ID) else 'NO'}*\n"
         f"Min alert: *${MIN_ALERT_USD}*\n"
         f"BIG alert: *${BIG_ALERT_USD}*\n"
         f"WHALE alert: *${WHALE_ALERT_USD}*\n"
@@ -1273,9 +1186,29 @@ async def check_holders(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.warning("[holders monitor error] %s", exc)
 
 
+async def flush_roots_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        ready = flush_ready_roots()
+        for parsed in ready:
+            message = build_swap_message(parsed)
+            await send_photo_alert(context, choose_image(parsed), message)
+            logger.info(
+                "ALERT SENT | type=%s wallet=%s woody=%s quote=%s %s dex=%s usd=%s root=%s",
+                parsed["type"],
+                parsed["wallet"],
+                parsed["woody_amount"],
+                parsed["quote_amount"],
+                parsed["quote_token"],
+                parsed["dex"],
+                parsed["swap_usd_value"],
+                parsed["root_hash"],
+            )
+    except Exception as exc:
+        logger.warning("[flush_roots_job error] %s", exc)
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.exception("Unhandled exception: %s", context.error)
-
 
 # =========================================================
 # APP LIFECYCLE
@@ -1301,7 +1234,6 @@ async def on_shutdown(app: Application) -> None:
         except Exception:
             pass
     logger.info("Shutdown complete")
-
 
 # =========================================================
 # MAIN
@@ -1335,8 +1267,9 @@ def main() -> None:
         raise RuntimeError("JobQueue missing. Install python-telegram-bot[job-queue].")
 
     app.job_queue.run_repeating(check_holders, interval=CHECK_HOLDERS_INTERVAL, first=20)
+    app.job_queue.run_repeating(flush_roots_job, interval=3, first=5)
 
-    logger.info("WOODY Monitor WS ProMax started...")
+    logger.info("WOODY Monitor Final started...")
     app.run_polling(drop_pending_updates=True)
 
 
