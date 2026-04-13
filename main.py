@@ -664,6 +664,186 @@ def get_bot_status_text() -> str:
         f"Group alerts: *{'ON' if (ENABLE_GROUP_ALERTS and GROUP_CHAT_ID) else 'OFF'}*"
     )
 
+
+def get_token_supply() -> Tuple[float, float]:
+    """
+    Returns (total_supply, circulating_supply) when available.
+    """
+    data = get_json(f"{MVX_API}/tokens/{WOODY}")
+    if not isinstance(data, dict):
+        return 0.0, 0.0
+    decimals = safe_int(data.get("decimals", 18), 18)
+    total = amount_from_raw(data.get("supply", "0"), decimals)
+    circulating = amount_from_raw(data.get("circulatingSupply", "0"), decimals)
+    return total, circulating
+
+
+def get_top_holders_text(limit: int = 10) -> str:
+    params = {"size": 200}
+    accounts = get_json(f"{MVX_API}/tokens/{WOODY}/accounts", params=params)
+    if not isinstance(accounts, list):
+        return "🏆 *Top Holders*\n\nNu am putut încărca holderii acum."
+
+    total_supply, circulating_supply = get_token_supply()
+    denom = circulating_supply if circulating_supply > 0 else total_supply
+    rows: List[Tuple[str, float]] = []
+    for item in accounts:
+        address = str(item.get("address") or "")
+        if not is_real_wallet(address):
+            continue
+        bal = amount_from_raw(item.get("balance", "0"), item.get("decimals", 18))
+        if bal <= 0:
+            continue
+        rows.append((address, bal))
+
+    rows = sorted(rows, key=lambda x: x[1], reverse=True)[:limit]
+    if not rows:
+        return "🏆 *Top Holders*\n\nNu există holderi eligibili după filtre."
+
+    lines = []
+    for idx, (address, amount) in enumerate(rows, start=1):
+        pct = (amount / denom * 100) if denom > 0 else 0.0
+        lines.append(f"{idx}. `{short_wallet(address)}` • {amount:,.0f} WOODY • {pct:.2f}%")
+
+    basis = "circulant" if circulating_supply > 0 else "total"
+    return (
+        "🏆 *Top Holders (real wallets)*\n"
+        "_Filtrate: tech/aggregators/pools/burn_\n\n"
+        + "\n".join(lines)
+        + f"\n\nSupply bază: *{basis}*"
+    )
+
+
+def update_volume_state(parsed: Dict[str, Any]) -> None:
+    wallet = str(parsed.get("wallet") or "")
+    usd = safe_float(parsed.get("swap_usd_value"))
+    tx_type = str(parsed.get("type") or "")
+    if not wallet or usd <= 0:
+        return
+    if not is_real_wallet(wallet):
+        return
+
+    slot = TOP_VOLUME.get(wallet, {"buy_usd": 0.0, "sell_usd": 0.0, "total_usd": 0.0, "tx_count": 0})
+    if tx_type == "BUY":
+        slot["buy_usd"] = safe_float(slot.get("buy_usd")) + usd
+    elif tx_type == "SELL":
+        slot["sell_usd"] = safe_float(slot.get("sell_usd")) + usd
+    slot["total_usd"] = safe_float(slot.get("total_usd")) + usd
+    slot["tx_count"] = safe_float(slot.get("tx_count")) + 1
+    TOP_VOLUME[wallet] = slot
+
+    VOLUME_HISTORY.append(
+        {
+            "ts": time.time(),
+            "wallet": wallet,
+            "type": 1.0 if tx_type == "BUY" else -1.0,
+            "usd": usd,
+        }
+    )
+    trim_old_volume_entries(48)
+    save_runtime_state()
+
+
+def update_last_alert(parsed: Dict[str, Any], message: str) -> None:
+    tx_type = str(parsed.get("type") or "")
+    if tx_type not in {"BUY", "SELL"}:
+        return
+    LAST_ALERTS[tx_type] = {
+        "wallet": parsed.get("wallet", ""),
+        "woody_amount": safe_float(parsed.get("woody_amount")),
+        "quote_token": parsed.get("quote_token", ""),
+        "quote_amount": safe_float(parsed.get("quote_amount")),
+        "swap_usd_value": safe_float(parsed.get("swap_usd_value")),
+        "dex": parsed.get("dex", "Unknown"),
+        "root_hash": parsed.get("root_hash", ""),
+        "time": int(time.time()),
+        "message": message,
+    }
+    save_runtime_state()
+
+
+def get_last_trade_text(tx_type: str) -> str:
+    item = LAST_ALERTS.get(tx_type, {})
+    emoji = "🟢" if tx_type == "BUY" else "🔴"
+    if not item:
+        return f"{emoji} *Last {tx_type.title()}*\n\nNicio alertă salvată încă."
+    dt = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(safe_int(item.get("time"), 0)))
+    return (
+        f"{emoji} *Last {tx_type.title()}*\n\n"
+        f"👤 {short_wallet(str(item.get('wallet', '')))}\n"
+        f"🪶 {safe_float(item.get('woody_amount')):,.2f} WOODY\n"
+        f"💲 ${safe_float(item.get('swap_usd_value')):,.2f}\n"
+        f"🏦 {item.get('dex', 'Unknown')}\n"
+        f"🕒 {dt}\n"
+        f"🔗 https://explorer.multiversx.com/transactions/{item.get('root_hash', '')}"
+    )
+
+
+def get_volume_24h_text() -> str:
+    trim_old_volume_entries(24)
+    total = sum(safe_float(x.get("usd")) for x in VOLUME_HISTORY)
+    buys = sum(safe_float(x.get("usd")) for x in VOLUME_HISTORY if safe_float(x.get("type")) > 0)
+    sells = sum(safe_float(x.get("usd")) for x in VOLUME_HISTORY if safe_float(x.get("type")) < 0)
+    return (
+        "📊 *Volume 24h (estimat)*\n\n"
+        f"Total: *${total:,.2f}*\n"
+        f"Buy: *${buys:,.2f}*\n"
+        f"Sell: *${sells:,.2f}*\n"
+        f"Trades: *{len(VOLUME_HISTORY)}*"
+    )
+
+
+def get_top_volume_text(limit: int = 10) -> str:
+    rows: List[Tuple[str, Dict[str, float]]] = []
+    for wallet, slot in TOP_VOLUME.items():
+        if not is_real_wallet(wallet):
+            continue
+        rows.append((wallet, slot))
+    rows = sorted(rows, key=lambda x: safe_float(x[1].get("total_usd")), reverse=True)[:limit]
+    if not rows:
+        return "🔥 *Top Volume*\n\nNu există date suficiente încă."
+    lines = []
+    for idx, (wallet, slot) in enumerate(rows, start=1):
+        lines.append(
+            f"{idx}. `{short_wallet(wallet)}` • ${safe_float(slot.get('total_usd')):,.2f} "
+            f"(B ${safe_float(slot.get('buy_usd')):,.0f} / S ${safe_float(slot.get('sell_usd')):,.0f})"
+        )
+    return "🔥 *Top Volume (real wallets)*\n_Filtrate: tech/aggregators/pools_\n\n" + "\n".join(lines)
+
+
+def get_pools_text() -> str:
+    egld_usd = get_egld_usd()
+    lines = []
+    for addr, label in WATCHED_POOLS.items():
+        r = reserves(addr)
+        woody = find_token_amount(r, WOODY)
+        wegld = find_token_amount(r, WEGLD)
+        usdc = 0.0
+        for token_id, amount in r.items():
+            if USDC_HINT.upper() in token_id.upper():
+                usdc = amount
+                break
+        liq_usd = 0.0
+        if woody > 0 and wegld > 0:
+            liq_usd = 2 * wegld * egld_usd
+        elif woody > 0 and usdc > 0:
+            liq_usd = 2 * usdc
+        lines.append(f"• {label}: `${liq_usd:,.2f}`")
+    return "📦 *WOODY Pools*\n\n" + "\n".join(lines)
+
+
+def get_bot_status_text() -> str:
+    return (
+        "🤖 *Bot Status*\n\n"
+        f"WebSocket: *{'RUNNING' if WS_CONNECTED else 'DISCONNECTED'}*\n"
+        f"Roots in queue: *{len(ROOT_PENDING)}*\n"
+        f"Roots processed: *{len(ROOT_PROCESSED)}*\n"
+        f"Last holders count: *{LAST_HOLDERS_COUNT if LAST_HOLDERS_COUNT is not None else 'N/A'}*\n"
+        f"Thresholds: *min ${MIN_ALERT_USD} / big ${BIG_ALERT_USD} / whale ${WHALE_ALERT_USD} / super ${SUPER_WHALE_ALERT_USD}*\n"
+        f"Private alerts: *{'ON' if (ENABLE_PRIVATE_ALERTS and PRIVATE_CHAT_ID) else 'OFF'}*\n"
+        f"Group alerts: *{'ON' if (ENABLE_GROUP_ALERTS and GROUP_CHAT_ID) else 'OFF'}*"
+    )
+
 # =========================================================
 # TELEGRAM UI
 # =========================================================
@@ -750,11 +930,13 @@ async def send_alert_to_targets(
                         chat_id=target,
                         photo=InputFile(photo),
                         caption=caption,
+                        parse_mode=ParseMode.MARKDOWN,
                     )
             else:
                 await context.bot.send_message(
                     chat_id=target,
                     text=caption,
+                    parse_mode=ParseMode.MARKDOWN,
                     disable_web_page_preview=True,
                 )
             logger.info("Alert sent to %s", target)
@@ -952,12 +1134,12 @@ def choose_title(parsed: Dict[str, Any]) -> str:
     tx_type = parsed.get("type", "")
 
     if usd >= SUPER_WHALE_ALERT_USD:
-        return f"{'🟢🐋' if tx_type == 'BUY' else '🔴🐋'} SUPER WHALE {tx_type}"
+        return f"{'🟢🐋' if tx_type == 'BUY' else '🔴🐋'} *SUPER WHALE {tx_type}*"
     if usd >= WHALE_ALERT_USD:
-        return f"{'🟢🐳' if tx_type == 'BUY' else '🔴🐳'} WHALE {tx_type}"
+        return f"{'🟢🐳' if tx_type == 'BUY' else '🔴🐳'} *WHALE {tx_type}*"
     if usd >= BIG_ALERT_USD:
-        return f"{'🚀' if tx_type == 'BUY' else '💥'} BIG {tx_type}"
-    return f"{'🟢' if tx_type == 'BUY' else '🔴'} {tx_type}"
+        return f"{'🚀' if tx_type == 'BUY' else '💥'} *BIG {tx_type}*"
+    return f"{'🟢' if tx_type == 'BUY' else '🔴'} *{tx_type}*"
 
 
 def choose_image(parsed: Dict[str, Any]) -> str:
@@ -979,16 +1161,16 @@ def build_message(parsed: Dict[str, Any]) -> str:
         price_line = f"📊 Market: {best['price_egld']:.12f} EGLD (${best['price_usd']:.8f})\n"
 
     return (
-        "🪶 WOODY Monitor V2\n"
+        "🪶 *WOODY Monitor V2*\n"
         f"{choose_title(parsed)}\n\n"
-        f"💲 Value: ${parsed['swap_usd_value']:,.2f}\n"
-        f"🪶 Amount: {parsed['woody_amount']:,.4f} WOODY\n"
-        f"💱 Quote: {parsed['quote_amount']:,.4f} {symbol(parsed['quote_token'])}\n"
-        f"👤 Wallet: {short_wallet(parsed['wallet'])}\n"
-        f"🏦 DEX: {parsed['dex']}\n"
-        f"🕒 Time: {now_utc}\n"
+        f"💲 *Value:* `${parsed['swap_usd_value']:,.2f}`\n"
+        f"🪶 *Amount:* `{parsed['woody_amount']:,.4f} WOODY`\n"
+        f"💱 *Quote:* `{parsed['quote_amount']:,.4f} {symbol(parsed['quote_token'])}`\n"
+        f"👤 *Wallet:* `{short_wallet(parsed['wallet'])}`\n"
+        f"🏦 *DEX:* `{parsed['dex']}`\n"
+        f"🕒 *Time:* `{now_utc}`\n"
         f"{price_line}"
-        f"🔗 Explorer: {explorer}"
+        f"🔗 [Open in Explorer]({explorer})"
     )
 
 # =========================================================
