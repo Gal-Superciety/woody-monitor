@@ -429,7 +429,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
 
 def start_caption() -> str:
     return (
-        "🪶 *WOODY Monitor V2*\n\n"
+        "🪶 *WOODY Monitor V2*\n✅ TEST MENU NOU ACTIV\n\n"
         "Tracks:\n"
         "• WebSocket root trigger\n"
         "• REST transaction parser\n"
@@ -877,6 +877,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await send_start_menu(update.effective_chat.id, context)
 
 
+async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await send_start_menu(update.effective_chat.id, context)
+
+
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "✅ *WOODY Monitor V2 is running*\n\n"
@@ -944,6 +948,7 @@ def main() -> None:
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("menu", menu_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("id", id_command))
     app.add_handler(CommandHandler("testalert", testalert_command))
