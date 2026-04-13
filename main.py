@@ -3,6 +3,7 @@ import time
 import random
 import logging
 import asyncio
+import json
 from typing import Dict, Optional, Tuple, List, Any, Set
 
 import requests
@@ -123,9 +124,20 @@ UA = {"User-Agent": "WOODY Monitor V2"}
 PRICE_CACHE: Dict[str, Tuple[float, float]] = {}
 ROOT_PENDING: Dict[str, Dict[str, Any]] = {}
 ROOT_PROCESSED: Set[str] = set()
+WS_CONNECTED = False
 
 LAST_HOLDERS_COUNT: Optional[int] = None
 PENDING_HOLDER_VALUE: Optional[int] = None
+
+DATA_DIR = os.getenv("DATA_DIR", "data").strip()
+LAST_ALERTS_FILE = os.getenv("LAST_ALERTS_FILE", "data/last_alerts.json").strip()
+TOP_VOLUME_FILE = os.getenv("TOP_VOLUME_FILE", "data/top_volume.json").strip()
+VOLUME_HISTORY_FILE = os.getenv("VOLUME_HISTORY_FILE", "data/volume_history.json").strip()
+ROOT_CACHE_FILE = os.getenv("ROOT_CACHE_FILE", "data/root_cache.json").strip()
+
+TOP_VOLUME: Dict[str, Dict[str, float]] = {}
+VOLUME_HISTORY: List[Dict[str, float]] = []
+LAST_ALERTS: Dict[str, Dict[str, Any]] = {"BUY": {}, "SELL": {}}
 
 WATCHED_POOLS = {
     XEXCHANGE_POOL_ADDRESS: "xExchange",
@@ -215,6 +227,60 @@ def file_exists(path: str) -> bool:
 def image_path(path: str) -> str:
     base_dir = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base_dir, path)
+
+
+def data_path(path: str) -> str:
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_dir, path)
+
+
+def ensure_data_dir() -> None:
+    os.makedirs(data_path(DATA_DIR), exist_ok=True)
+
+
+def read_json_file(path: str, default: Any) -> Any:
+    try:
+        with open(data_path(path), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def write_json_file(path: str, payload: Any) -> None:
+    ensure_data_dir()
+    try:
+        with open(data_path(path), "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+    except Exception as exc:
+        logger.warning("Failed writing json file %s -> %s", path, exc)
+
+
+def trim_old_volume_entries(hours: int = 24) -> None:
+    global VOLUME_HISTORY
+    cutoff = time.time() - (hours * 3600)
+    VOLUME_HISTORY = [x for x in VOLUME_HISTORY if safe_float(x.get("ts")) >= cutoff]
+
+
+def save_runtime_state() -> None:
+    trim_old_volume_entries(48)
+    write_json_file(LAST_ALERTS_FILE, LAST_ALERTS)
+    write_json_file(TOP_VOLUME_FILE, TOP_VOLUME)
+    write_json_file(VOLUME_HISTORY_FILE, VOLUME_HISTORY)
+    # Keep a bounded processed-roots cache to avoid unbounded growth.
+    roots = list(ROOT_PROCESSED)[-5000:]
+    write_json_file(ROOT_CACHE_FILE, {"roots": roots})
+
+
+def load_runtime_state() -> None:
+    global LAST_ALERTS, TOP_VOLUME, VOLUME_HISTORY
+    LAST_ALERTS = read_json_file(LAST_ALERTS_FILE, {"BUY": {}, "SELL": {}})
+    TOP_VOLUME = read_json_file(TOP_VOLUME_FILE, {})
+    VOLUME_HISTORY = read_json_file(VOLUME_HISTORY_FILE, [])
+
+    cache = read_json_file(ROOT_CACHE_FILE, {"roots": []})
+    for root in cache.get("roots", []):
+        if isinstance(root, str) and root:
+            ROOT_PROCESSED.add(root)
 
 
 def get_json(url: str, params: Optional[dict] = None) -> Optional[Any]:
@@ -404,6 +470,186 @@ def get_price_text() -> str:
         f"{best['quote_symbol']} Reserve: *{best['quote_reserve']:,.6f}*"
     )
 
+
+def get_token_supply() -> Tuple[float, float]:
+    """
+    Returns (total_supply, circulating_supply) when available.
+    """
+    data = get_json(f"{MVX_API}/tokens/{WOODY}")
+    if not isinstance(data, dict):
+        return 0.0, 0.0
+    decimals = safe_int(data.get("decimals", 18), 18)
+    total = amount_from_raw(data.get("supply", "0"), decimals)
+    circulating = amount_from_raw(data.get("circulatingSupply", "0"), decimals)
+    return total, circulating
+
+
+def get_top_holders_text(limit: int = 10) -> str:
+    params = {"size": 200}
+    accounts = get_json(f"{MVX_API}/tokens/{WOODY}/accounts", params=params)
+    if not isinstance(accounts, list):
+        return "🏆 *Top Holders*\n\nNu am putut încărca holderii acum."
+
+    total_supply, circulating_supply = get_token_supply()
+    denom = circulating_supply if circulating_supply > 0 else total_supply
+    rows: List[Tuple[str, float]] = []
+    for item in accounts:
+        address = str(item.get("address") or "")
+        if not is_real_wallet(address):
+            continue
+        bal = amount_from_raw(item.get("balance", "0"), item.get("decimals", 18))
+        if bal <= 0:
+            continue
+        rows.append((address, bal))
+
+    rows = sorted(rows, key=lambda x: x[1], reverse=True)[:limit]
+    if not rows:
+        return "🏆 *Top Holders*\n\nNu există holderi eligibili după filtre."
+
+    lines = []
+    for idx, (address, amount) in enumerate(rows, start=1):
+        pct = (amount / denom * 100) if denom > 0 else 0.0
+        lines.append(f"{idx}. `{short_wallet(address)}` • {amount:,.0f} WOODY • {pct:.2f}%")
+
+    basis = "circulant" if circulating_supply > 0 else "total"
+    return (
+        "🏆 *Top Holders (real wallets)*\n"
+        "_Filtrate: tech/aggregators/pools/burn_\n\n"
+        + "\n".join(lines)
+        + f"\n\nSupply bază: *{basis}*"
+    )
+
+
+def update_volume_state(parsed: Dict[str, Any]) -> None:
+    wallet = str(parsed.get("wallet") or "")
+    usd = safe_float(parsed.get("swap_usd_value"))
+    tx_type = str(parsed.get("type") or "")
+    if not wallet or usd <= 0:
+        return
+    if not is_real_wallet(wallet):
+        return
+
+    slot = TOP_VOLUME.get(wallet, {"buy_usd": 0.0, "sell_usd": 0.0, "total_usd": 0.0, "tx_count": 0})
+    if tx_type == "BUY":
+        slot["buy_usd"] = safe_float(slot.get("buy_usd")) + usd
+    elif tx_type == "SELL":
+        slot["sell_usd"] = safe_float(slot.get("sell_usd")) + usd
+    slot["total_usd"] = safe_float(slot.get("total_usd")) + usd
+    slot["tx_count"] = safe_float(slot.get("tx_count")) + 1
+    TOP_VOLUME[wallet] = slot
+
+    VOLUME_HISTORY.append(
+        {
+            "ts": time.time(),
+            "wallet": wallet,
+            "type": 1.0 if tx_type == "BUY" else -1.0,
+            "usd": usd,
+        }
+    )
+    trim_old_volume_entries(48)
+    save_runtime_state()
+
+
+def update_last_alert(parsed: Dict[str, Any], message: str) -> None:
+    tx_type = str(parsed.get("type") or "")
+    if tx_type not in {"BUY", "SELL"}:
+        return
+    LAST_ALERTS[tx_type] = {
+        "wallet": parsed.get("wallet", ""),
+        "woody_amount": safe_float(parsed.get("woody_amount")),
+        "quote_token": parsed.get("quote_token", ""),
+        "quote_amount": safe_float(parsed.get("quote_amount")),
+        "swap_usd_value": safe_float(parsed.get("swap_usd_value")),
+        "dex": parsed.get("dex", "Unknown"),
+        "root_hash": parsed.get("root_hash", ""),
+        "time": int(time.time()),
+        "message": message,
+    }
+    save_runtime_state()
+
+
+def get_last_trade_text(tx_type: str) -> str:
+    item = LAST_ALERTS.get(tx_type, {})
+    emoji = "🟢" if tx_type == "BUY" else "🔴"
+    if not item:
+        return f"{emoji} *Last {tx_type.title()}*\n\nNicio alertă salvată încă."
+    dt = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(safe_int(item.get("time"), 0)))
+    return (
+        f"{emoji} *Last {tx_type.title()}*\n\n"
+        f"👤 {short_wallet(str(item.get('wallet', '')))}\n"
+        f"🪶 {safe_float(item.get('woody_amount')):,.2f} WOODY\n"
+        f"💲 ${safe_float(item.get('swap_usd_value')):,.2f}\n"
+        f"🏦 {item.get('dex', 'Unknown')}\n"
+        f"🕒 {dt}\n"
+        f"🔗 https://explorer.multiversx.com/transactions/{item.get('root_hash', '')}"
+    )
+
+
+def get_volume_24h_text() -> str:
+    trim_old_volume_entries(24)
+    total = sum(safe_float(x.get("usd")) for x in VOLUME_HISTORY)
+    buys = sum(safe_float(x.get("usd")) for x in VOLUME_HISTORY if safe_float(x.get("type")) > 0)
+    sells = sum(safe_float(x.get("usd")) for x in VOLUME_HISTORY if safe_float(x.get("type")) < 0)
+    return (
+        "📊 *Volume 24h (estimat)*\n\n"
+        f"Total: *${total:,.2f}*\n"
+        f"Buy: *${buys:,.2f}*\n"
+        f"Sell: *${sells:,.2f}*\n"
+        f"Trades: *{len(VOLUME_HISTORY)}*"
+    )
+
+
+def get_top_volume_text(limit: int = 10) -> str:
+    rows: List[Tuple[str, Dict[str, float]]] = []
+    for wallet, slot in TOP_VOLUME.items():
+        if not is_real_wallet(wallet):
+            continue
+        rows.append((wallet, slot))
+    rows = sorted(rows, key=lambda x: safe_float(x[1].get("total_usd")), reverse=True)[:limit]
+    if not rows:
+        return "🔥 *Top Volume*\n\nNu există date suficiente încă."
+    lines = []
+    for idx, (wallet, slot) in enumerate(rows, start=1):
+        lines.append(
+            f"{idx}. `{short_wallet(wallet)}` • ${safe_float(slot.get('total_usd')):,.2f} "
+            f"(B ${safe_float(slot.get('buy_usd')):,.0f} / S ${safe_float(slot.get('sell_usd')):,.0f})"
+        )
+    return "🔥 *Top Volume (real wallets)*\n_Filtrate: tech/aggregators/pools_\n\n" + "\n".join(lines)
+
+
+def get_pools_text() -> str:
+    egld_usd = get_egld_usd()
+    lines = []
+    for addr, label in WATCHED_POOLS.items():
+        r = reserves(addr)
+        woody = find_token_amount(r, WOODY)
+        wegld = find_token_amount(r, WEGLD)
+        usdc = 0.0
+        for token_id, amount in r.items():
+            if USDC_HINT.upper() in token_id.upper():
+                usdc = amount
+                break
+        liq_usd = 0.0
+        if woody > 0 and wegld > 0:
+            liq_usd = 2 * wegld * egld_usd
+        elif woody > 0 and usdc > 0:
+            liq_usd = 2 * usdc
+        lines.append(f"• {label}: `${liq_usd:,.2f}`")
+    return "📦 *WOODY Pools*\n\n" + "\n".join(lines)
+
+
+def get_bot_status_text() -> str:
+    return (
+        "🤖 *Bot Status*\n\n"
+        f"WebSocket: *{'RUNNING' if WS_CONNECTED else 'DISCONNECTED'}*\n"
+        f"Roots in queue: *{len(ROOT_PENDING)}*\n"
+        f"Roots processed: *{len(ROOT_PROCESSED)}*\n"
+        f"Last holders count: *{LAST_HOLDERS_COUNT if LAST_HOLDERS_COUNT is not None else 'N/A'}*\n"
+        f"Thresholds: *min ${MIN_ALERT_USD} / big ${BIG_ALERT_USD} / whale ${WHALE_ALERT_USD} / super ${SUPER_WHALE_ALERT_USD}*\n"
+        f"Private alerts: *{'ON' if (ENABLE_PRIVATE_ALERTS and PRIVATE_CHAT_ID) else 'OFF'}*\n"
+        f"Group alerts: *{'ON' if (ENABLE_GROUP_ALERTS and GROUP_CHAT_ID) else 'OFF'}*"
+    )
+
 # =========================================================
 # TELEGRAM UI
 # =========================================================
@@ -415,13 +661,26 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("👥 Holders", callback_data="holders"),
+            InlineKeyboardButton("🏆 Top Holders", callback_data="top_holders"),
+        ],
+        [
+            InlineKeyboardButton("🟢 Last Buy", callback_data="last_buy"),
+            InlineKeyboardButton("🔴 Last Sell", callback_data="last_sell"),
+        ],
+        [
+            InlineKeyboardButton("📊 Volume 24h", callback_data="volume_24h"),
+            InlineKeyboardButton("🔥 Top Volume", callback_data="top_volume"),
+        ],
+        [
             InlineKeyboardButton("📈 Chart", url=CHART_URL),
+            InlineKeyboardButton("📦 Pools", callback_data="pools"),
         ],
         [
-            InlineKeyboardButton("🟢 BUY xExchange", url=BUY_XEXCHANGE_URL),
-            InlineKeyboardButton("🟢 BUY XOXNO", url=BUY_XOXNO_URL),
+            InlineKeyboardButton("🟢 Buy xExchange", url=BUY_XEXCHANGE_URL),
+            InlineKeyboardButton("🟢 Buy XOXNO", url=BUY_XOXNO_URL),
         ],
         [
+            InlineKeyboardButton("🤖 Bot Status", callback_data="bot_status"),
             InlineKeyboardButton("𝕏 Twitter", url=TWITTER_URL),
         ],
     ])
@@ -429,17 +688,14 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
 
 def start_caption() -> str:
     return (
-        "🪶 *WOODY Monitor V2*\n\n"
-        "Tracks:\n"
-        "• WebSocket root trigger\n"
-        "• REST transaction parser\n"
-        "• Price\n"
-        "• Liquidity\n"
-        "• Holders\n"
-        "• Wallet short address\n"
-        "• Quote token used\n"
-        "• DEX detection\n\n"
-        "Choose an option below 👇"
+        "🪶 *WOODY Monitor V2 • Pro Menu*\n\n"
+        "✅ *TEST MENU NOU ACTIV*\n\n"
+        "Monitor live pentru WOODY:\n"
+        "• BUY/SELL alerts\n"
+        "• Price & Liquidity\n"
+        "• Holders & Volume analytics\n"
+        "• Pool insights & bot health\n\n"
+        "Meniu actualizat — alege o opțiune 👇"
     )
 
 
@@ -480,11 +736,13 @@ async def send_alert_to_targets(
                         chat_id=target,
                         photo=InputFile(photo),
                         caption=caption,
+                        parse_mode=ParseMode.MARKDOWN,
                     )
             else:
                 await context.bot.send_message(
                     chat_id=target,
                     text=caption,
+                    parse_mode=ParseMode.MARKDOWN,
                     disable_web_page_preview=True,
                 )
             logger.info("Alert sent to %s", target)
@@ -682,12 +940,12 @@ def choose_title(parsed: Dict[str, Any]) -> str:
     tx_type = parsed.get("type", "")
 
     if usd >= SUPER_WHALE_ALERT_USD:
-        return f"{'🟢🐋' if tx_type == 'BUY' else '🔴🐋'} WOODY SUPER WHALE {tx_type}"
+        return f"{'🟢🐋' if tx_type == 'BUY' else '🔴🐋'} *SUPER WHALE {tx_type}*"
     if usd >= WHALE_ALERT_USD:
-        return f"{'🟢🐳' if tx_type == 'BUY' else '🔴🐳'} WOODY WHALE {tx_type}"
+        return f"{'🟢🐳' if tx_type == 'BUY' else '🔴🐳'} *WHALE {tx_type}*"
     if usd >= BIG_ALERT_USD:
-        return f"{'🚀' if tx_type == 'BUY' else '💥'} WOODY BIG {tx_type}"
-    return f"{'🟢' if tx_type == 'BUY' else '🔴'} WOODY {tx_type} ALERT"
+        return f"{'🚀' if tx_type == 'BUY' else '💥'} *BIG {tx_type}*"
+    return f"{'🟢' if tx_type == 'BUY' else '🔴'} *{tx_type}*"
 
 
 def choose_image(parsed: Dict[str, Any]) -> str:
@@ -702,20 +960,23 @@ def choose_image(parsed: Dict[str, Any]) -> str:
 def build_message(parsed: Dict[str, Any]) -> str:
     explorer = f"https://explorer.multiversx.com/transactions/{parsed['root_hash']}"
     best = get_best_price()
+    now_utc = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
 
     price_line = ""
     if best:
-        price_line = f"📊 Price: {best['price_egld']:.12f} EGLD (${best['price_usd']:.10f})\n"
+        price_line = f"📊 Market: {best['price_egld']:.12f} EGLD (${best['price_usd']:.8f})\n"
 
     return (
+        "🪶 *WOODY Monitor V2*\n"
         f"{choose_title(parsed)}\n\n"
-        f"👤 Wallet: {short_wallet(parsed['wallet'])}\n"
-        f"🪶 WOODY: {parsed['woody_amount']:,.6f}\n"
-        f"💵 Quote: {parsed['quote_amount']:,.6f} {symbol(parsed['quote_token'])}\n"
-        f"💲 Value: ${parsed['swap_usd_value']:,.2f}\n"
-        f"🏦 DEX: {parsed['dex']}\n"
+        f"💲 *Value:* `${parsed['swap_usd_value']:,.2f}`\n"
+        f"🪶 *Amount:* `{parsed['woody_amount']:,.4f} WOODY`\n"
+        f"💱 *Quote:* `{parsed['quote_amount']:,.4f} {symbol(parsed['quote_token'])}`\n"
+        f"👤 *Wallet:* `{short_wallet(parsed['wallet'])}`\n"
+        f"🏦 *DEX:* `{parsed['dex']}`\n"
+        f"🕒 *Time:* `{now_utc}`\n"
         f"{price_line}"
-        f"🔗 Explorer: {explorer}"
+        f"🔗 [Open in Explorer]({explorer})"
     )
 
 # =========================================================
@@ -738,6 +999,7 @@ def add_root(root_hash: str) -> None:
 
 
 async def ws_connect_loop() -> None:
+    global WS_CONNECTED
     while True:
         sio = socketio.AsyncClient(
             reconnection=True,
@@ -748,6 +1010,8 @@ async def ws_connect_loop() -> None:
 
         @sio.event
         async def connect():
+            global WS_CONNECTED
+            WS_CONNECTED = True
             logger.info("WebSocket connected")
             try:
                 await sio.emit("subscribeCustomTransfers", {"token": WOODY})
@@ -764,6 +1028,8 @@ async def ws_connect_loop() -> None:
 
         @sio.event
         async def disconnect():
+            global WS_CONNECTED
+            WS_CONNECTED = False
             logger.warning("WebSocket disconnected")
 
         @sio.on("customTransferUpdate")
@@ -787,8 +1053,10 @@ async def ws_connect_loop() -> None:
             await sio.connect(WS_URL, socketio_path="/ws/subscription", transports=["websocket"])
             await sio.wait()
         except asyncio.CancelledError:
+            WS_CONNECTED = False
             raise
         except Exception as exc:
+            WS_CONNECTED = False
             logger.warning("WebSocket loop error -> %s", exc)
             await asyncio.sleep(WS_RECONNECT_DELAY)
 
@@ -814,8 +1082,12 @@ async def process_pending_roots(context: ContextTypes.DEFAULT_TYPE) -> None:
             continue
 
         parsed = classify_tx(tx)
+        if parsed:
+            update_volume_state(parsed)
+
         if parsed and parsed.get("swap_usd_value", 0.0) >= MIN_ALERT_USD:
             message = build_message(parsed)
+            update_last_alert(parsed, message)
             await send_alert_to_targets(context, choose_image(parsed), message)
             logger.info(
                 "ALERT SENT | root=%s type=%s wallet=%s woody=%s quote=%s %s dex=%s usd=%s",
@@ -877,16 +1149,14 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await send_start_menu(update.effective_chat.id, context)
 
 
+async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message:
+        await update.message.reply_text("✅ TEST MENU NOU ACTIV (/menu)")
+    await send_start_menu(update.effective_chat.id, context)
+
+
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = (
-        "✅ *WOODY Monitor V2 is running*\n\n"
-        f"Private alerts: *{'YES' if (ENABLE_PRIVATE_ALERTS and PRIVATE_CHAT_ID) else 'NO'}*\n"
-        f"Group alerts: *{'YES' if (ENABLE_GROUP_ALERTS and GROUP_CHAT_ID) else 'NO'}*\n"
-        f"Min alert: *${MIN_ALERT_USD}*\n"
-        f"BIG alert: *${BIG_ALERT_USD}*\n"
-        f"WHALE alert: *${WHALE_ALERT_USD}*\n"
-        f"SUPER WHALE alert: *${SUPER_WHALE_ALERT_USD}*"
-    )
+    text = get_bot_status_text()
     if update.message:
         await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
@@ -919,6 +1189,20 @@ async def menu_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"👥 *WOODY Holders*\n\nCurrent holders: *{get_holders_count() or 'N/A'}*",
             parse_mode=ParseMode.MARKDOWN,
         )
+    elif query.data == "top_holders":
+        await query.message.reply_text(get_top_holders_text(), parse_mode=ParseMode.MARKDOWN)
+    elif query.data == "last_buy":
+        await query.message.reply_text(get_last_trade_text("BUY"), parse_mode=ParseMode.MARKDOWN)
+    elif query.data == "last_sell":
+        await query.message.reply_text(get_last_trade_text("SELL"), parse_mode=ParseMode.MARKDOWN)
+    elif query.data == "volume_24h":
+        await query.message.reply_text(get_volume_24h_text(), parse_mode=ParseMode.MARKDOWN)
+    elif query.data == "top_volume":
+        await query.message.reply_text(get_top_volume_text(), parse_mode=ParseMode.MARKDOWN)
+    elif query.data == "pools":
+        await query.message.reply_text(get_pools_text(), parse_mode=ParseMode.MARKDOWN)
+    elif query.data == "bot_status":
+        await query.message.reply_text(get_bot_status_text(), parse_mode=ParseMode.MARKDOWN)
 
 
 async def greeting_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -940,10 +1224,12 @@ async def greeting_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 def main() -> None:
     if not TOKEN:
         raise ValueError("TELEGRAM_BOT_TOKEN is missing")
+    load_runtime_state()
 
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("menu", menu_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("id", id_command))
     app.add_handler(CommandHandler("testalert", testalert_command))
