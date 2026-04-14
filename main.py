@@ -536,9 +536,8 @@ def get_top_holders_text(limit: int = 10) -> str:
 
 
 def update_volume_state(parsed: Dict[str, Any]) -> None:
-    global LAST_KNOWN_WOODY_USD
-
     def resolved_usd_value() -> float:
+        global LAST_KNOWN_WOODY_USD
         usd_value = safe_float(parsed.get("swap_usd_value"))
         woody_amount_value = safe_float(parsed.get("woody_amount"))
         quote_token_value = str(parsed.get("quote_token") or "")
