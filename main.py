@@ -141,14 +141,6 @@ TOP_VOLUME: Dict[str, Dict[str, float]] = {}
 VOLUME_HISTORY: List[Dict[str, float]] = []
 LAST_ALERTS: Dict[str, Dict[str, Any]] = {"BUY": {}, "SELL": {}}
 LAST_KNOWN_WOODY_USD: float = 0.0
-API_OK_COUNT: int = 0
-API_FAIL_COUNT: int = 0
-LAST_API_ERROR: str = ""
-LAST_TX_PROCESSED: str = ""
-LAST_ALERT_SENT_AT: int = 0
-
-POOL_SNAPSHOT_TTL_SECONDS = int(os.getenv("POOL_SNAPSHOT_TTL_SECONDS", "20"))
-PRICE_TTL_SECONDS = int(os.getenv("PRICE_TTL_SECONDS", "20"))
 
 WATCHED_POOLS = {
     XEXCHANGE_POOL_ADDRESS: "xExchange",
@@ -538,32 +530,25 @@ def get_top_holders_text(limit: int = 10) -> str:
 def update_volume_state(parsed: Dict[str, Any]) -> None:
     global LAST_KNOWN_WOODY_USD
 
-    def resolved_usd_value() -> Tuple[float, str]:
+    def resolved_usd_value() -> float:
         usd_value = safe_float(parsed.get("swap_usd_value"))
         woody_amount_value = safe_float(parsed.get("woody_amount"))
         quote_token_value = str(parsed.get("quote_token") or "")
         quote_amount_value = safe_float(parsed.get("quote_amount"))
-        confidence = "high"
         if usd_value <= 0 and woody_amount_value > 0:
             best = get_best_price()
             if best:
                 usd_value = woody_amount_value * safe_float(best.get("price_usd"))
-                confidence = "medium"
         if usd_value <= 0 and quote_token_value and quote_amount_value > 0:
             usd_value = token_usd_estimate(quote_token_value, quote_amount_value)
-            if usd_value > 0:
-                confidence = "medium"
         if usd_value <= 0 and woody_amount_value > 0 and LAST_KNOWN_WOODY_USD > 0:
             usd_value = woody_amount_value * LAST_KNOWN_WOODY_USD
-            confidence = "low"
         if usd_value > 0 and woody_amount_value > 0:
             LAST_KNOWN_WOODY_USD = usd_value / woody_amount_value
-        if usd_value <= 0:
-            confidence = "low"
-        return usd_value, confidence
+        return usd_value
 
     wallet = str(parsed.get("wallet") or "")
-    usd, confidence = resolved_usd_value()
+    usd = resolved_usd_value()
     tx_type = str(parsed.get("type") or "")
     if not wallet:
         return
@@ -571,7 +556,6 @@ def update_volume_state(parsed: Dict[str, Any]) -> None:
         return
     if usd > 0:
         parsed["swap_usd_value"] = usd
-    parsed["usd_confidence"] = confidence
 
     slot = TOP_VOLUME.get(wallet, {"buy_usd": 0.0, "sell_usd": 0.0, "total_usd": 0.0, "tx_count": 0})
     if tx_type == "BUY":
@@ -795,22 +779,6 @@ def get_bot_status_text() -> str:
         f"Thresholds: *min ${MIN_ALERT_USD} / big ${BIG_ALERT_USD} / whale ${WHALE_ALERT_USD} / super ${SUPER_WHALE_ALERT_USD}*\n"
         f"Private alerts: *{'ON' if (ENABLE_PRIVATE_ALERTS and PRIVATE_CHAT_ID) else 'OFF'}*\n"
         f"Group alerts: *{'ON' if (ENABLE_GROUP_ALERTS and GROUP_CHAT_ID) else 'OFF'}*"
-    )
-
-
-def get_diagnostics_text() -> str:
-    last_alert = (
-        time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(LAST_ALERT_SENT_AT))
-        if LAST_ALERT_SENT_AT > 0
-        else "N/A"
-    )
-    return (
-        "🧪 *Diagnostics*\n\n"
-        f"API OK calls: *{API_OK_COUNT}*\n"
-        f"API failed calls: *{API_FAIL_COUNT}*\n"
-        f"Last API error: `{LAST_API_ERROR or 'N/A'}`\n"
-        f"Last processed root: `{LAST_TX_PROCESSED or 'N/A'}`\n"
-        f"Last alert sent: *{last_alert}*"
     )
 
 # =========================================================
