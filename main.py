@@ -503,7 +503,7 @@ def get_top_holders_text(limit: int = 10) -> str:
     params = {"size": 200}
     accounts = get_json(f"{MVX_API}/tokens/{WOODY}/accounts", params=params)
     if not isinstance(accounts, list):
-        return "🏆 *Top Holders*\n\nNu am putut încărca holderii acum."
+        return "🏆 *Top Holders*\n\nI couldn't load holders right now."
 
     total_supply, circulating_supply = get_token_supply()
     denom = circulating_supply if circulating_supply > 0 else total_supply
@@ -519,7 +519,7 @@ def get_top_holders_text(limit: int = 10) -> str:
 
     rows = sorted(rows, key=lambda x: x[1], reverse=True)[:limit]
     if not rows:
-        return "🏆 *Top Holders*\n\nNu există holderi eligibili după filtre."
+        return "🏆 *Top Holders*\n\nNo eligible holders after applying filters."
 
     lines = []
     for idx, (address, amount) in enumerate(rows, start=1):
@@ -529,9 +529,9 @@ def get_top_holders_text(limit: int = 10) -> str:
     basis = "circulant" if circulating_supply > 0 else "total"
     return (
         "🏆 *Top Holders (real wallets)*\n"
-        "_Filtrate: tech/aggregators/pools/burn_\n\n"
+        "_Filtered: tech/aggregators/pools/burn_\n\n"
         + "\n".join(lines)
-        + f"\n\nSupply bază: *{basis}*"
+        + f"\n\nSupply basis: *{basis}*"
     )
 
 
@@ -607,7 +607,7 @@ def get_last_trade_text(tx_type: str) -> str:
     item = LAST_ALERTS.get(tx_type, {})
     emoji = "🟢" if tx_type == "BUY" else "🔴"
     if not item:
-        return f"{emoji} *Last {tx_type.title()}*\n\nNicio alertă salvată încă."
+        return f"{emoji} *Last {tx_type.title()}*\n\nNo saved alert yet."
     dt = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(safe_int(item.get("time"), 0)))
     return (
         f"{emoji} *Last {tx_type.title()}*\n\n"
@@ -643,7 +643,7 @@ def get_volume_24h_text() -> str:
     buy_trades = sum(1 for x in VOLUME_HISTORY if entry_side(x) > 0)
     sell_trades = sum(1 for x in VOLUME_HISTORY if entry_side(x) < 0)
     return (
-        "📊 *Volume 24h (estimat)*\n\n"
+        "📊 *24h Volume (estimated)*\n\n"
         f"Total: *${total:,.2f}*\n"
         f"Buy: *${buys:,.2f}*\n"
         f"Sell: *${sells:,.2f}*\n"
@@ -659,14 +659,14 @@ def get_top_volume_text(limit: int = 10) -> str:
         rows.append((wallet, slot))
     rows = sorted(rows, key=lambda x: safe_float(x[1].get("total_usd")), reverse=True)[:limit]
     if not rows:
-        return "🔥 *Top Volume*\n\nNu există date suficiente încă."
+        return "🔥 *Top Volume*\n\nNot enough data yet."
     lines = []
     for idx, (wallet, slot) in enumerate(rows, start=1):
         lines.append(
             f"{idx}. `{short_wallet(wallet)}` • ${safe_float(slot.get('total_usd')):,.2f} "
             f"(B ${safe_float(slot.get('buy_usd')):,.0f} / S ${safe_float(slot.get('sell_usd')):,.0f})"
         )
-    return "🔥 *Top Volume (real wallets)*\n_Filtrate: tech/aggregators/pools_\n\n" + "\n".join(lines)
+    return "🔥 *Top Volume (real wallets)*\n_Filtered: tech/aggregators/pools_\n\n" + "\n".join(lines)
 
 
 def get_pool_snapshot(pool_address: str, label: str) -> Dict[str, Any]:
@@ -847,13 +847,13 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
 def start_caption() -> str:
     return (
         "🪶 *WOODY Monitor V2 • Pro Menu*\n\n"
-        "✅ *TEST MENU NOU ACTIV*\n\n"
-        "Monitor live pentru WOODY:\n"
+        "✅ *NEW TEST MENU ACTIVE*\n\n"
+        "Live monitoring for WOODY:\n"
         "• BUY/SELL alerts\n"
         "• Price & Liquidity\n"
         "• Holders & Volume analytics\n"
         "• Pool insights & bot health\n\n"
-        "Meniu actualizat — alege o opțiune 👇"
+        "Updated menu — choose an option 👇"
     )
 
 
@@ -1316,7 +1316,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message:
-        await update.message.reply_text("✅ TEST MENU NOU ACTIV (/menu)")
+        await update.message.reply_text("✅ NEW TEST MENU ACTIVE (/menu)")
     await send_start_menu(update.effective_chat.id, context)
 
 
