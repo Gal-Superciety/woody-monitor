@@ -122,6 +122,8 @@ logger = logging.getLogger("WOODY_MONITOR_V2")
 UA = {"User-Agent": "WOODY Monitor V2"}
 
 PRICE_CACHE: Dict[str, Tuple[float, float]] = {}
+BEST_PRICE_CACHE: Optional[Tuple[Dict[str, Any], float]] = None
+POOL_SNAPSHOT_CACHE: Dict[str, Tuple[Dict[str, Any], float]] = {}
 ROOT_PENDING: Dict[str, Dict[str, Any]] = {}
 ROOT_PROCESSED: Set[str] = set()
 WS_CONNECTED = False
@@ -258,8 +260,11 @@ def read_json_file(path: str, default: Any) -> Any:
 def write_json_file(path: str, payload: Any) -> None:
     ensure_data_dir()
     try:
-        with open(data_path(path), "w", encoding="utf-8") as f:
+        target = data_path(path)
+        tmp = f"{target}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, target)
     except Exception as exc:
         logger.warning("Failed writing json file %s -> %s", path, exc)
 
@@ -293,11 +298,15 @@ def load_runtime_state() -> None:
 
 
 def get_json(url: str, params: Optional[dict] = None) -> Optional[Any]:
+    global API_OK_COUNT, API_FAIL_COUNT, LAST_API_ERROR
     try:
         r = requests.get(url, params=params, headers=UA, timeout=25)
         r.raise_for_status()
+        API_OK_COUNT += 1
         return r.json()
     except Exception as exc:
+        API_FAIL_COUNT += 1
+        LAST_API_ERROR = f"{type(exc).__name__}: {exc}"
         logger.warning("GET JSON failed for %s -> %s", url, exc)
         return None
 
@@ -367,6 +376,11 @@ def find_token_amount(res_map: Dict[str, float], token_hint: str) -> float:
 
 
 def get_best_price() -> Optional[Dict[str, Any]]:
+    global BEST_PRICE_CACHE
+    now = time.time()
+    if BEST_PRICE_CACHE and now - BEST_PRICE_CACHE[1] < PRICE_TTL_SECONDS:
+        return BEST_PRICE_CACHE[0]
+
     egld_usd = get_egld_usd()
 
     # xExchange WOODY/WEGLD
@@ -375,7 +389,7 @@ def get_best_price() -> Optional[Dict[str, Any]]:
     wegld = find_token_amount(r, WEGLD)
     if woody > 0 and wegld > 0:
         p_egld = wegld / woody
-        return {
+        best = {
             "price_egld": p_egld,
             "price_usd": p_egld * egld_usd,
             "source": "xExchange WOODY/WEGLD",
@@ -383,6 +397,8 @@ def get_best_price() -> Optional[Dict[str, Any]]:
             "quote_symbol": "WEGLD",
             "quote_reserve": wegld,
         }
+        BEST_PRICE_CACHE = (best, now)
+        return best
 
     # WOODY/USDC fallback
     r = reserves(WOODY_USDC_POOL_ADDRESS)
@@ -395,7 +411,7 @@ def get_best_price() -> Optional[Dict[str, Any]]:
 
     if woody > 0 and usdc > 0:
         p_usd = usdc / woody
-        return {
+        best = {
             "price_egld": p_usd / egld_usd if egld_usd > 0 else 0.0,
             "price_usd": p_usd,
             "source": "WOODY/USDC",
@@ -403,6 +419,8 @@ def get_best_price() -> Optional[Dict[str, Any]]:
             "quote_symbol": "USDC",
             "quote_reserve": usdc,
         }
+        BEST_PRICE_CACHE = (best, now)
+        return best
 
     return None
 
@@ -418,7 +436,31 @@ def get_holders_count() -> Optional[int]:
 
 
 def get_liquidity_text() -> str:
-    return get_pools_text("💧 *WOODY Liquidity*")
+    rows: List[Tuple[str, float, str]] = []
+    total_usd = 0.0
+
+    for addr, label in WATCHED_POOLS.items():
+        snap = get_pool_snapshot(addr, label)
+        if not snap.get("ok"):
+            rows.append((label, 0.0, f"⚠️ {snap.get('reason', 'unavailable')}"))
+            continue
+        pool_value = safe_float(snap.get("pool_value_usd"))
+        total_usd += pool_value
+        rows.append((label, pool_value, ""))
+
+    lines: List[str] = []
+    for idx, (label, value, reason) in enumerate(rows, start=1):
+        if reason:
+            lines.append(f"{idx}. *{label}* → {reason}")
+            continue
+        share = (value / total_usd * 100) if total_usd > 0 else 0.0
+        lines.append(f"{idx}. *{label}* • `${value:,.2f}` ({share:.2f}%)")
+
+    return (
+        "💧 *WOODY Liquidity (by pair)*\n\n"
+        + "\n".join(lines)
+        + f"\n\n*Total WOODY liquidity:* `${total_usd:,.2f}`"
+    )
 
 
 def get_price_text() -> str:
@@ -621,13 +663,24 @@ def get_top_volume_text(limit: int = 10) -> str:
 
 
 def get_pool_snapshot(pool_address: str, label: str) -> Dict[str, Any]:
+    now = time.time()
+    cached = POOL_SNAPSHOT_CACHE.get(pool_address)
+    if cached and now - cached[1] < POOL_SNAPSHOT_TTL_SECONDS:
+        return cached[0]
+
     data = get_json(f"{MVX_API}/accounts/{pool_address}/tokens")
     if data is None:
-        return {"label": label, "ok": False, "reason": "API unavailable / timeout"}
+        result = {"label": label, "ok": False, "reason": "API unavailable / timeout"}
+        POOL_SNAPSHOT_CACHE[pool_address] = (result, now)
+        return result
     if not isinstance(data, list):
-        return {"label": label, "ok": False, "reason": "unexpected API response"}
+        result = {"label": label, "ok": False, "reason": "unexpected API response"}
+        POOL_SNAPSHOT_CACHE[pool_address] = (result, now)
+        return result
     if not data:
-        return {"label": label, "ok": False, "reason": "pool has no readable balances"}
+        result = {"label": label, "ok": False, "reason": "pool has no readable balances"}
+        POOL_SNAPSHOT_CACHE[pool_address] = (result, now)
+        return result
 
     res_map: Dict[str, float] = {}
     for item in data:
@@ -638,7 +691,9 @@ def get_pool_snapshot(pool_address: str, label: str) -> Dict[str, Any]:
 
     woody_amount = find_token_amount(res_map, WOODY)
     if woody_amount <= 0:
-        return {"label": label, "ok": False, "reason": "WOODY balance not found in pool"}
+        result = {"label": label, "ok": False, "reason": "WOODY balance not found in pool"}
+        POOL_SNAPSHOT_CACHE[pool_address] = (result, now)
+        return result
 
     pair_token = ""
     pair_amount = 0.0
@@ -660,7 +715,9 @@ def get_pool_snapshot(pool_address: str, label: str) -> Dict[str, Any]:
             break
 
     if not pair_token:
-        return {"label": label, "ok": False, "reason": "pair token not found"}
+        result = {"label": label, "ok": False, "reason": "pair token not found"}
+        POOL_SNAPSHOT_CACHE[pool_address] = (result, now)
+        return result
 
     best = get_best_price()
     woody_leg_usd = 0.0
@@ -671,7 +728,7 @@ def get_pool_snapshot(pool_address: str, label: str) -> Dict[str, Any]:
     value_candidates = [x for x in [woody_leg_usd * 2, pair_leg_usd * 2] if x > 0]
     pool_value_usd = max(value_candidates) if value_candidates else 0.0
 
-    return {
+    result = {
         "label": label,
         "ok": True,
         "woody_amount": woody_amount,
@@ -681,6 +738,8 @@ def get_pool_snapshot(pool_address: str, label: str) -> Dict[str, Any]:
         "pool_value_usd": pool_value_usd,
         "value_reason": "" if pool_value_usd > 0 else "no trusted USD route for pair token",
     }
+    POOL_SNAPSHOT_CACHE[pool_address] = (result, now)
+    return result
 
 
 def get_pools_text(title: str = "📦 *WOODY Pools*") -> str:
@@ -753,6 +812,9 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("🤖 Bot Status", callback_data="bot_status"),
+            InlineKeyboardButton("🧪 Diagnostics", callback_data="diagnostics"),
+        ],
+        [
             InlineKeyboardButton("𝕏 Twitter", url=TWITTER_URL),
         ],
     ])
@@ -795,6 +857,7 @@ async def send_alert_to_targets(
     image_name: str,
     caption: str,
 ) -> None:
+    global LAST_ALERT_SENT_AT
     targets = chat_targets()
     if not targets:
         logger.warning("No alert targets configured")
@@ -818,6 +881,7 @@ async def send_alert_to_targets(
                     disable_web_page_preview=True,
                 )
             logger.info("Alert sent to %s", target)
+            LAST_ALERT_SENT_AT = int(time.time())
         except Exception as exc:
             logger.warning("[ALERT ERROR] %s -> %s", target, exc)
 
@@ -1037,11 +1101,13 @@ def build_message(parsed: Dict[str, Any]) -> str:
     price_line = ""
     if best:
         price_line = f"📊 Market: {best['price_egld']:.12f} EGLD (${best['price_usd']:.8f})\n"
+    confidence = str(parsed.get("usd_confidence", "high")).upper()
 
     return (
         "🪶 *WOODY Monitor V2*\n"
         f"{choose_title(parsed)}\n\n"
         f"💲 *Value:* `${parsed['swap_usd_value']:,.2f}`\n"
+        f"🧭 *USD Confidence:* `{confidence}`\n"
         f"🪶 *Amount:* `{parsed['woody_amount']:,.4f} WOODY`\n"
         f"💱 *Quote:* `{parsed['quote_amount']:,.4f} {symbol(parsed['quote_token'])}`\n"
         f"👤 *Wallet:* `{short_wallet(parsed['wallet'])}`\n"
@@ -1136,6 +1202,7 @@ async def ws_connect_loop() -> None:
 # JOBS
 # =========================================================
 async def process_pending_roots(context: ContextTypes.DEFAULT_TYPE) -> None:
+    global LAST_TX_PROCESSED
     now = time.time()
     to_delete: List[str] = []
 
@@ -1177,6 +1244,7 @@ async def process_pending_roots(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         to_delete.append(root_hash)
         ROOT_PROCESSED.add(root_hash)
+        LAST_TX_PROCESSED = root_hash
 
     for root_hash in to_delete:
         ROOT_PENDING.pop(root_hash, None)
@@ -1233,6 +1301,11 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 
+async def diagnostics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message:
+        await update.message.reply_text(get_diagnostics_text(), parse_mode=ParseMode.MARKDOWN)
+
+
 async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message:
         await update.message.reply_text(f"Chat ID: {update.effective_chat.id}")
@@ -1275,6 +1348,8 @@ async def menu_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.message.reply_text(get_pools_text(), parse_mode=ParseMode.MARKDOWN)
     elif query.data == "bot_status":
         await query.message.reply_text(get_bot_status_text(), parse_mode=ParseMode.MARKDOWN)
+    elif query.data == "diagnostics":
+        await query.message.reply_text(get_diagnostics_text(), parse_mode=ParseMode.MARKDOWN)
 
 
 async def greeting_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1303,6 +1378,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("menu", menu_command))
     app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("diag", diagnostics_command))
     app.add_handler(CommandHandler("id", id_command))
     app.add_handler(CommandHandler("testalert", testalert_command))
     app.add_handler(CallbackQueryHandler(menu_callbacks))
