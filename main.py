@@ -100,6 +100,9 @@ ROOT_SETTLE_SECONDS = int(os.getenv("ROOT_SETTLE_SECONDS", "6"))
 ROOT_MAX_AGE_SECONDS = int(os.getenv("ROOT_MAX_AGE_SECONDS", "90"))
 CHECK_HOLDERS_INTERVAL = int(os.getenv("CHECK_HOLDERS_INTERVAL", "120"))
 WS_RECONNECT_DELAY = int(os.getenv("WS_RECONNECT_DELAY", "8"))
+API_TIMEOUT_SECONDS = int(os.getenv("API_TIMEOUT_SECONDS", "10"))
+PRICE_TTL_SECONDS = int(os.getenv("PRICE_TTL_SECONDS", "20"))
+POOL_SNAPSHOT_TTL_SECONDS = int(os.getenv("POOL_SNAPSHOT_TTL_SECONDS", "20"))
 
 EXTRA_TECHNICAL_ADDRESSES = {
     x.strip()
@@ -127,6 +130,11 @@ POOL_SNAPSHOT_CACHE: Dict[str, Tuple[Dict[str, Any], float]] = {}
 ROOT_PENDING: Dict[str, Dict[str, Any]] = {}
 ROOT_PROCESSED: Set[str] = set()
 WS_CONNECTED = False
+API_OK_COUNT = 0
+API_FAIL_COUNT = 0
+LAST_API_ERROR = "N/A"
+LAST_ALERT_SENT_AT = 0
+LAST_TX_PROCESSED = ""
 
 LAST_HOLDERS_COUNT: Optional[int] = None
 PENDING_HOLDER_VALUE: Optional[int] = None
@@ -300,7 +308,7 @@ def load_runtime_state() -> None:
 def get_json(url: str, params: Optional[dict] = None) -> Optional[Any]:
     global API_OK_COUNT, API_FAIL_COUNT, LAST_API_ERROR
     try:
-        r = requests.get(url, params=params, headers=UA, timeout=25)
+        r = requests.get(url, params=params, headers=UA, timeout=API_TIMEOUT_SECONDS)
         r.raise_for_status()
         API_OK_COUNT += 1
         return r.json()
@@ -781,6 +789,23 @@ def get_bot_status_text() -> str:
         f"Group alerts: *{'ON' if (ENABLE_GROUP_ALERTS and GROUP_CHAT_ID) else 'OFF'}*"
     )
 
+
+def get_diagnostics_text() -> str:
+    last_alert = (
+        time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(LAST_ALERT_SENT_AT))
+        if LAST_ALERT_SENT_AT > 0
+        else "N/A"
+    )
+    return (
+        "🧪 *Diagnostics*\n\n"
+        f"API OK: *{API_OK_COUNT}*\n"
+        f"API FAIL: *{API_FAIL_COUNT}*\n"
+        f"Last API error: `{LAST_API_ERROR}`\n"
+        f"Last processed tx: `{LAST_TX_PROCESSED or 'N/A'}`\n"
+        f"Last alert sent: *{last_alert}*\n"
+        f"Pending roots: *{len(ROOT_PENDING)}*"
+    )
+
 # =========================================================
 # TELEGRAM UI
 # =========================================================
@@ -1013,21 +1038,20 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
             if pool_inflows:
                 quote_token, quote_amount = sorted(pool_inflows.items(), key=lambda x: x[1], reverse=True)[0]
 
-        if quote_amount > 0:
-            usd_value = max(
-                token_usd_estimate(quote_token, quote_amount),
-                token_usd_estimate(WOODY, woody_received),
-            )
-            return {
-                "type": "BUY",
-                "wallet": wallet,
-                "woody_amount": woody_received,
-                "quote_token": quote_token,
-                "quote_amount": quote_amount,
-                "swap_usd_value": usd_value,
-                "dex": dex,
-                "root_hash": tx.get("txHash") or tx.get("originalTxHash") or "",
-            }
+        usd_value = max(
+            token_usd_estimate(quote_token, quote_amount),
+            token_usd_estimate(WOODY, woody_received),
+        )
+        return {
+            "type": "BUY",
+            "wallet": wallet,
+            "woody_amount": woody_received,
+            "quote_token": quote_token,
+            "quote_amount": quote_amount,
+            "swap_usd_value": usd_value,
+            "dex": dex,
+            "root_hash": tx.get("txHash") or tx.get("originalTxHash") or "",
+        }
 
     # SELL
     if woody_sent > 0:
@@ -1052,21 +1076,20 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
             if pool_outflows:
                 quote_token, quote_amount = sorted(pool_outflows.items(), key=lambda x: x[1], reverse=True)[0]
 
-        if quote_amount > 0:
-            usd_value = max(
-                token_usd_estimate(quote_token, quote_amount),
-                token_usd_estimate(WOODY, woody_sent),
-            )
-            return {
-                "type": "SELL",
-                "wallet": wallet,
-                "woody_amount": woody_sent,
-                "quote_token": quote_token,
-                "quote_amount": quote_amount,
-                "swap_usd_value": usd_value,
-                "dex": dex,
-                "root_hash": tx.get("txHash") or tx.get("originalTxHash") or "",
-            }
+        usd_value = max(
+            token_usd_estimate(quote_token, quote_amount),
+            token_usd_estimate(WOODY, woody_sent),
+        )
+        return {
+            "type": "SELL",
+            "wallet": wallet,
+            "woody_amount": woody_sent,
+            "quote_token": quote_token,
+            "quote_amount": quote_amount,
+            "swap_usd_value": usd_value,
+            "dex": dex,
+            "root_hash": tx.get("txHash") or tx.get("originalTxHash") or "",
+        }
 
     return None
 
@@ -1215,9 +1238,12 @@ async def process_pending_roots(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         tx = await asyncio.to_thread(get_tx_details, root_hash)
         if not tx:
-            logger.warning("No tx details fetched for root %s", root_hash)
-            to_delete.append(root_hash)
-            ROOT_PROCESSED.add(root_hash)
+            if age >= ROOT_MAX_AGE_SECONDS:
+                logger.warning("No tx details fetched for root %s (expired, dropping)", root_hash)
+                to_delete.append(root_hash)
+                ROOT_PROCESSED.add(root_hash)
+            else:
+                logger.info("No tx details yet for root %s (will retry)", root_hash)
             continue
 
         parsed = classify_tx(tx)
