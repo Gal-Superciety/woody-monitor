@@ -33,6 +33,7 @@ GROUP_CHAT_ID = os.getenv("TELEGRAM_GROUP_CHAT_ID", "").strip()
 
 ENABLE_PRIVATE_ALERTS = os.getenv("ENABLE_PRIVATE_ALERTS", "true").strip().lower() == "true"
 ENABLE_GROUP_ALERTS = os.getenv("ENABLE_GROUP_ALERTS", "false").strip().lower() == "true"
+ADMIN_TELEGRAM_ID = os.getenv("ADMIN_TELEGRAM_ID", "").strip()
 
 MVX_API = os.getenv("MVX_API", "https://api.multiversx.com").strip()
 WS_URL = os.getenv("WS_URL", "https://socket-api-ovh.multiversx.com").strip()
@@ -808,6 +809,35 @@ def get_diagnostics_text() -> str:
 # =========================================================
 # TELEGRAM UI
 # =========================================================
+def is_admin_user(user_id: Optional[int]) -> bool:
+    return bool(user_id is not None and ADMIN_TELEGRAM_ID and str(user_id) == ADMIN_TELEGRAM_ID)
+
+
+def is_public_menu_context(chat_type: Optional[str], user_id: Optional[int]) -> bool:
+    if chat_type in {"group", "supergroup"}:
+        return True
+    if chat_type == "private":
+        return not is_admin_user(user_id)
+    return True
+
+
+def public_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("💰 Price", callback_data="price"),
+            InlineKeyboardButton("💧 Liquidity", callback_data="liquidity"),
+        ],
+        [
+            InlineKeyboardButton("👥 Holders", callback_data="holders"),
+            InlineKeyboardButton("📊 Chart", url=CHART_URL),
+        ],
+        [
+            InlineKeyboardButton("🛒 Buy", url=BUY_XEXCHANGE_URL),
+            InlineKeyboardButton("🤖 Bot Status", callback_data="bot_status"),
+        ],
+    ])
+
+
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
@@ -844,35 +874,51 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-def start_caption() -> str:
+def start_caption(is_public: bool) -> str:
+    if is_public:
+        return (
+            "🪶 *WOODY Monitor V2*\n\n"
+            "Live monitoring for WOODY:\n"
+            "• Price\n"
+            "• Liquidity\n"
+            "• Holders\n"
+            "• Chart & Buy\n\n"
+            "Choose an option 👇"
+        )
     return (
-        "🪶 *WOODY Monitor V2 • Pro Menu*\n\n"
-        "✅ *NEW TEST MENU ACTIVE*\n\n"
+        "🪶 *WOODY Monitor V2 • Admin Menu*\n\n"
         "Live monitoring for WOODY:\n"
         "• BUY/SELL alerts\n"
         "• Price & Liquidity\n"
         "• Holders & Volume analytics\n"
         "• Pool insights & bot health\n\n"
-        "Updated menu — choose an option 👇"
+        "Choose an option 👇"
     )
 
 
-async def send_start_menu(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def send_start_menu(
+    chat_id: int,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_type: Optional[str],
+    user_id: Optional[int],
+) -> None:
+    is_public = is_public_menu_context(chat_type, user_id)
+    keyboard = public_menu_keyboard() if is_public else main_menu_keyboard()
     if file_exists(BANNER_IMAGE):
         with open(image_path(BANNER_IMAGE), "rb") as photo:
             await context.bot.send_photo(
                 chat_id=chat_id,
                 photo=InputFile(photo),
-                caption=start_caption(),
+                caption=start_caption(is_public),
                 parse_mode=ParseMode.MARKDOWN,
-                reply_markup=main_menu_keyboard(),
+                reply_markup=keyboard,
             )
     else:
         await context.bot.send_message(
             chat_id=chat_id,
-            text=start_caption(),
+            text=start_caption(is_public),
             parse_mode=ParseMode.MARKDOWN,
-            reply_markup=main_menu_keyboard(),
+            reply_markup=keyboard,
         )
 
 
@@ -1013,6 +1059,9 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
 
     dex = detect_pool_dex(tx)
 
+    if woody_received > 0 and woody_sent > 0:
+        return None
+
     # BUY
     if woody_received > 0:
         quote_token = ""
@@ -1021,21 +1070,7 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
         if non_woody_sent:
             quote_token, quote_amount = sorted(non_woody_sent.items(), key=lambda x: x[1], reverse=True)[0]
         else:
-            # fallback: choose strongest non-WOODY token sent by any real/technical participant to watched pools
-            pool_inflows: Dict[str, float] = {}
-            for op in tx.get("operations") or []:
-                token = operation_token(op)
-                if not token or token == WOODY:
-                    continue
-                amount = operation_amount(op)
-                if amount <= 0:
-                    continue
-                receiver = str(op.get("receiver") or "")
-                if receiver in WATCHED_POOLS:
-                    pool_inflows[token] = pool_inflows.get(token, 0.0) + amount
-
-            if pool_inflows:
-                quote_token, quote_amount = sorted(pool_inflows.items(), key=lambda x: x[1], reverse=True)[0]
+            return None
 
         usd_value = max(
             token_usd_estimate(quote_token, quote_amount),
@@ -1060,20 +1095,7 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
         if non_woody_received:
             quote_token, quote_amount = sorted(non_woody_received.items(), key=lambda x: x[1], reverse=True)[0]
         else:
-            pool_outflows: Dict[str, float] = {}
-            for op in tx.get("operations") or []:
-                token = operation_token(op)
-                if not token or token == WOODY:
-                    continue
-                amount = operation_amount(op)
-                if amount <= 0:
-                    continue
-                sender = str(op.get("sender") or "")
-                if sender in WATCHED_POOLS:
-                    pool_outflows[token] = pool_outflows.get(token, 0.0) + amount
-
-            if pool_outflows:
-                quote_token, quote_amount = sorted(pool_outflows.items(), key=lambda x: x[1], reverse=True)[0]
+            return None
 
         usd_value = max(
             token_usd_estimate(quote_token, quote_amount),
@@ -1097,10 +1119,6 @@ def choose_title(parsed: Dict[str, Any]) -> str:
     usd = safe_float(parsed.get("swap_usd_value", 0.0))
     tx_type = parsed.get("type", "")
 
-    if usd >= SUPER_WHALE_ALERT_USD:
-        return f"{'🟢🐋' if tx_type == 'BUY' else '🔴🐋'} *SUPER WHALE {tx_type}*"
-    if usd >= WHALE_ALERT_USD:
-        return f"{'🟢🐳' if tx_type == 'BUY' else '🔴🐳'} *WHALE {tx_type}*"
     if usd >= BIG_ALERT_USD:
         return f"{'🚀' if tx_type == 'BUY' else '💥'} *BIG {tx_type}*"
     return f"{'🟢' if tx_type == 'BUY' else '🔴'} *{tx_type}*"
@@ -1311,13 +1329,15 @@ async def check_holders(context: ContextTypes.DEFAULT_TYPE) -> None:
 # COMMANDS
 # =========================================================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await send_start_menu(update.effective_chat.id, context)
+    chat = update.effective_chat
+    user = update.effective_user
+    await send_start_menu(chat.id, context, chat.type if chat else None, user.id if user else None)
 
 
 async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.message:
-        await update.message.reply_text("✅ NEW TEST MENU ACTIVE (/menu)")
-    await send_start_menu(update.effective_chat.id, context)
+    chat = update.effective_chat
+    user = update.effective_user
+    await send_start_menu(chat.id, context, chat.type if chat else None, user.id if user else None)
 
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1382,6 +1402,9 @@ async def greeting_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     text = update.message.text.strip().lower()
+    if update.effective_chat and update.effective_chat.type in {"group", "supergroup"}:
+        return
+
     if text in {"hello", "hi", "gm", "hey", "salut", "buna", "bună"}:
         replies = [
             "👋 Welcome to WOODY!",

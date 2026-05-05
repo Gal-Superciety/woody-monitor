@@ -10,6 +10,9 @@ Setează variabilele de mediu astfel:
 # Token bot
 TELEGRAM_BOT_TOKEN=...
 
+# Admin Telegram user id (private full menu)
+ADMIN_TELEGRAM_ID=123456789
+
 # Chat privat (opțional)
 TELEGRAM_PRIVATE_CHAT_ID=123456789
 ENABLE_PRIVATE_ALERTS=true
@@ -34,3 +37,22 @@ Dacă `Group alerts` e `OFF`, verifică:
 - `ENABLE_GROUP_ALERTS=true`
 - `TELEGRAM_GROUP_CHAT_ID` setat corect
 - botul este prezent în grup și nu e restricționat.
+
+## Meniuri separate (public vs admin)
+
+### Grup public (`group` / `supergroup`)
+Meniul afișează doar:
+- 💰 Price
+- 💧 Liquidity
+- 👥 Holders
+- 📊 Chart
+- 🛒 Buy
+- 🤖 Bot Status
+
+Sunt ascunse din meniu (dar păstrate în cod): Top Holders, Last Buy/Sell, Volume 24h, Top Volume, Pools, Diagnostics și alte opțiuni tehnice.
+
+### Privat admin (`private` + `user_id == ADMIN_TELEGRAM_ID`)
+Adminul vede meniul complet, cu toate butoanele existente.
+
+### Privat non-admin (`private` + alt `user_id`)
+Utilizatorii non-admin văd meniul public simplificat.
