@@ -136,6 +136,8 @@ API_FAIL_COUNT = 0
 LAST_API_ERROR = "N/A"
 LAST_ALERT_SENT_AT = 0
 LAST_TX_PROCESSED = ""
+GROUP_ALERT_DEDUP: Dict[str, float] = {}
+GROUP_ALERT_COOLDOWN_SECONDS = int(os.getenv("GROUP_ALERT_COOLDOWN_SECONDS", "60"))
 
 LAST_HOLDERS_COUNT: Optional[int] = None
 PENDING_HOLDER_VALUE: Optional[int] = None
@@ -935,6 +937,19 @@ async def send_alert_to_targets(
 
     for target in targets:
         try:
+            is_group_target = str(target) == GROUP_CHAT_ID and ENABLE_GROUP_ALERTS
+            if is_group_target:
+                dedup_key = f"{image_name}|{caption}"
+                now = time.time()
+                last_sent = GROUP_ALERT_DEDUP.get(dedup_key, 0.0)
+                if now - last_sent < GROUP_ALERT_COOLDOWN_SECONDS:
+                    logger.info(
+                        "ALERT SKIPPED (group anti-spam) | target=%s cooldown=%ss",
+                        target,
+                        GROUP_ALERT_COOLDOWN_SECONDS,
+                    )
+                    continue
+
             if file_exists(image_name):
                 with open(image_path(image_name), "rb") as photo:
                     await context.bot.send_photo(
@@ -950,10 +965,12 @@ async def send_alert_to_targets(
                     parse_mode=ParseMode.MARKDOWN,
                     disable_web_page_preview=True,
                 )
-            logger.info("Alert sent to %s", target)
+            if is_group_target:
+                GROUP_ALERT_DEDUP[dedup_key] = time.time()
+            logger.info("ALERT SENT | target=%s image=%s", target, image_name)
             LAST_ALERT_SENT_AT = int(time.time())
         except Exception as exc:
-            logger.warning("[ALERT ERROR] %s -> %s", target, exc)
+            logger.warning("ALERT ERROR | target=%s err=%s", target, exc)
 
 # =========================================================
 # TRANSACTION CLASSIFIER
@@ -1059,6 +1076,64 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
 
     dex = detect_pool_dex(tx)
 
+    def tx_text_blob() -> str:
+        parts: List[str] = [
+            str(tx.get("function") or ""),
+            str(tx.get("action", {}).get("name") or ""),
+            str(tx.get("action", {}).get("category") or ""),
+            str(tx.get("data") or ""),
+        ]
+        for op in tx.get("operations") or []:
+            parts.extend(
+                [
+                    str(op.get("action") or ""),
+                    str(op.get("type") or ""),
+                    str(op.get("identifier") or ""),
+                    str(op.get("tokenIdentifier") or ""),
+                ]
+            )
+        return " ".join(parts).lower()
+
+    def liquidity_kind() -> Optional[str]:
+        blob = tx_text_blob()
+        has_add = any(k in blob for k in ["addliquidity", "add_liquidity", "add liquidity", "lp mint", "mintlp"])
+        has_remove = any(k in blob for k in ["removeliquidity", "remove_liquidity", "remove liquidity", "lp burn", "burnlp"])
+
+        has_egld_like_sent = any(token == WEGLD or symbol(token).upper() in {"WEGLD", "EGLD", "XEGLD"} for token in non_woody_sent)
+        has_egld_like_received = any(token == WEGLD or symbol(token).upper() in {"WEGLD", "EGLD", "XEGLD"} for token in non_woody_received)
+
+        if has_add or (woody_sent > 0 and has_egld_like_sent):
+            return "LIQUIDITY_ADDED"
+        if has_remove or (woody_received > 0 and has_egld_like_received):
+            return "LIQUIDITY_REMOVED"
+        return None
+
+    liquidity_type = liquidity_kind()
+    if liquidity_type:
+        if liquidity_type == "LIQUIDITY_ADDED":
+            egld_amount = sum(
+                amount
+                for token, amount in non_woody_sent.items()
+                if token == WEGLD or symbol(token).upper() in {"WEGLD", "EGLD", "XEGLD"}
+            )
+            woody_amount = woody_sent
+        else:
+            egld_amount = sum(
+                amount
+                for token, amount in non_woody_received.items()
+                if token == WEGLD or symbol(token).upper() in {"WEGLD", "EGLD", "XEGLD"}
+            )
+            woody_amount = woody_received
+
+        return {
+            "type": liquidity_type,
+            "wallet": wallet,
+            "woody_amount": woody_amount,
+            "egld_amount": egld_amount,
+            "dex": dex,
+            "root_hash": tx.get("txHash") or tx.get("originalTxHash") or "",
+        }
+
     if woody_received > 0 and woody_sent > 0:
         return None
 
@@ -1116,8 +1191,13 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
 
 
 def choose_title(parsed: Dict[str, Any]) -> str:
-    usd = safe_float(parsed.get("swap_usd_value", 0.0))
     tx_type = parsed.get("type", "")
+    if tx_type == "LIQUIDITY_ADDED":
+        return "💧 *LIQUIDITY ADDED*"
+    if tx_type == "LIQUIDITY_REMOVED":
+        return "💧 *LIQUIDITY REMOVED*"
+
+    usd = safe_float(parsed.get("swap_usd_value", 0.0))
 
     if usd >= BIG_ALERT_USD:
         return f"{'🚀' if tx_type == 'BUY' else '💥'} *BIG {tx_type}*"
@@ -1128,6 +1208,8 @@ def choose_image(parsed: Dict[str, Any]) -> str:
     usd = safe_float(parsed.get("swap_usd_value", 0.0))
     tx_type = parsed.get("type", "")
 
+    if tx_type in {"LIQUIDITY_ADDED", "LIQUIDITY_REMOVED"}:
+        return BANNER_IMAGE if file_exists(BANNER_IMAGE) else BUY_IMAGE
     if tx_type == "BUY":
         return BIG_BUY_IMAGE if usd >= BIG_ALERT_USD else BUY_IMAGE
     return BIG_SELL_IMAGE if usd >= BIG_ALERT_USD else SELL_IMAGE
@@ -1141,6 +1223,17 @@ def build_message(parsed: Dict[str, Any]) -> str:
     price_line = ""
     if best:
         price_line = f"📊 Market: {best['price_egld']:.12f} EGLD (${best['price_usd']:.8f})\n"
+    tx_type = parsed.get("type", "")
+    if tx_type in {"LIQUIDITY_ADDED", "LIQUIDITY_REMOVED"}:
+        return (
+            "🪶 *WOODY Monitor V2*\n"
+            f"{choose_title(parsed)}\n\n"
+            f"🪙 *EGLD:* `{safe_float(parsed.get('egld_amount', 0.0)):,.6f}`\n"
+            f"🪶 *WOODY:* `{safe_float(parsed.get('woody_amount', 0.0)):,.4f}`\n"
+            f"🏦 *Pool:* `{parsed.get('dex', 'Unknown')}`\n"
+            f"👤 *Wallet:* `{short_wallet(parsed.get('wallet', ''))}`\n"
+            f"🔗 [Open in Explorer]({explorer})"
+        )
     confidence = str(parsed.get("usd_confidence", "high")).upper()
 
     return (
@@ -1264,12 +1357,16 @@ async def process_pending_roots(context: ContextTypes.DEFAULT_TYPE) -> None:
             continue
 
         parsed = classify_tx(tx)
+        logger.info("TX CLASSIFIED | root=%s type=%s", root_hash, parsed.get("type") if parsed else "NONE")
         if parsed:
             update_volume_state(parsed)
             message = build_message(parsed)
             update_last_alert(parsed, message)
 
-        if parsed and parsed.get("swap_usd_value", 0.0) >= MIN_ALERT_USD:
+        if parsed and parsed.get("type") in {"LIQUIDITY_ADDED", "LIQUIDITY_REMOVED"}:
+            await send_alert_to_targets(context, choose_image(parsed), message)
+            logger.info("ALERT SENT | root=%s type=%s", parsed["root_hash"], parsed["type"])
+        elif parsed and parsed.get("swap_usd_value", 0.0) >= MIN_ALERT_USD:
             await send_alert_to_targets(context, choose_image(parsed), message)
             logger.info(
                 "ALERT SENT | root=%s type=%s wallet=%s woody=%s quote=%s %s dex=%s usd=%s",
@@ -1283,7 +1380,7 @@ async def process_pending_roots(context: ContextTypes.DEFAULT_TYPE) -> None:
                 parsed["swap_usd_value"],
             )
         else:
-            logger.info("Root %s classified as no alert", root_hash)
+            logger.info("ALERT SKIPPED | root=%s reason=below_threshold_or_unclassified", root_hash)
 
         to_delete.append(root_hash)
         ROOT_PROCESSED.add(root_hash)
@@ -1369,6 +1466,12 @@ async def menu_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     await query.answer()
+    logger.info(
+        "BUTTON PRESS | user=%s chat=%s data=%s",
+        update.effective_user.id if update.effective_user else "unknown",
+        update.effective_chat.id if update.effective_chat else "unknown",
+        query.data,
+    )
 
     if query.data == "price":
         await query.message.reply_text(get_price_text(), parse_mode=ParseMode.MARKDOWN)
