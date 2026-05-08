@@ -136,6 +136,8 @@ API_FAIL_COUNT = 0
 LAST_API_ERROR = "N/A"
 LAST_ALERT_SENT_AT = 0
 LAST_TX_PROCESSED = ""
+GROUP_ALERT_DEDUP: Dict[str, float] = {}
+GROUP_ALERT_COOLDOWN_SECONDS = int(os.getenv("GROUP_ALERT_COOLDOWN_SECONDS", "60"))
 
 LAST_HOLDERS_COUNT: Optional[int] = None
 PENDING_HOLDER_VALUE: Optional[int] = None
@@ -935,6 +937,19 @@ async def send_alert_to_targets(
 
     for target in targets:
         try:
+            is_group_target = str(target) == GROUP_CHAT_ID and ENABLE_GROUP_ALERTS
+            if is_group_target:
+                dedup_key = f"{image_name}|{caption}"
+                now = time.time()
+                last_sent = GROUP_ALERT_DEDUP.get(dedup_key, 0.0)
+                if now - last_sent < GROUP_ALERT_COOLDOWN_SECONDS:
+                    logger.info(
+                        "ALERT SKIPPED (group anti-spam) | target=%s cooldown=%ss",
+                        target,
+                        GROUP_ALERT_COOLDOWN_SECONDS,
+                    )
+                    continue
+
             if file_exists(image_name):
                 with open(image_path(image_name), "rb") as photo:
                     await context.bot.send_photo(
@@ -950,10 +965,12 @@ async def send_alert_to_targets(
                     parse_mode=ParseMode.MARKDOWN,
                     disable_web_page_preview=True,
                 )
-            logger.info("Alert sent to %s", target)
+            if is_group_target:
+                GROUP_ALERT_DEDUP[dedup_key] = time.time()
+            logger.info("ALERT SENT | target=%s image=%s", target, image_name)
             LAST_ALERT_SENT_AT = int(time.time())
         except Exception as exc:
-            logger.warning("[ALERT ERROR] %s -> %s", target, exc)
+            logger.warning("ALERT ERROR | target=%s err=%s", target, exc)
 
 # =========================================================
 # TRANSACTION CLASSIFIER
@@ -1388,6 +1405,7 @@ async def process_pending_roots(context: ContextTypes.DEFAULT_TYPE) -> None:
             continue
 
         parsed = classify_tx(tx)
+        logger.info("TX CLASSIFIED | root=%s type=%s", root_hash, parsed.get("type") if parsed else "NONE")
         if parsed:
             update_volume_state(parsed)
             message = build_message(parsed)
@@ -1410,7 +1428,7 @@ async def process_pending_roots(context: ContextTypes.DEFAULT_TYPE) -> None:
                 parsed["swap_usd_value"],
             )
         else:
-            logger.info("Root %s classified as no alert", root_hash)
+            logger.info("ALERT SKIPPED | root=%s reason=below_threshold_or_unclassified", root_hash)
 
         to_delete.append(root_hash)
         ROOT_PROCESSED.add(root_hash)
@@ -1496,7 +1514,12 @@ async def menu_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     await query.answer()
-    logger.info("BUTTON PRESS | data=%s", query.data)
+    logger.info(
+        "BUTTON PRESS | user=%s chat=%s data=%s",
+        update.effective_user.id if update.effective_user else "unknown",
+        update.effective_chat.id if update.effective_chat else "unknown",
+        query.data,
+    )
 
     if query.data == "price":
         await query.message.reply_text(get_price_text(), parse_mode=ParseMode.MARKDOWN)
