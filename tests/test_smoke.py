@@ -15,6 +15,7 @@ def test_pytest_collection_smoke() -> None:
 def test_liquidity_add_is_not_sell() -> None:
     tx = {
         "txHash": "hash-liq-add",
+        "function": "addLiquidity",
         "operations": [
             {
                 "identifier": main.WOODY,
