@@ -963,7 +963,9 @@ def operation_token(op: dict) -> str:
 
 
 def operation_amount(op: dict) -> float:
-    return amount_from_raw(op.get("value", "0"), op.get("decimals", 18))
+    raw = op.get("value", op.get("amount", "0"))
+    decimals = op.get("decimals", 18)
+    return amount_from_raw(raw, decimals)
 
 
 def detect_pool_dex(tx: dict) -> str:
@@ -1007,8 +1009,28 @@ def get_wallet_flows(tx: dict, wallet: str) -> Tuple[Dict[str, float], Dict[str,
     sent: Dict[str, float] = {}
     received: Dict[str, float] = {}
 
-    for op in tx.get("operations") or []:
-        token = operation_token(op)
+    def iter_transfer_like_nodes(node: Any) -> List[dict]:
+        found: List[dict] = []
+        if isinstance(node, dict):
+            has_tokenish = any(node.get(k) for k in ("identifier", "tokenIdentifier", "collection", "ticker"))
+            has_addr = bool(node.get("sender") or node.get("receiver"))
+            has_amountish = any(node.get(k) is not None for k in ("value", "amount"))
+            if has_tokenish and has_addr and has_amountish:
+                found.append(node)
+            for value in node.values():
+                found.extend(iter_transfer_like_nodes(value))
+        elif isinstance(node, list):
+            for item in node:
+                found.extend(iter_transfer_like_nodes(item))
+        return found
+
+    sources = [tx.get("operations") or [], tx.get("transfers") or [], tx.get("results") or []]
+    entries: List[dict] = []
+    for source in sources:
+        entries.extend(iter_transfer_like_nodes(source))
+
+    for op in entries:
+        token = operation_token(op) or str(op.get("collection") or op.get("ticker") or "")
         if not token:
             continue
         amount = operation_amount(op)
@@ -1024,6 +1046,39 @@ def get_wallet_flows(tx: dict, wallet: str) -> Tuple[Dict[str, float], Dict[str,
             received[token] = received.get(token, 0.0) + amount
 
     return sent, received
+
+
+def tx_contains_token(tx: dict, token_id: str) -> bool:
+    needle = str(token_id or "").strip().lower()
+    if not needle:
+        return False
+
+    def has_text(value: Any) -> bool:
+        return needle in str(value or "").lower()
+
+    if has_text(tx.get("data")) or has_text(tx.get("function")):
+        return True
+
+    for container in (tx.get("operations") or [], tx.get("transfers") or [], tx.get("results") or []):
+        for item in container:
+            for key in ("identifier", "tokenIdentifier", "collection", "ticker", "data", "function", "action", "type"):
+                if has_text(item.get(key)):
+                    return True
+
+    for log_event in (tx.get("logs", {}).get("events") or []):
+        if has_text(log_event.get("identifier")) or has_text(log_event.get("topics")) or has_text(log_event.get("data")):
+            return True
+
+    return False
+
+
+def is_quote_token(token: str) -> bool:
+    token_up = symbol(token).upper()
+    return (
+        token == WEGLD
+        or token_up in {"WEGLD", "XEGLD", "EGLD"}
+        or USDC_HINT.upper() in token.upper()
+    )
 
 
 def token_usd_estimate(token: str, amount: float) -> float:
@@ -1045,8 +1100,21 @@ def token_usd_estimate(token: str, amount: float) -> float:
 
 
 def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
+    root_hash = tx.get("txHash") or tx.get("originalTxHash") or ""
+    woody_present = tx_contains_token(tx, WOODY)
+    if not woody_present:
+        logger.info(
+            "TX DEBUG | root=%s WOODY_PRESENT=false CLASSIFIED_AS=NONE SKIP_REASON=SKIP_NON_WOODY_TX",
+            root_hash,
+        )
+        return None
+
     wallet = choose_real_wallet(tx)
     if not wallet:
+        logger.info(
+            "TX DEBUG | root=%s WOODY_PRESENT=true CLASSIFIED_AS=NONE SKIP_REASON=NO_REAL_WALLET",
+            root_hash,
+        )
         return None
 
     sent, received = get_wallet_flows(tx, wallet)
@@ -1056,6 +1124,8 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
 
     non_woody_sent = {k: v for k, v in sent.items() if k != WOODY and v > 0}
     non_woody_received = {k: v for k, v in received.items() if k != WOODY and v > 0}
+    quote_sent = {k: v for k, v in non_woody_sent.items() if is_quote_token(k)}
+    quote_received = {k: v for k, v in non_woody_received.items() if is_quote_token(k)}
 
     dex = detect_pool_dex(tx)
 
@@ -1077,71 +1147,38 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
             )
         return " ".join(parts).lower()
 
-    def classify_pool_direction_liquidity() -> Optional[str]:
-        pool_addresses = set(WATCHED_POOLS.keys())
-        woody_in = woody_out = 0.0
-        egld_in = egld_out = 0.0
-
-        for op in tx.get("operations") or []:
-            token = operation_token(op)
-            amount = operation_amount(op)
-            if amount <= 0:
-                continue
-            sender = str(op.get("sender") or "")
-            receiver = str(op.get("receiver") or "")
-
-            is_woody = token == WOODY
-            is_egld_like = token == WEGLD or symbol(token).upper() in {"WEGLD", "EGLD", "XEGLD"}
-            if not (is_woody or is_egld_like):
-                continue
-
-            if receiver in pool_addresses:
-                if is_woody:
-                    woody_in += amount
-                else:
-                    egld_in += amount
-            if sender in pool_addresses:
-                if is_woody:
-                    woody_out += amount
-                else:
-                    egld_out += amount
-
-        if woody_in > 0 and egld_in > 0:
-            return "LIQUIDITY_ADDED"
-        if woody_out > 0 and egld_out > 0:
-            return "LIQUIDITY_REMOVED"
-        return None
-
     def liquidity_kind() -> Optional[str]:
         blob = tx_text_blob()
         has_add = any(k in blob for k in ["addliquidity", "add_liquidity", "add liquidity"])
         has_remove = any(k in blob for k in ["removeliquidity", "remove_liquidity", "remove liquidity"])
-        has_lp_mint = any(k in blob for k in ["lp mint", "mintlp", "mint-lp", "mint_lp"])
-        has_lp_burn = any(k in blob for k in ["lp burn", "burnlp", "burn-lp", "burn_lp"])
+        has_lp_mint = any(k in blob for k in ["lp mint", "mintlp", "mint-lp", "mint_lp", "esdtlocalmint"])
+        has_lp_burn = any(k in blob for k in ["lp burn", "burnlp", "burn-lp", "burn_lp", "esdtlocalburn"])
+        egld_sent = sum(v for t, v in quote_sent.items() if symbol(t).upper() in {"WEGLD", "EGLD", "XEGLD"})
+        egld_received = sum(v for t, v in quote_received.items() if symbol(t).upper() in {"WEGLD", "EGLD", "XEGLD"})
+        lp_sent = sum(v for t, v in sent.items() if "LP" in symbol(t).upper())
+        lp_received = sum(v for t, v in received.items() if "LP" in symbol(t).upper())
 
-        if has_add or has_lp_mint:
+        if has_add or has_lp_mint or (woody_sent > 0 and egld_sent > 0 and lp_received > 0):
             return "LIQUIDITY_ADDED"
-        if has_remove or has_lp_burn:
+        if has_remove or has_lp_burn or (lp_sent > 0 and woody_received > 0 and egld_received > 0):
             return "LIQUIDITY_REMOVED"
-
-        return classify_pool_direction_liquidity()
+        return None
 
     liquidity_type = liquidity_kind()
     if liquidity_type:
         if liquidity_type == "LIQUIDITY_ADDED":
-            egld_amount = sum(
-                amount
-                for token, amount in non_woody_sent.items()
-                if token == WEGLD or symbol(token).upper() in {"WEGLD", "EGLD", "XEGLD"}
-            )
+            egld_amount = sum(amount for token, amount in quote_sent.items() if symbol(token).upper() in {"WEGLD", "EGLD", "XEGLD"})
             woody_amount = woody_sent
         else:
-            egld_amount = sum(
-                amount
-                for token, amount in non_woody_received.items()
-                if token == WEGLD or symbol(token).upper() in {"WEGLD", "EGLD", "XEGLD"}
-            )
+            egld_amount = sum(amount for token, amount in quote_received.items() if symbol(token).upper() in {"WEGLD", "EGLD", "XEGLD"})
             woody_amount = woody_received
+
+        if woody_amount <= 0 or egld_amount <= 0:
+            logger.info(
+                "TX DEBUG | root=%s WOODY_PRESENT=true REAL_WALLET=%s WOODY_SENT=%s WOODY_RECEIVED=%s QUOTE_SENT=%s QUOTE_RECEIVED=%s CLASSIFIED_AS=NONE SKIP_REASON=INVALID_LIQUIDITY_SIDES",
+                root_hash, wallet, woody_sent, woody_received, sum(quote_sent.values()), sum(quote_received.values())
+            )
+            return None
 
         detected = {
             "type": liquidity_type,
@@ -1149,28 +1186,23 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
             "woody_amount": woody_amount,
             "egld_amount": egld_amount,
             "dex": dex,
-            "root_hash": tx.get("txHash") or tx.get("originalTxHash") or "",
+            "root_hash": root_hash,
         }
         logger.info(
-            "TX DEBUG | wallet=%s woody_sent=%s woody_received=%s non_woody_sent=%s non_woody_received=%s detected type=%s",
-            wallet,
-            woody_sent,
-            woody_received,
-            non_woody_sent,
-            non_woody_received,
-            detected["type"],
+            "TX DEBUG | root=%s WOODY_PRESENT=true REAL_WALLET=%s WOODY_SENT=%s WOODY_RECEIVED=%s QUOTE_SENT=%s QUOTE_RECEIVED=%s CLASSIFIED_AS=%s SKIP_REASON=",
+            root_hash, wallet, woody_sent, woody_received, sum(quote_sent.values()), sum(quote_received.values()), detected["type"]
         )
         return detected
 
     net_woody = woody_received - woody_sent
-    quote_sent_total = sum(non_woody_sent.values())
-    quote_received_total = sum(non_woody_received.values())
+    quote_sent_total = sum(quote_sent.values())
+    quote_received_total = sum(quote_received.values())
     net_quote = quote_received_total - quote_sent_total
 
     detected: Optional[Dict[str, Any]] = None
 
     if net_woody > 0 and quote_sent_total > 0 and net_quote < 0:
-        quote_token, quote_amount = sorted(non_woody_sent.items(), key=lambda x: x[1], reverse=True)[0]
+        quote_token, quote_amount = sorted(quote_sent.items(), key=lambda x: x[1], reverse=True)[0]
         usd_value = max(
             token_usd_estimate(quote_token, quote_amount),
             token_usd_estimate(WOODY, net_woody),
@@ -1183,10 +1215,10 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
             "quote_amount": quote_amount,
             "swap_usd_value": usd_value,
             "dex": dex,
-            "root_hash": tx.get("txHash") or tx.get("originalTxHash") or "",
+            "root_hash": root_hash,
         }
     elif net_woody < 0 and quote_received_total > 0 and net_quote > 0:
-        quote_token, quote_amount = sorted(non_woody_received.items(), key=lambda x: x[1], reverse=True)[0]
+        quote_token, quote_amount = sorted(quote_received.items(), key=lambda x: x[1], reverse=True)[0]
         usd_value = max(
             token_usd_estimate(quote_token, quote_amount),
             token_usd_estimate(WOODY, abs(net_woody)),
@@ -1199,17 +1231,14 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
             "quote_amount": quote_amount,
             "swap_usd_value": usd_value,
             "dex": dex,
-            "root_hash": tx.get("txHash") or tx.get("originalTxHash") or "",
+            "root_hash": root_hash,
         }
 
     logger.info(
-        "TX DEBUG | wallet=%s woody_sent=%s woody_received=%s non_woody_sent=%s non_woody_received=%s detected type=%s",
-        wallet,
-        woody_sent,
-        woody_received,
-        non_woody_sent,
-        non_woody_received,
+        "TX DEBUG | root=%s WOODY_PRESENT=true REAL_WALLET=%s WOODY_SENT=%s WOODY_RECEIVED=%s QUOTE_SENT=%s QUOTE_RECEIVED=%s CLASSIFIED_AS=%s SKIP_REASON=%s",
+        root_hash, wallet, woody_sent, woody_received, quote_sent_total, quote_received_total,
         detected.get("type") if detected else "NONE",
+        "" if detected else ("QUOTE_TOKEN_NOT_FOUND" if (woody_sent > 0 or woody_received > 0) and (quote_sent_total <= 0 and quote_received_total <= 0) else "UNMATCHED_FLOW")
     )
     return detected
 
