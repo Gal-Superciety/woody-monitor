@@ -1617,7 +1617,6 @@ def main() -> None:
         logger.info("Startup complete, websocket task launched")
 
     async def post_shutdown(_: Application) -> None:
-        global WS_STOP_EVENT, WS_TASK
         if WS_STOP_EVENT:
             WS_STOP_EVENT.set()
         if WS_TASK and not WS_TASK.done():
