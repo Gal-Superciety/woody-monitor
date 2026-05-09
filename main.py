@@ -48,6 +48,7 @@ USDC_HINT = os.getenv("USDC_TOKEN_HINT", "USDC").strip()
 JEX = os.getenv("JEX_TOKEN_ID", "JEX-9040ca").strip()
 MEX = os.getenv("MEX_TOKEN_ID", "MEX-455c57").strip()
 BOBER = os.getenv("BOBER_TOKEN_ID", "BOBER-9eb764").strip()
+ROUTER_ADDRESS = os.getenv("ROUTER_ADDRESS", "erd1qqqqqqqqqqqqqpgq5rf2sppxk2xu4m0pkmugw2es4gak3rgjah0sxvajva").strip()
 
 XEXCHANGE_POOL_ADDRESS = os.getenv(
     "XEXCHANGE_POOL_ADDRESS",
@@ -179,6 +180,7 @@ DEFAULT_TECH_ADDRESSES = {
     WOODY_JEX_POOL_ADDRESS,
     WOODY_MEX_POOL_ADDRESS,
     ONEDEX_BURN_ADDRESS,
+    ROUTER_ADDRESS,
     "erd1qqqqqqqqqqqqqpgq5rf2sppxk2xu4m0pkmugw2es4gak3rgjah0sxvajva",
     "erd1xp9gdkln4s3t8qd2pw6sr7de6dfyy33yath48m6sc9ndt9jv08yqp84mtg",
     "erd17dr22kal8p9halkyp0xxe9kf7euyvn9j0jyr67223k8ccdtgdnuq2wfu5s",
@@ -307,6 +309,12 @@ def load_runtime_state() -> None:
         if isinstance(root, str) and root:
             ROOT_PROCESSED.add(root)
 
+
+
+
+def validate_runtime_config() -> None:
+    if not ROUTER_ADDRESS:
+        logger.warning("CONFIG WARNING | ROUTER_ADDRESS is empty; routed swap SELL detection may misidentify real wallet and miss quote recovery")
 
 def get_json(url: str, params: Optional[dict] = None) -> Optional[Any]:
     global API_OK_COUNT, API_FAIL_COUNT, LAST_API_ERROR
@@ -986,6 +994,22 @@ def detect_pool_dex(tx: dict) -> str:
     return "Unknown"
 
 
+def pick_real_wallet_candidates(tx: dict) -> List[str]:
+    counts: Dict[str, int] = {}
+
+    for addr in [tx.get("sender", ""), tx.get("receiver", "")]:
+        if is_real_wallet(addr):
+            counts[addr] = counts.get(addr, 0) + 3
+
+    for op in tx.get("operations") or []:
+        for field in ("sender", "receiver"):
+            addr = op.get(field, "")
+            if is_real_wallet(addr):
+                counts[addr] = counts.get(addr, 0) + 1
+
+    return [addr for addr, _ in sorted(counts.items(), key=lambda x: x[1], reverse=True)]
+
+
 def choose_real_wallet(tx: dict) -> Optional[str]:
     counts: Dict[str, int] = {}
 
@@ -1045,7 +1069,7 @@ def get_wallet_flows(tx: dict, wallet: str) -> Tuple[Dict[str, float], Dict[str,
 
         transfer_like_keys = {
             "operations", "transfers", "results", "events", "logs", "innerResults",
-            "innerTransactions", "scResults", "tokens", "payment", "payments",
+            "innerTransactions", "scResults", "smartContractResults", "tokens", "payment", "payments", "arguments",
         }
         for key, value in node.items():
             if isinstance(value, (dict, list)):
@@ -1088,12 +1112,59 @@ def tx_contains_token(tx: dict, token_id: str) -> bool:
 
 
 def is_quote_token(token: str) -> bool:
-    token_up = symbol(token).upper()
+    token_id = str(token or "")
+    token_up = symbol(token_id).upper()
+    configured_quotes = {
+        WEGLD.upper(),
+        JEX.upper(),
+        MEX.upper(),
+        BOBER.upper(),
+        "ONE",
+    }
     return (
-        token == WEGLD
-        or token_up in {"WEGLD", "XEGLD", "EGLD"}
-        or USDC_HINT.upper() in token.upper()
+        token_id.upper() in configured_quotes
+        or token_up in {"WEGLD", "XEGLD", "EGLD", "USDC", "USDT", "MEX", "JEX", "ONE", "BOBER"}
+        or USDC_HINT.upper() in token_id.upper()
     )
+
+
+def recover_quote_received_from_full_tx(root_hash: str, wallet: str) -> Tuple[Dict[str, float], str]:
+    tx_full = get_tx_details(root_hash)
+    if not tx_full:
+        logger.info("TX DEBUG | root=%s stage=QUOTE_RECOVERY_FAILED reason=FULL_TX_FETCH_FAILED wallet=%s", root_hash, wallet)
+        return {}, wallet
+
+    _, full_received = get_wallet_flows(tx_full, wallet)
+    quote_received = {k: v for k, v in full_received.items() if is_quote_token(k) and v > 0}
+    if quote_received:
+        logger.info(
+            "TX DEBUG | root=%s stage=QUOTE_RECOVERY_SUCCESS wallet=%s recovered_quote_received=%s",
+            root_hash, wallet, quote_received
+        )
+        return quote_received, wallet
+
+    best_wallet = wallet
+    best_quote: Dict[str, float] = {}
+    for candidate in pick_real_wallet_candidates(tx_full):
+        candidate_sent, candidate_received = get_wallet_flows(tx_full, candidate)
+        candidate_woody_sent = candidate_sent.get(WOODY, 0.0)
+        candidate_quote_received = {k: v for k, v in candidate_received.items() if is_quote_token(k) and v > 0}
+        if candidate_woody_sent > 0 and sum(candidate_quote_received.values()) > sum(best_quote.values()):
+            best_wallet = candidate
+            best_quote = candidate_quote_received
+
+    if best_quote:
+        logger.info(
+            "TX DEBUG | root=%s stage=QUOTE_RECOVERY_SUCCESS wallet=%s recovered_quote_received=%s inferred_wallet=%s",
+            root_hash, wallet, best_quote, best_wallet
+        )
+        return best_quote, best_wallet
+
+    logger.info(
+        "TX DEBUG | root=%s stage=QUOTE_RECOVERY_FAILED reason=NO_QUOTE_IN_FULL_TX wallet=%s",
+        root_hash, wallet
+    )
+    return {}, wallet
 
 
 def token_usd_estimate(token: str, amount: float) -> float:
@@ -1154,7 +1225,19 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
             "TX DEBUG | root=%s stage=QUOTE_RECOVERY reason=WOODY_SENT_WITHOUT_QUOTE_RECEIVED wallet=%s non_woody_sent=%s non_woody_received=%s",
             root_hash, wallet, non_woody_sent, non_woody_received
         )
-        quote_received = non_woody_received
+        if not ROUTER_ADDRESS:
+            logger.warning("TX DEBUG | root=%s stage=QUOTE_RECOVERY reason=ROUTER_ADDRESS_MISSING note=real_wallet_selection_may_be_inaccurate", root_hash)
+        recovered_quote, recovered_wallet = recover_quote_received_from_full_tx(root_hash, wallet)
+        if recovered_quote:
+            quote_received = recovered_quote
+            wallet = recovered_wallet
+            quote_received_total = sum(quote_received.values())
+            logger.info(
+                "TX DEBUG | root=%s stage=SELL_RECOVERED_FROM_FULL_TX wallet=%s quote_received_total=%s quote_received=%s",
+                root_hash, wallet, quote_received_total, quote_received
+            )
+        else:
+            quote_received = non_woody_received
 
     dex = detect_pool_dex(tx)
 
@@ -1615,6 +1698,7 @@ def main() -> None:
     if not TOKEN:
         raise ValueError("TELEGRAM_BOT_TOKEN is missing")
     load_runtime_state()
+    validate_runtime_config()
 
     async def post_init(application: Application) -> None:
         global WS_STOP_EVENT, WS_TASK
