@@ -1052,6 +1052,12 @@ def get_wallet_flows(tx: dict, wallet: str) -> Tuple[Dict[str, float], Dict[str,
                 if key in transfer_like_keys or isinstance(value, list):
                     walk(value)
 
+    top_sender = str(tx.get("sender") or "")
+    top_receiver = str(tx.get("receiver") or "")
+    top_value = amount_from_raw(tx.get("value", "0"), 18)
+    if top_value > 0 and (top_sender == wallet or top_receiver == wallet):
+        add("EGLD", top_value, top_sender, top_receiver)
+
     walk(tx)
 
     return sent, received
