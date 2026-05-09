@@ -1604,16 +1604,76 @@ def add_root(root_hash: str) -> None:
     if not root_hash:
         return
     if root_hash in ROOT_PROCESSED:
+        logger.debug("add_root | root=%s already processed, skipping", root_hash)
         return
 
     item = ROOT_PENDING.get(root_hash)
     if item:
         item["updated"] = time.time()
+        logger.debug("add_root | root=%s updated timestamp (already pending)", root_hash)
     else:
         ROOT_PENDING[root_hash] = {
             "created": time.time(),
             "updated": time.time(),
         }
+        logger.info("add_root | root=%s added to ROOT_PENDING (queue size=%s)", root_hash, len(ROOT_PENDING))
+
+
+async def _send_subscriptions(sio: socketio.AsyncClient) -> None:
+    """Emit all subscribeCustomTransfers subscriptions and log each attempt."""
+    logger.info("WS SUBSCRIBE | Sending token subscription for %s", WOODY)
+    try:
+        await sio.emit("subscribeCustomTransfers", {"token": WOODY})
+        logger.info("WS SUBSCRIBE | Token subscription sent for %s", WOODY)
+    except Exception as exc:
+        logger.warning("WS SUBSCRIBE | Token subscription failed for %s -> %s", WOODY, exc)
+
+    for pool in WATCHED_POOLS:
+        logger.info("WS SUBSCRIBE | Sending address subscription for pool %s", pool)
+        try:
+            await sio.emit("subscribeCustomTransfers", {"address": pool})
+            logger.info("WS SUBSCRIBE | Address subscription sent for pool %s", pool)
+        except Exception as exc:
+            logger.warning("WS SUBSCRIBE | Address subscription failed for pool %s -> %s", pool, exc)
+
+
+def _extract_root_hashes(data: Any) -> List[str]:
+    """Extract root/tx hashes from any customTransfers payload shape.
+
+    The MultiversX WebSocket API may deliver events as:
+      - A list of transfer objects directly
+      - A dict with a ``transfers`` key containing a list
+      - A single transfer object (dict without a ``transfers`` key)
+    """
+    hashes: List[str] = []
+
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        if "transfers" in data:
+            items = data.get("transfers") or []
+            if not isinstance(items, list):
+                items = [items] if items else []
+        else:
+            # Single transfer object delivered directly
+            items = [data]
+    else:
+        logger.warning("WS EVENT | Unexpected payload type: %s", type(data).__name__)
+        return hashes
+
+    for transfer in items:
+        if not isinstance(transfer, dict):
+            continue
+        root_hash = str(
+            transfer.get("originalTxHash")
+            or transfer.get("txHash")
+            or transfer.get("hash")
+            or ""
+        )
+        if root_hash:
+            hashes.append(root_hash)
+
+    return hashes
 
 
 async def ws_connect_loop(stop_event: asyncio.Event) -> None:
@@ -1630,45 +1690,46 @@ async def ws_connect_loop(stop_event: asyncio.Event) -> None:
         async def connect():
             global WS_CONNECTED
             WS_CONNECTED = True
-            logger.info("WebSocket connected")
-            try:
-                await sio.emit("subscribeCustomTransfers", {"token": WOODY})
-                logger.info("Subscribed custom transfers for token: %s", WOODY)
-            except Exception as exc:
-                logger.warning("Token subscription failed -> %s", exc)
-
-            for pool in WATCHED_POOLS:
-                try:
-                    await sio.emit("subscribeCustomTransfers", {"address": pool})
-                    logger.info("Subscribed custom transfers for address: %s", pool)
-                except Exception as exc:
-                    logger.warning("Address subscription failed for %s -> %s", pool, exc)
+            logger.info("WS EVENT | connect fired — WebSocket connected to %s", WS_URL)
+            # Small yield so the socket handshake fully settles before emitting
+            await asyncio.sleep(0.1)
+            await _send_subscriptions(sio)
 
         @sio.event
         async def disconnect():
             global WS_CONNECTED
             WS_CONNECTED = False
-            logger.warning("WebSocket disconnected")
+            logger.warning("WS EVENT | disconnect fired — WebSocket disconnected")
 
-        @sio.on("customTransferUpdate")
-        async def on_custom_transfer_update(data):
-            logger.info("customTransferUpdate raw payload received")
-
-            transfers = (data or {}).get("transfers") or []
-            logger.info("customTransferUpdate transfers count=%s", len(transfers))
-
-            if not isinstance(transfers, list):
-                return
-
-            for transfer in transfers:
-                root_hash = str(transfer.get("originalTxHash") or transfer.get("txHash") or "")
-                if not root_hash:
-                    continue
+        # Primary event name used by the MultiversX socket-api
+        @sio.on("customTransfers")
+        async def on_custom_transfers(data):
+            logger.info("WS EVENT | customTransfers received — payload type=%s", type(data).__name__)
+            hashes = _extract_root_hashes(data)
+            logger.info("WS EVENT | customTransfers extracted %s root hash(es): %s", len(hashes), hashes)
+            for root_hash in hashes:
                 add_root(root_hash)
 
+        # Legacy / alternative event name — kept for compatibility
+        @sio.on("customTransferUpdate")
+        async def on_custom_transfer_update(data):
+            logger.info("WS EVENT | customTransferUpdate received — payload type=%s", type(data).__name__)
+            hashes = _extract_root_hashes(data)
+            logger.info("WS EVENT | customTransferUpdate extracted %s root hash(es): %s", len(hashes), hashes)
+            for root_hash in hashes:
+                add_root(root_hash)
+
+        # Catch-all to surface any unexpected event names from the API
+        @sio.on("*")
+        async def on_any_event(event, data):
+            if event in {"connect", "disconnect", "customTransfers", "customTransferUpdate"}:
+                return
+            logger.info("WS EVENT | unhandled event=%s payload_type=%s", event, type(data).__name__)
+
         try:
-            logger.info("Connecting websocket to %s", WS_URL)
+            logger.info("WS CONNECT | Connecting to %s (path=/ws/subscription)", WS_URL)
             await sio.connect(WS_URL, socketio_path="/ws/subscription", transports=["websocket"])
+            logger.info("WS CONNECT | sio.connect() returned — waiting for events")
             while not stop_event.is_set():
                 await asyncio.sleep(0.3)
         except asyncio.CancelledError:
@@ -1676,15 +1737,16 @@ async def ws_connect_loop(stop_event: asyncio.Event) -> None:
             break
         except Exception as exc:
             WS_CONNECTED = False
-            logger.warning("WebSocket loop error -> %s", exc)
+            logger.warning("WS CONNECT | Loop error -> %s", exc)
             if not stop_event.is_set():
+                logger.info("WS CONNECT | Reconnecting in %ss...", WS_RECONNECT_DELAY)
                 await asyncio.sleep(WS_RECONNECT_DELAY)
         finally:
             try:
                 if sio.connected:
                     await sio.disconnect()
             except Exception as exc:
-                logger.debug("Socket disconnect cleanup error: %s", exc)
+                logger.debug("WS CONNECT | Disconnect cleanup error: %s", exc)
             WS_CONNECTED = False
 
 # =========================================================
@@ -1712,16 +1774,37 @@ async def process_pending_roots(context: ContextTypes.DEFAULT_TYPE) -> None:
                 logger.info("No tx details yet for root %s (will retry)", root_hash)
             continue
 
+
+        logger.info("PROCESS ROOT | root=%s age=%.1fs — classifying tx", root_hash, age)
         parsed = classify_tx(tx)
         if parsed:
+            logger.info(
+                "PROCESS ROOT | root=%s classified type=%s wallet=%s woody=%.4f usd=%.2f dex=%s",
+                root_hash,
+                parsed.get("type"),
+                parsed.get("wallet"),
+                safe_float(parsed.get("woody_amount")),
+                safe_float(parsed.get("swap_usd_value")),
+                parsed.get("dex"),
+            )
             update_volume_state(parsed)
             message = build_message(parsed)
             update_last_alert(parsed, message)
+        else:
+            logger.info("PROCESS ROOT | root=%s classified as None (no alert)", root_hash)
 
         if parsed and parsed.get("type") in {"LIQUIDITY_ADDED", "LIQUIDITY_REMOVED"}:
+            logger.info(
+                "ALERT DISPATCH | root=%s type=%s targets=%s",
+                parsed["root_hash"], parsed["type"], chat_targets(),
+            )
             await send_alert_to_targets(context, choose_image(parsed), message)
             logger.info("ALERT SENT | root=%s type=%s", parsed["root_hash"], parsed["type"])
         elif parsed and parsed.get("swap_usd_value", 0.0) >= MIN_ALERT_USD:
+            logger.info(
+                "ALERT DISPATCH | root=%s type=%s usd=%.2f targets=%s",
+                parsed["root_hash"], parsed["type"], parsed["swap_usd_value"], chat_targets(),
+            )
             await send_alert_to_targets(context, choose_image(parsed), message)
             logger.info(
                 "ALERT SENT | root=%s type=%s wallet=%s woody=%s quote=%s %s dex=%s usd=%s",
@@ -1734,8 +1817,13 @@ async def process_pending_roots(context: ContextTypes.DEFAULT_TYPE) -> None:
                 parsed["dex"],
                 parsed["swap_usd_value"],
             )
+        elif parsed:
+            logger.info(
+                "ALERT SKIP | root=%s type=%s usd=%.2f below MIN_ALERT_USD=%.2f",
+                root_hash, parsed.get("type"), safe_float(parsed.get("swap_usd_value")), MIN_ALERT_USD,
+            )
         else:
-            logger.info("Root %s classified as no alert", root_hash)
+            logger.info("ALERT SKIP | root=%s no parseable swap detected", root_hash)
 
         to_delete.append(root_hash)
         ROOT_PROCESSED.add(root_hash)
@@ -1879,6 +1967,20 @@ def main() -> None:
         raise ValueError("TELEGRAM_BOT_TOKEN is missing")
     load_runtime_state()
     validate_runtime_config()
+
+    logger.info(
+        "CONFIG | private_alerts=%s private_chat=%s group_alerts=%s group_chat=%s "
+        "min_usd=%.2f big_usd=%.2f whale_usd=%.2f ws_url=%s woody=%s",
+        ENABLE_PRIVATE_ALERTS,
+        PRIVATE_CHAT_ID or "(not set)",
+        ENABLE_GROUP_ALERTS,
+        GROUP_CHAT_ID or "(not set)",
+        MIN_ALERT_USD,
+        BIG_ALERT_USD,
+        WHALE_ALERT_USD,
+        WS_URL,
+        WOODY,
+    )
 
     async def post_init(application: Application) -> None:
         global WS_STOP_EVENT, WS_TASK
