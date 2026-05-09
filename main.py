@@ -131,6 +131,8 @@ POOL_SNAPSHOT_CACHE: Dict[str, Tuple[Dict[str, Any], float]] = {}
 ROOT_PENDING: Dict[str, Dict[str, Any]] = {}
 ROOT_PROCESSED: Set[str] = set()
 WS_CONNECTED = False
+WS_STOP_EVENT: Optional[asyncio.Event] = None
+WS_TASK: Optional[asyncio.Task] = None
 API_OK_COUNT = 0
 API_FAIL_COUNT = 0
 LAST_API_ERROR = "N/A"
@@ -1007,44 +1009,50 @@ def get_wallet_flows(tx: dict, wallet: str) -> Tuple[Dict[str, float], Dict[str,
     sent: Dict[str, float] = {}
     received: Dict[str, float] = {}
 
-    def apply_flow(container: Any, label: str) -> None:
-        if not isinstance(container, list):
+    def add(token: str, amount: float, from_addr: str, to_addr: str) -> None:
+        if not token or amount <= 0:
             return
-        for op in container:
-            if not isinstance(op, dict):
-                continue
-            token = operation_token(op)
-            if not token:
-                continue
-            amount = operation_amount(op)
-            if amount <= 0:
-                continue
+        if from_addr == wallet:
+            sent[token] = sent.get(token, 0.0) + amount
+        if to_addr == wallet:
+            received[token] = received.get(token, 0.0) + amount
 
-            sender = str(op.get("sender") or "")
-            receiver = str(op.get("receiver") or "")
-            from_addr = str(op.get("from") or "")
-            to_addr = str(op.get("to") or "")
+    def as_amount(entry: Dict[str, Any]) -> float:
+        if "value" in entry:
+            return operation_amount(entry)
+        return safe_float(entry.get("amount"))
 
-            if sender == wallet or from_addr == wallet:
-                sent[token] = sent.get(token, 0.0) + amount
-            if receiver == wallet or to_addr == wallet:
-                received[token] = received.get(token, 0.0) + amount
+    def walk(node: Any) -> None:
+        if isinstance(node, list):
+            for item in node:
+                walk(item)
+            return
+        if not isinstance(node, dict):
+            return
 
-    apply_flow(tx.get("operations") or [], "operations")
-    apply_flow(tx.get("transfers") or [], "transfers")
-    apply_flow(tx.get("results") or [], "results")
+        token = str(
+            node.get("identifier")
+            or node.get("tokenIdentifier")
+            or node.get("token")
+            or node.get("ticker")
+            or ""
+        )
+        sender = str(node.get("sender") or node.get("from") or node.get("owner") or "")
+        receiver = str(node.get("receiver") or node.get("to") or node.get("destination") or "")
+        amount = as_amount(node)
+        if token and amount > 0 and (sender == wallet or receiver == wallet):
+            add(token, amount, sender, receiver)
 
-    for result in tx.get("results") or []:
-        if not isinstance(result, dict):
-            continue
-        apply_flow(result.get("operations") or [], "results.operations")
-        apply_flow(result.get("transfers") or [], "results.transfers")
+        transfer_like_keys = {
+            "operations", "transfers", "results", "events", "logs", "innerResults",
+            "innerTransactions", "scResults", "tokens", "payment", "payments",
+        }
+        for key, value in node.items():
+            if isinstance(value, (dict, list)):
+                if key in transfer_like_keys or isinstance(value, list):
+                    walk(value)
 
-    for event in (tx.get("logs", {}).get("events") or []):
-        if not isinstance(event, dict):
-            continue
-        apply_flow(event.get("transfers") or [], "logs.events.transfers")
-        apply_flow(event.get("operations") or [], "logs.events.operations")
+    walk(tx)
 
     return sent, received
 
@@ -1339,9 +1347,9 @@ def add_root(root_hash: str) -> None:
         }
 
 
-async def ws_connect_loop() -> None:
+async def ws_connect_loop(stop_event: asyncio.Event) -> None:
     global WS_CONNECTED
-    while True:
+    while not stop_event.is_set():
         sio = socketio.AsyncClient(
             reconnection=True,
             reconnection_attempts=0,
@@ -1392,14 +1400,23 @@ async def ws_connect_loop() -> None:
         try:
             logger.info("Connecting websocket to %s", WS_URL)
             await sio.connect(WS_URL, socketio_path="/ws/subscription", transports=["websocket"])
-            await sio.wait()
+            while not stop_event.is_set():
+                await asyncio.sleep(0.3)
         except asyncio.CancelledError:
             WS_CONNECTED = False
-            raise
+            break
         except Exception as exc:
             WS_CONNECTED = False
             logger.warning("WebSocket loop error -> %s", exc)
-            await asyncio.sleep(WS_RECONNECT_DELAY)
+            if not stop_event.is_set():
+                await asyncio.sleep(WS_RECONNECT_DELAY)
+        finally:
+            try:
+                if sio.connected:
+                    await sio.disconnect()
+            except Exception as exc:
+                logger.debug("Socket disconnect cleanup error: %s", exc)
+            WS_CONNECTED = False
 
 # =========================================================
 # JOBS
@@ -1535,7 +1552,10 @@ async def menu_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     await query.answer()
-    logger.info("BUTTON PRESS | data=%s", query.data)
+    logger.info(
+        "BUTTON PRESS | data=%s user=%s chat=%s",
+        query.data, query.from_user.id if query.from_user else "?", query.message.chat_id if query.message else "?"
+    )
 
     if query.data == "price":
         await query.message.reply_text(get_price_text(), parse_mode=ParseMode.MARKDOWN)
@@ -1562,6 +1582,8 @@ async def menu_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.message.reply_text(get_bot_status_text(), parse_mode=ParseMode.MARKDOWN)
     elif query.data == "diagnostics":
         await query.message.reply_text(get_diagnostics_text(), parse_mode=ParseMode.MARKDOWN)
+    else:
+        logger.warning("Unhandled callback_data=%s", query.data)
 
 
 async def greeting_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1588,7 +1610,23 @@ def main() -> None:
         raise ValueError("TELEGRAM_BOT_TOKEN is missing")
     load_runtime_state()
 
-    app = Application.builder().token(TOKEN).build()
+    async def post_init(application: Application) -> None:
+        global WS_STOP_EVENT, WS_TASK
+        WS_STOP_EVENT = asyncio.Event()
+        WS_TASK = application.create_task(ws_connect_loop(WS_STOP_EVENT))
+        logger.info("Startup complete, websocket task launched")
+
+    async def post_shutdown(_: Application) -> None:
+        if WS_STOP_EVENT:
+            WS_STOP_EVENT.set()
+        if WS_TASK and not WS_TASK.done():
+            WS_TASK.cancel()
+            try:
+                await WS_TASK
+            except asyncio.CancelledError:
+                pass
+
+    app = Application.builder().token(TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
 
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("menu", menu_command))
@@ -1604,15 +1642,6 @@ def main() -> None:
 
     app.job_queue.run_repeating(check_holders, interval=CHECK_HOLDERS_INTERVAL, first=20)
     app.job_queue.run_repeating(process_pending_roots, interval=3, first=5)
-
-    async def startup_task():
-        await ws_connect_loop()
-
-    async def post_init(application: Application) -> None:
-        application.create_task(startup_task())
-        logger.info("Startup complete, websocket task launched")
-
-    app.post_init = post_init
 
     logger.info("WOODY Monitor V2 started...")
     app.run_polling(drop_pending_updates=True)
