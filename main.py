@@ -1045,7 +1045,7 @@ def get_wallet_flows(tx: dict, wallet: str) -> Tuple[Dict[str, float], Dict[str,
 
         transfer_like_keys = {
             "operations", "transfers", "results", "events", "logs", "innerResults",
-            "innerTransactions", "scResults", "tokens", "payment", "payments",
+            "innerTransactions", "scResults", "smartContractResults", "tokens", "payment", "payments", "arguments",
         }
         for key, value in node.items():
             if isinstance(value, (dict, list)):
@@ -1088,12 +1088,43 @@ def tx_contains_token(tx: dict, token_id: str) -> bool:
 
 
 def is_quote_token(token: str) -> bool:
-    token_up = symbol(token).upper()
+    token_id = str(token or "")
+    token_up = symbol(token_id).upper()
+    configured_quotes = {
+        WEGLD.upper(),
+        JEX.upper(),
+        MEX.upper(),
+        BOBER.upper(),
+        "ONE",
+    }
     return (
-        token == WEGLD
-        or token_up in {"WEGLD", "XEGLD", "EGLD"}
-        or USDC_HINT.upper() in token.upper()
+        token_id.upper() in configured_quotes
+        or token_up in {"WEGLD", "XEGLD", "EGLD", "USDC", "USDT", "MEX", "JEX", "ONE", "BOBER"}
+        or USDC_HINT.upper() in token_id.upper()
     )
+
+
+def recover_quote_received_from_full_tx(root_hash: str, wallet: str) -> Dict[str, float]:
+    tx_full = get_tx_details(root_hash)
+    if not tx_full:
+        logger.info("TX DEBUG | root=%s stage=QUOTE_RECOVERY_FAILED reason=FULL_TX_FETCH_FAILED wallet=%s", root_hash, wallet)
+        return {}
+
+    _, full_received = get_wallet_flows(tx_full, wallet)
+    quote_received = {k: v for k, v in full_received.items() if is_quote_token(k) and v > 0}
+
+    if quote_received:
+        logger.info(
+            "TX DEBUG | root=%s stage=QUOTE_RECOVERY_SUCCESS wallet=%s recovered_quote_received=%s",
+            root_hash, wallet, quote_received
+        )
+    else:
+        logger.info(
+            "TX DEBUG | root=%s stage=QUOTE_RECOVERY_FAILED reason=NO_QUOTE_IN_FULL_TX wallet=%s",
+            root_hash, wallet
+        )
+
+    return quote_received
 
 
 def token_usd_estimate(token: str, amount: float) -> float:
@@ -1154,7 +1185,16 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
             "TX DEBUG | root=%s stage=QUOTE_RECOVERY reason=WOODY_SENT_WITHOUT_QUOTE_RECEIVED wallet=%s non_woody_sent=%s non_woody_received=%s",
             root_hash, wallet, non_woody_sent, non_woody_received
         )
-        quote_received = non_woody_received
+        recovered_quote = recover_quote_received_from_full_tx(root_hash, wallet)
+        if recovered_quote:
+            quote_received = recovered_quote
+            quote_received_total = sum(quote_received.values())
+            logger.info(
+                "TX DEBUG | root=%s stage=SELL_RECOVERED_FROM_FULL_TX wallet=%s quote_received_total=%s quote_received=%s",
+                root_hash, wallet, quote_received_total, quote_received
+            )
+        else:
+            quote_received = non_woody_received
 
     dex = detect_pool_dex(tx)
 
