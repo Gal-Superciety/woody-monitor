@@ -131,6 +131,8 @@ BEST_PRICE_CACHE: Optional[Tuple[Dict[str, Any], float]] = None
 POOL_SNAPSHOT_CACHE: Dict[str, Tuple[Dict[str, Any], float]] = {}
 ROOT_PENDING: Dict[str, Dict[str, Any]] = {}
 ROOT_PROCESSED: Set[str] = set()
+ROOT_IN_PROGRESS: Set[str] = set()
+PROCESS_PENDING_LOCK: Optional[asyncio.Lock] = None
 WS_CONNECTED = False
 WS_STOP_EVENT: Optional[asyncio.Event] = None
 WS_TASK: Optional[asyncio.Task] = None
@@ -139,6 +141,8 @@ API_FAIL_COUNT = 0
 LAST_API_ERROR = "N/A"
 LAST_ALERT_SENT_AT = 0
 LAST_TX_PROCESSED = ""
+TX_DETAILS_CACHE: Dict[str, Tuple[Optional[dict], float]] = {}
+TX_DETAILS_CACHE_TTL_SECONDS = int(os.getenv("TX_DETAILS_CACHE_TTL_SECONDS", "45"))
 
 LAST_HOLDERS_COUNT: Optional[int] = None
 PENDING_HOLDER_VALUE: Optional[int] = None
@@ -340,6 +344,21 @@ def get_tx_details(tx_hash: str) -> Optional[dict]:
     }
     data = get_json(f"{MVX_API}/transactions/{tx_hash}", params=params)
     return data if isinstance(data, dict) else None
+
+
+def get_tx_details_cached(tx_hash: str, force_refresh: bool = False) -> Optional[dict]:
+    if not tx_hash:
+        return None
+    now = time.time()
+    cached = TX_DETAILS_CACHE.get(tx_hash)
+    if cached and not force_refresh:
+        cached_tx, cached_at = cached
+        if now - cached_at <= TX_DETAILS_CACHE_TTL_SECONDS:
+            logger.debug("TX CACHE | hit root=%s age=%.1fs", tx_hash, now - cached_at)
+            return cached_tx
+    tx = get_tx_details(tx_hash)
+    TX_DETAILS_CACHE[tx_hash] = (tx, now)
+    return tx
 
 
 def chat_targets() -> List[str]:
@@ -1029,6 +1048,42 @@ def choose_real_wallet(tx: dict) -> Optional[str]:
     return sorted(counts.items(), key=lambda x: x[1], reverse=True)[0][0]
 
 
+def choose_wallet_by_woody_delta(tx: dict) -> Optional[str]:
+    candidates = pick_real_wallet_candidates(tx)
+    if not candidates:
+        return None
+
+    best_wallet: Optional[str] = None
+    best_abs_delta = 0.0
+    best_rank = len(candidates) + 1
+
+    for rank, candidate in enumerate(candidates):
+        sent, received = get_wallet_flows_aggregated(tx, candidate)
+        woody_delta = received.get(WOODY, 0.0) - sent.get(WOODY, 0.0)
+        logger.info(
+            "TX DEBUG | stage=WALLET_WOODY_DELTA_CANDIDATE wallet=%s woody_delta=%s rank=%s",
+            candidate, woody_delta, rank
+        )
+        if abs(woody_delta) > best_abs_delta or (abs(woody_delta) == best_abs_delta and rank < best_rank):
+            best_wallet = candidate
+            best_abs_delta = abs(woody_delta)
+            best_rank = rank
+
+    if best_wallet and best_abs_delta > 0:
+        logger.info(
+            "TX DEBUG | stage=WALLET_WOODY_DELTA_SELECTED wallet=%s woody_abs_delta=%s",
+            best_wallet, best_abs_delta
+        )
+        return best_wallet
+
+    fallback = choose_real_wallet(tx)
+    logger.info(
+        "TX DEBUG | stage=WALLET_WOODY_DELTA_FALLBACK wallet=%s reason=NO_NONZERO_WOODY_DELTA_CANDIDATE",
+        fallback
+    )
+    return fallback
+
+
 def get_wallet_flows(tx: dict, wallet: str) -> Tuple[Dict[str, float], Dict[str, float]]:
     sent: Dict[str, float] = {}
     received: Dict[str, float] = {}
@@ -1262,6 +1317,26 @@ def get_scr_flows(tx: dict, wallet: str) -> Tuple[Dict[str, float], Dict[str, fl
     return sent, received
 
 
+def get_wallet_flows_aggregated(tx: dict, wallet: str) -> Tuple[Dict[str, float], Dict[str, float]]:
+    """Aggregate wallet flows across operations, SCR operations, and decoded SCR transfers."""
+    sent, received = get_wallet_flows(tx, wallet)
+    scr_sent, scr_received = get_scr_flows(tx, wallet)
+
+    for token, amount in scr_sent.items():
+        sent[token] = sent.get(token, 0.0) + amount
+    for token, amount in scr_received.items():
+        received[token] = received.get(token, 0.0) + amount
+
+    for tr in extract_scr_transfers(tx):
+        if tr["sender"] == wallet:
+            sent[tr["token"]] = sent.get(tr["token"], 0.0) + tr["amount"]
+        if tr["receiver"] == wallet:
+            received[tr["token"]] = received.get(tr["token"], 0.0) + tr["amount"]
+
+    logger.info("TX DEBUG | stage=FINAL_WALLET_AGGREGATION wallet=%s sent=%s received=%s", wallet, sent, received)
+    return sent, received
+
+
 def is_quote_token(token: str) -> bool:
     token_id = str(token or "")
     token_up = symbol(token_id).upper()
@@ -1279,20 +1354,13 @@ def is_quote_token(token: str) -> bool:
     )
 
 
-def recover_quote_received_from_full_tx(root_hash: str, wallet: str) -> Tuple[Dict[str, float], str]:
-    tx_full = get_tx_details(root_hash)
+def recover_quote_received_from_full_tx(root_hash: str, wallet: str, tx_hint: Optional[dict] = None) -> Tuple[Dict[str, float], str]:
+    tx_full = tx_hint if isinstance(tx_hint, dict) else get_tx_details_cached(root_hash)
     if not tx_full:
         logger.info("TX DEBUG | root=%s stage=QUOTE_RECOVERY_FAILED reason=FULL_TX_FETCH_FAILED wallet=%s", root_hash, wallet)
         return {}, wallet
 
-    full_sent, full_received = get_wallet_flows(tx_full, wallet)
-    for tr in extract_scr_transfers(tx_full):
-        if tr["sender"] == wallet:
-            full_sent[tr["token"]] = full_sent.get(tr["token"], 0.0) + tr["amount"]
-        if tr["receiver"] == wallet:
-            full_received[tr["token"]] = full_received.get(tr["token"], 0.0) + tr["amount"]
-            if is_quote_token(tr["token"]):
-                logger.info("TX DEBUG | root=%s stage=SCR_QUOTE_FOUND wallet=%s token=%s amount=%s", root_hash, wallet, tr["token"], tr["amount"])
+    _, full_received = get_wallet_flows_aggregated(tx_full, wallet)
     quote_received = {k: v for k, v in full_received.items() if is_quote_token(k) and v > 0}
     if quote_received:
         logger.info(
@@ -1304,14 +1372,7 @@ def recover_quote_received_from_full_tx(root_hash: str, wallet: str) -> Tuple[Di
     best_wallet = wallet
     best_quote: Dict[str, float] = {}
     for candidate in pick_real_wallet_candidates(tx_full):
-        candidate_sent, candidate_received = get_wallet_flows(tx_full, candidate)
-        for tr in extract_scr_transfers(tx_full):
-            if tr["sender"] == candidate:
-                candidate_sent[tr["token"]] = candidate_sent.get(tr["token"], 0.0) + tr["amount"]
-            if tr["receiver"] == candidate:
-                candidate_received[tr["token"]] = candidate_received.get(tr["token"], 0.0) + tr["amount"]
-                if is_quote_token(tr["token"]):
-                    logger.info("TX DEBUG | root=%s stage=SCR_QUOTE_FOUND wallet=%s token=%s amount=%s", root_hash, candidate, tr["token"], tr["amount"])
+        candidate_sent, candidate_received = get_wallet_flows_aggregated(tx_full, candidate)
         candidate_woody_sent = candidate_sent.get(WOODY, 0.0)
         candidate_quote_received = {k: v for k, v in candidate_received.items() if is_quote_token(k) and v > 0}
         if candidate_woody_sent > 0 and sum(candidate_quote_received.values()) > sum(best_quote.values()):
@@ -1360,7 +1421,7 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
         )
         return None
 
-    wallet = choose_real_wallet(tx)
+    wallet = choose_wallet_by_woody_delta(tx)
     if not wallet:
         logger.info(
             "TX DEBUG | root=%s WOODY_PRESENT=true CLASSIFIED_AS=NONE SKIP_REASON=NO_REAL_WALLET",
@@ -1368,13 +1429,29 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
         )
         return None
 
-    sent, received = get_wallet_flows(tx, wallet)
+    sent, received = get_wallet_flows_aggregated(tx, wallet)
 
     woody_sent = sent.get(WOODY, 0.0)
     woody_received = received.get(WOODY, 0.0)
 
     non_woody_sent = {k: v for k, v in sent.items() if k != WOODY and v > 0}
     non_woody_received = {k: v for k, v in received.items() if k != WOODY and v > 0}
+    routed_intermediary_tokens = sorted(
+        {
+            token
+            for token in set(non_woody_sent) | set(non_woody_received)
+            if non_woody_sent.get(token, 0.0) > 0 or non_woody_received.get(token, 0.0) > 0
+        }
+    )
+    for token in routed_intermediary_tokens:
+        logger.info(
+            "TX DEBUG | root=%s stage=ROUTED_INTERMEDIARY_ASSET wallet=%s token=%s sent=%s received=%s",
+            root_hash,
+            wallet,
+            token,
+            non_woody_sent.get(token, 0.0),
+            non_woody_received.get(token, 0.0),
+        )
     quote_sent = {k: v for k, v in non_woody_sent.items() if is_quote_token(k)}
     quote_received = {k: v for k, v in non_woody_received.items() if is_quote_token(k)}
     quote_sent_total = sum(quote_sent.values())
@@ -1426,7 +1503,7 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
                 "reason=SCR_OPS_EMPTY",
                 root_hash, wallet,
             )
-            recovered_quote, recovered_wallet = recover_quote_received_from_full_tx(root_hash, wallet)
+            recovered_quote, recovered_wallet = recover_quote_received_from_full_tx(root_hash, wallet, tx)
             if recovered_quote:
                 quote_received = recovered_quote
                 wallet = recovered_wallet
@@ -1513,14 +1590,26 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
         return detected
 
     net_woody = woody_received - woody_sent
+    logger.info(
+        "TX DEBUG | root=%s stage=FINAL_WALLET_DELTA wallet=%s WOODY_SENT=%s WOODY_RECEIVED=%s NET_WOODY=%s",
+        root_hash, wallet, woody_sent, woody_received, net_woody
+    )
     quote_sent_total = sum(quote_sent.values())
     quote_received_total = sum(quote_received.values())
     net_quote = quote_received_total - quote_sent_total
 
     detected: Optional[Dict[str, Any]] = None
 
-    if net_woody > 0 and quote_sent_total > 0 and net_quote < 0:
-        quote_token, quote_amount = sorted(quote_sent.items(), key=lambda x: x[1], reverse=True)[0]
+    if net_woody > 0:
+        quote_token, quote_amount = ("", 0.0)
+        if quote_sent:
+            quote_token, quote_amount = sorted(quote_sent.items(), key=lambda x: x[1], reverse=True)[0]
+        else:
+            logger.info(
+                "TX DEBUG | root=%s stage=ROUTED_QUOTE_OPTIONAL wallet=%s side=BUY quote_seen=false "
+                "reason=QUOTE_NOT_VISIBLE_IN_FINAL_WALLET_FLOWS",
+                root_hash, wallet
+            )
         usd_value = max(
             token_usd_estimate(quote_token, quote_amount),
             token_usd_estimate(WOODY, net_woody),
@@ -1535,8 +1624,25 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
             "dex": dex,
             "root_hash": root_hash,
         }
-    elif net_woody < 0 and quote_received_total > 0 and net_quote > 0:
-        quote_token, quote_amount = sorted(quote_received.items(), key=lambda x: x[1], reverse=True)[0]
+        logger.info(
+            "TX DEBUG | root=%s stage=FINAL_BUY_CLASSIFIED wallet=%s net_woody=%s routed_assets=%s",
+            root_hash, wallet, net_woody, routed_intermediary_tokens
+        )
+        if not quote_token:
+            logger.info(
+                "TX DEBUG | root=%s stage=CLASSIFIED_WITHOUT_QUOTE wallet=%s side=BUY net_woody=%s",
+                root_hash, wallet, net_woody
+            )
+    elif net_woody < 0:
+        quote_token, quote_amount = ("", 0.0)
+        if quote_received:
+            quote_token, quote_amount = sorted(quote_received.items(), key=lambda x: x[1], reverse=True)[0]
+        else:
+            logger.info(
+                "TX DEBUG | root=%s stage=ROUTED_QUOTE_OPTIONAL wallet=%s side=SELL quote_seen=false "
+                "reason=QUOTE_NOT_VISIBLE_IN_FINAL_WALLET_FLOWS",
+                root_hash, wallet
+            )
         usd_value = max(
             token_usd_estimate(quote_token, quote_amount),
             token_usd_estimate(WOODY, abs(net_woody)),
@@ -1551,6 +1657,15 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
             "dex": dex,
             "root_hash": root_hash,
         }
+        logger.info(
+            "TX DEBUG | root=%s stage=FINAL_SELL_CLASSIFIED wallet=%s net_woody=%s routed_assets=%s",
+            root_hash, wallet, net_woody, routed_intermediary_tokens
+        )
+        if not quote_token:
+            logger.info(
+                "TX DEBUG | root=%s stage=CLASSIFIED_WITHOUT_QUOTE wallet=%s side=SELL net_woody=%s",
+                root_hash, wallet, net_woody
+            )
 
     logger.info(
         "TX DEBUG | root=%s WOODY_PRESENT=true REAL_WALLET=%s WOODY_SENT=%s WOODY_RECEIVED=%s QUOTE_SENT=%s QUOTE_RECEIVED=%s NET_WOODY=%s NET_QUOTE=%s DEX=%s CLASSIFIED_AS=%s SKIP_REASON=%s SENT=%s RECEIVED=%s",
@@ -1779,9 +1894,22 @@ async def ws_connect_loop(stop_event: asyncio.Event) -> None:
 # JOBS
 # =========================================================
 async def process_pending_roots(context: ContextTypes.DEFAULT_TYPE) -> None:
+    global LAST_TX_PROCESSED, PROCESS_PENDING_LOCK
+    if PROCESS_PENDING_LOCK is None:
+        PROCESS_PENDING_LOCK = asyncio.Lock()
+    if PROCESS_PENDING_LOCK.locked():
+        logger.info("PROCESS ROOT | previous run still in progress - skipping this tick")
+        return
+
+    async with PROCESS_PENDING_LOCK:
+        await _process_pending_roots_inner(context)
+
+
+async def _process_pending_roots_inner(context: ContextTypes.DEFAULT_TYPE) -> None:
     global LAST_TX_PROCESSED
     now = time.time()
     to_delete: List[str] = []
+    ready_roots: List[Tuple[str, Dict[str, Any], float]] = []
 
     for root_hash, data in list(ROOT_PENDING.items()):
         age = now - safe_float(data.get("created", now))
@@ -1789,71 +1917,82 @@ async def process_pending_roots(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         if idle < ROOT_SETTLE_SECONDS and age < ROOT_MAX_AGE_SECONDS:
             continue
-
-        tx = await asyncio.to_thread(get_tx_details, root_hash)
-        if not tx:
-            if age >= ROOT_MAX_AGE_SECONDS:
-                logger.warning("No tx details fetched for root %s (expired, dropping)", root_hash)
-                to_delete.append(root_hash)
-                ROOT_PROCESSED.add(root_hash)
-            else:
-                logger.info("No tx details yet for root %s (will retry)", root_hash)
+        if root_hash in ROOT_IN_PROGRESS:
+            logger.debug("PROCESS ROOT | root=%s already in progress, skipping duplicate run", root_hash)
             continue
+        ready_roots.append((root_hash, data, age))
+
+    ready_roots.sort(key=lambda item: safe_float(item[1].get("created", now)))
+
+    for root_hash, data, age in ready_roots:
+        ROOT_IN_PROGRESS.add(root_hash)
+        try:
+            tx = await asyncio.to_thread(get_tx_details_cached, root_hash)
+            if not tx:
+                if age >= ROOT_MAX_AGE_SECONDS:
+                    logger.warning("No tx details fetched for root %s (expired, dropping)", root_hash)
+                    to_delete.append(root_hash)
+                    ROOT_PROCESSED.add(root_hash)
+                else:
+                    logger.info("No tx details yet for root %s (will retry)", root_hash)
+                continue
 
 
-        logger.info("PROCESS ROOT | root=%s age=%.1fs — classifying tx", root_hash, age)
-        parsed = classify_tx(tx)
-        if parsed:
-            logger.info(
-                "PROCESS ROOT | root=%s classified type=%s wallet=%s woody=%.4f usd=%.2f dex=%s",
-                root_hash,
-                parsed.get("type"),
-                parsed.get("wallet"),
-                safe_float(parsed.get("woody_amount")),
-                safe_float(parsed.get("swap_usd_value")),
-                parsed.get("dex"),
-            )
-            update_volume_state(parsed)
-            message = build_message(parsed)
-            update_last_alert(parsed, message)
-        else:
-            logger.info("PROCESS ROOT | root=%s classified as None (no alert)", root_hash)
+            logger.info("PROCESS ROOT | root=%s age=%.1fs — classifying tx", root_hash, age)
+            parsed = classify_tx(tx)
+            if parsed:
+                logger.info(
+                    "PROCESS ROOT | root=%s classified type=%s wallet=%s woody=%.4f usd=%.2f dex=%s",
+                    root_hash,
+                    parsed.get("type"),
+                    parsed.get("wallet"),
+                    safe_float(parsed.get("woody_amount")),
+                    safe_float(parsed.get("swap_usd_value")),
+                    parsed.get("dex"),
+                )
+                update_volume_state(parsed)
+                message = build_message(parsed)
+                update_last_alert(parsed, message)
+            else:
+                logger.info("PROCESS ROOT | root=%s classified as None (no alert)", root_hash)
 
-        if parsed and parsed.get("type") in {"LIQUIDITY_ADDED", "LIQUIDITY_REMOVED"}:
-            logger.info(
-                "ALERT DISPATCH | root=%s type=%s targets=%s",
-                parsed["root_hash"], parsed["type"], chat_targets(),
-            )
-            await send_alert_to_targets(context, choose_image(parsed), message)
-            logger.info("ALERT SENT | root=%s type=%s", parsed["root_hash"], parsed["type"])
-        elif parsed and parsed.get("swap_usd_value", 0.0) >= MIN_ALERT_USD:
-            logger.info(
-                "ALERT DISPATCH | root=%s type=%s usd=%.2f targets=%s",
-                parsed["root_hash"], parsed["type"], parsed["swap_usd_value"], chat_targets(),
-            )
-            await send_alert_to_targets(context, choose_image(parsed), message)
-            logger.info(
-                "ALERT SENT | root=%s type=%s wallet=%s woody=%s quote=%s %s dex=%s usd=%s",
-                parsed["root_hash"],
-                parsed["type"],
-                parsed["wallet"],
-                parsed["woody_amount"],
-                parsed["quote_amount"],
-                parsed["quote_token"],
-                parsed["dex"],
-                parsed["swap_usd_value"],
-            )
-        elif parsed:
-            logger.info(
-                "ALERT SKIP | root=%s type=%s usd=%.2f below MIN_ALERT_USD=%.2f",
-                root_hash, parsed.get("type"), safe_float(parsed.get("swap_usd_value")), MIN_ALERT_USD,
-            )
-        else:
-            logger.info("ALERT SKIP | root=%s no parseable swap detected", root_hash)
+            if parsed and parsed.get("type") in {"LIQUIDITY_ADDED", "LIQUIDITY_REMOVED"}:
+                logger.info(
+                    "ALERT DISPATCH | root=%s type=%s targets=%s",
+                    parsed["root_hash"], parsed["type"], chat_targets(),
+                )
+                await send_alert_to_targets(context, choose_image(parsed), message)
+                logger.info("ALERT SENT | root=%s type=%s", parsed["root_hash"], parsed["type"])
+            elif parsed and parsed.get("swap_usd_value", 0.0) >= MIN_ALERT_USD:
+                logger.info(
+                    "ALERT DISPATCH | root=%s type=%s usd=%.2f targets=%s",
+                    parsed["root_hash"], parsed["type"], parsed["swap_usd_value"], chat_targets(),
+                )
+                await send_alert_to_targets(context, choose_image(parsed), message)
+                logger.info(
+                    "ALERT SENT | root=%s type=%s wallet=%s woody=%s quote=%s %s dex=%s usd=%s",
+                    parsed["root_hash"],
+                    parsed["type"],
+                    parsed["wallet"],
+                    parsed["woody_amount"],
+                    parsed["quote_amount"],
+                    parsed["quote_token"],
+                    parsed["dex"],
+                    parsed["swap_usd_value"],
+                )
+            elif parsed:
+                logger.info(
+                    "ALERT SKIP | root=%s type=%s usd=%.2f below MIN_ALERT_USD=%.2f",
+                    root_hash, parsed.get("type"), safe_float(parsed.get("swap_usd_value")), MIN_ALERT_USD,
+                )
+            else:
+                logger.info("ALERT SKIP | root=%s no parseable swap detected", root_hash)
 
-        to_delete.append(root_hash)
-        ROOT_PROCESSED.add(root_hash)
-        LAST_TX_PROCESSED = root_hash
+            to_delete.append(root_hash)
+            ROOT_PROCESSED.add(root_hash)
+            LAST_TX_PROCESSED = root_hash
+        finally:
+            ROOT_IN_PROGRESS.discard(root_hash)
 
     for root_hash in to_delete:
         ROOT_PENDING.pop(root_hash, None)

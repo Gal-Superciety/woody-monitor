@@ -232,7 +232,7 @@ def test_liquidity_invalid_sides_returns_none() -> None:
     assert main.classify_tx(tx_remove_missing_woody) is None
 
 
-def test_woody_only_transfer_is_not_buy_sell() -> None:
+def test_woody_only_transfer_is_classified_from_net_woody_delta() -> None:
     tx = {
         "txHash": "hash-woody-transfer",
         "operations": [
@@ -245,7 +245,10 @@ def test_woody_only_transfer_is_not_buy_sell() -> None:
             },
         ],
     }
-    assert main.classify_tx(tx) is None
+    parsed = main.classify_tx(tx)
+    assert parsed is not None
+    assert parsed["type"] in {"BUY", "SELL"}
+    assert parsed["woody_amount"] == 150
 
 
 def test_xexchange_real_hash_style_wrap_and_swap_is_buy() -> None:
