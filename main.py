@@ -1039,7 +1039,7 @@ def choose_wallet_by_woody_delta(tx: dict) -> Optional[str]:
     best_rank = len(candidates) + 1
 
     for rank, candidate in enumerate(candidates):
-        sent, received = get_wallet_flows(tx, candidate)
+        sent, received = get_wallet_flows_aggregated(tx, candidate)
         woody_delta = received.get(WOODY, 0.0) - sent.get(WOODY, 0.0)
         logger.info(
             "TX DEBUG | stage=WALLET_WOODY_DELTA_CANDIDATE wallet=%s woody_delta=%s rank=%s",
@@ -1298,6 +1298,26 @@ def get_scr_flows(tx: dict, wallet: str) -> Tuple[Dict[str, float], Dict[str, fl
     return sent, received
 
 
+def get_wallet_flows_aggregated(tx: dict, wallet: str) -> Tuple[Dict[str, float], Dict[str, float]]:
+    """Aggregate wallet flows across operations, SCR operations, and decoded SCR transfers."""
+    sent, received = get_wallet_flows(tx, wallet)
+    scr_sent, scr_received = get_scr_flows(tx, wallet)
+
+    for token, amount in scr_sent.items():
+        sent[token] = sent.get(token, 0.0) + amount
+    for token, amount in scr_received.items():
+        received[token] = received.get(token, 0.0) + amount
+
+    for tr in extract_scr_transfers(tx):
+        if tr["sender"] == wallet:
+            sent[tr["token"]] = sent.get(tr["token"], 0.0) + tr["amount"]
+        if tr["receiver"] == wallet:
+            received[tr["token"]] = received.get(tr["token"], 0.0) + tr["amount"]
+
+    logger.info("TX DEBUG | stage=FINAL_WALLET_AGGREGATION wallet=%s sent=%s received=%s", wallet, sent, received)
+    return sent, received
+
+
 def is_quote_token(token: str) -> bool:
     token_id = str(token or "")
     token_up = symbol(token_id).upper()
@@ -1321,14 +1341,7 @@ def recover_quote_received_from_full_tx(root_hash: str, wallet: str) -> Tuple[Di
         logger.info("TX DEBUG | root=%s stage=QUOTE_RECOVERY_FAILED reason=FULL_TX_FETCH_FAILED wallet=%s", root_hash, wallet)
         return {}, wallet
 
-    full_sent, full_received = get_wallet_flows(tx_full, wallet)
-    for tr in extract_scr_transfers(tx_full):
-        if tr["sender"] == wallet:
-            full_sent[tr["token"]] = full_sent.get(tr["token"], 0.0) + tr["amount"]
-        if tr["receiver"] == wallet:
-            full_received[tr["token"]] = full_received.get(tr["token"], 0.0) + tr["amount"]
-            if is_quote_token(tr["token"]):
-                logger.info("TX DEBUG | root=%s stage=SCR_QUOTE_FOUND wallet=%s token=%s amount=%s", root_hash, wallet, tr["token"], tr["amount"])
+    _, full_received = get_wallet_flows_aggregated(tx_full, wallet)
     quote_received = {k: v for k, v in full_received.items() if is_quote_token(k) and v > 0}
     if quote_received:
         logger.info(
@@ -1340,14 +1353,7 @@ def recover_quote_received_from_full_tx(root_hash: str, wallet: str) -> Tuple[Di
     best_wallet = wallet
     best_quote: Dict[str, float] = {}
     for candidate in pick_real_wallet_candidates(tx_full):
-        candidate_sent, candidate_received = get_wallet_flows(tx_full, candidate)
-        for tr in extract_scr_transfers(tx_full):
-            if tr["sender"] == candidate:
-                candidate_sent[tr["token"]] = candidate_sent.get(tr["token"], 0.0) + tr["amount"]
-            if tr["receiver"] == candidate:
-                candidate_received[tr["token"]] = candidate_received.get(tr["token"], 0.0) + tr["amount"]
-                if is_quote_token(tr["token"]):
-                    logger.info("TX DEBUG | root=%s stage=SCR_QUOTE_FOUND wallet=%s token=%s amount=%s", root_hash, candidate, tr["token"], tr["amount"])
+        candidate_sent, candidate_received = get_wallet_flows_aggregated(tx_full, candidate)
         candidate_woody_sent = candidate_sent.get(WOODY, 0.0)
         candidate_quote_received = {k: v for k, v in candidate_received.items() if is_quote_token(k) and v > 0}
         if candidate_woody_sent > 0 and sum(candidate_quote_received.values()) > sum(best_quote.values()):
@@ -1404,7 +1410,7 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
         )
         return None
 
-    sent, received = get_wallet_flows(tx, wallet)
+    sent, received = get_wallet_flows_aggregated(tx, wallet)
 
     woody_sent = sent.get(WOODY, 0.0)
     woody_received = received.get(WOODY, 0.0)
