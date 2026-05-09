@@ -1539,15 +1539,16 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
 
     detected: Optional[Dict[str, Any]] = None
 
-    if net_woody != 0 and not non_woody_sent and not non_woody_received:
-        logger.info(
-            "TX DEBUG | root=%s stage=FINAL_WALLET_DELTA wallet=%s decision=UNMATCHED_FLOW reason=WOODY_ONLY_TRANSFER",
-            root_hash, wallet
-        )
-    elif net_woody > 0:
+    if net_woody > 0:
         quote_token, quote_amount = ("", 0.0)
         if quote_sent:
             quote_token, quote_amount = sorted(quote_sent.items(), key=lambda x: x[1], reverse=True)[0]
+        else:
+            logger.info(
+                "TX DEBUG | root=%s stage=ROUTED_QUOTE_OPTIONAL wallet=%s side=BUY quote_seen=false "
+                "reason=QUOTE_NOT_VISIBLE_IN_FINAL_WALLET_FLOWS",
+                root_hash, wallet
+            )
         usd_value = max(
             token_usd_estimate(quote_token, quote_amount),
             token_usd_estimate(WOODY, net_woody),
@@ -1566,10 +1567,21 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
             "TX DEBUG | root=%s stage=FINAL_BUY_CLASSIFIED wallet=%s net_woody=%s routed_assets=%s",
             root_hash, wallet, net_woody, routed_intermediary_tokens
         )
+        if not quote_token:
+            logger.info(
+                "TX DEBUG | root=%s stage=CLASSIFIED_WITHOUT_QUOTE wallet=%s side=BUY net_woody=%s",
+                root_hash, wallet, net_woody
+            )
     elif net_woody < 0:
         quote_token, quote_amount = ("", 0.0)
         if quote_received:
             quote_token, quote_amount = sorted(quote_received.items(), key=lambda x: x[1], reverse=True)[0]
+        else:
+            logger.info(
+                "TX DEBUG | root=%s stage=ROUTED_QUOTE_OPTIONAL wallet=%s side=SELL quote_seen=false "
+                "reason=QUOTE_NOT_VISIBLE_IN_FINAL_WALLET_FLOWS",
+                root_hash, wallet
+            )
         usd_value = max(
             token_usd_estimate(quote_token, quote_amount),
             token_usd_estimate(WOODY, abs(net_woody)),
@@ -1588,6 +1600,11 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
             "TX DEBUG | root=%s stage=FINAL_SELL_CLASSIFIED wallet=%s net_woody=%s routed_assets=%s",
             root_hash, wallet, net_woody, routed_intermediary_tokens
         )
+        if not quote_token:
+            logger.info(
+                "TX DEBUG | root=%s stage=CLASSIFIED_WITHOUT_QUOTE wallet=%s side=SELL net_woody=%s",
+                root_hash, wallet, net_woody
+            )
 
     logger.info(
         "TX DEBUG | root=%s WOODY_PRESENT=true REAL_WALLET=%s WOODY_SENT=%s WOODY_RECEIVED=%s QUOTE_SENT=%s QUOTE_RECEIVED=%s NET_WOODY=%s NET_QUOTE=%s DEX=%s CLASSIFIED_AS=%s SKIP_REASON=%s SENT=%s RECEIVED=%s",
