@@ -246,3 +246,24 @@ def test_woody_only_transfer_is_not_buy_sell() -> None:
         ],
     }
     assert main.classify_tx(tx) is None
+
+
+def test_xexchange_real_hash_style_wrap_and_swap_is_buy() -> None:
+    tx = {
+        "txHash": "2dd6c8911e1b4e6f74fb5336c7738ce90b2c8db8b3625e0fe02768b0185b69c4",
+        "sender": "erd1buyerwalletxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "receiver": "erd1routerxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "value": str(2 * (10 ** 18)),
+        "operations": [
+            {
+                "identifier": main.WOODY,
+                "value": str(1300 * (10 ** 18)),
+                "decimals": 18,
+                "sender": main.XEXCHANGE_POOL_ADDRESS,
+                "receiver": "erd1buyerwalletxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            },
+        ],
+    }
+    parsed = main.classify_tx(tx)
+    assert parsed is not None
+    assert parsed["type"] == "BUY"
