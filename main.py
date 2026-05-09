@@ -1177,6 +1177,65 @@ def extract_scr_transfers(tx: dict) -> List[Dict[str, Any]]:
 
     return out
 
+
+def get_scr_flows(tx: dict, wallet: str) -> Tuple[Dict[str, float], Dict[str, float]]:
+    """Extract token flows for *wallet* from Smart Contract Results (SCR) operations.
+
+    xExchange and OneDex routed swaps often return the quote token to the user
+    via an SCR's nested ``operations`` list rather than in the main transaction
+    operations.  This function iterates every SCR entry and processes its
+    ``operations`` sub-array the same way ``get_wallet_flows`` processes the
+    top-level operations, so those quote-token transfers are not missed.
+    """
+    sent: Dict[str, float] = {}
+    received: Dict[str, float] = {}
+
+    containers: List[dict] = []
+    for key in ("results", "smartContractResults", "scResults"):
+        val = tx.get(key)
+        if isinstance(val, list):
+            containers.extend(val)
+
+    for scr in containers:
+        if not isinstance(scr, dict):
+            continue
+        scr_sender = str(scr.get("sender") or scr.get("from") or "")
+        scr_receiver = str(scr.get("receiver") or scr.get("to") or "")
+
+        # Process the SCR's own operations sub-list
+        for op in scr.get("operations") or []:
+            if not isinstance(op, dict):
+                continue
+            token = str(
+                op.get("identifier")
+                or op.get("tokenIdentifier")
+                or op.get("token")
+                or op.get("ticker")
+                or ""
+            )
+            if not token:
+                continue
+            op_sender = str(op.get("sender") or op.get("from") or "")
+            op_receiver = str(op.get("receiver") or op.get("to") or "")
+            amount = operation_amount(op) if "value" in op else safe_float(op.get("amount"))
+            if amount <= 0:
+                continue
+            if op_sender == wallet:
+                sent[token] = sent.get(token, 0.0) + amount
+                logger.info(
+                    "TX DEBUG | stage=SCR_OP_FLOW direction=SENT token=%s amount=%s wallet=%s scr_sender=%s scr_receiver=%s",
+                    token, amount, wallet, scr_sender, scr_receiver,
+                )
+            if op_receiver == wallet:
+                received[token] = received.get(token, 0.0) + amount
+                logger.info(
+                    "TX DEBUG | stage=SCR_OP_FLOW direction=RECEIVED token=%s amount=%s wallet=%s scr_sender=%s scr_receiver=%s",
+                    token, amount, wallet, scr_sender, scr_receiver,
+                )
+
+    return sent, received
+
+
 def is_quote_token(token: str) -> bool:
     token_id = str(token or "")
     token_up = symbol(token_id).upper()
@@ -1302,23 +1361,63 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
         quote_sent = non_woody_sent
     if woody_sent > 0 and quote_received_total <= 0:
         logger.info(
-            "TX DEBUG | root=%s stage=QUOTE_RECOVERY reason=WOODY_SENT_WITHOUT_QUOTE_RECEIVED wallet=%s non_woody_sent=%s non_woody_received=%s",
-            root_hash, wallet, non_woody_sent, non_woody_received
+            "TX DEBUG | root=%s stage=SELL_ENTER wallet=%s WOODY_SENT=%s QUOTE_RECEIVED=0 "
+            "non_woody_sent=%s non_woody_received=%s reason=WOODY_SENT_WITHOUT_QUOTE_RECEIVED",
+            root_hash, wallet, woody_sent, non_woody_sent, non_woody_received,
         )
         if not ROUTER_ADDRESS:
-            logger.warning("TX DEBUG | root=%s stage=QUOTE_RECOVERY reason=ROUTER_ADDRESS_MISSING note=real_wallet_selection_may_be_inaccurate", root_hash)
-        recovered_quote, recovered_wallet = recover_quote_received_from_full_tx(root_hash, wallet)
-        if recovered_quote:
-            quote_received = recovered_quote
-            wallet = recovered_wallet
-            quote_received_total = sum(quote_received.values())
-            logger.info(
-                "TX DEBUG | root=%s stage=SELL_RECOVERED_FROM_FULL_TX wallet=%s quote_received_total=%s quote_received=%s",
-                root_hash, wallet, quote_received_total, quote_received
+            logger.warning(
+                "TX DEBUG | root=%s stage=QUOTE_RECOVERY reason=ROUTER_ADDRESS_MISSING "
+                "note=real_wallet_selection_may_be_inaccurate",
+                root_hash,
             )
-            logger.info("TX DEBUG | root=%s stage=SELL_RECOVERED_FROM_SCR wallet=%s quote_received=%s", root_hash, wallet, quote_received)
+
+        # --- Step 1: try SCR operations on the already-fetched tx (no extra API call) ---
+        logger.info(
+            "TX DEBUG | root=%s stage=SCR_QUOTE_ATTEMPT wallet=%s source=MAIN_TX_SCR_OPS",
+            root_hash, wallet,
+        )
+        scr_sent, scr_received = get_scr_flows(tx, wallet)
+        scr_quote_received = {k: v for k, v in scr_received.items() if is_quote_token(k) and v > 0}
+        logger.info(
+            "TX DEBUG | root=%s stage=SCR_QUOTE_RESULT wallet=%s scr_sent=%s scr_received=%s scr_quote_received=%s",
+            root_hash, wallet, scr_sent, scr_received, scr_quote_received,
+        )
+
+        if scr_quote_received:
+            quote_received = scr_quote_received
+            quote_received_total = sum(quote_received.values())
+            best_qt, best_qa = sorted(quote_received.items(), key=lambda x: x[1], reverse=True)[0]
+            logger.info(
+                "TX DEBUG | root=%s stage=SELL_RECOVERED_FROM_SCR wallet=%s "
+                "quote_token=%s quote_amount=%s quote_received_total=%s decision=SELL",
+                root_hash, wallet, best_qt, best_qa, quote_received_total,
+            )
         else:
-            quote_received = non_woody_received
+            # --- Step 2: fall back to full-tx re-fetch (includes hex-decoded SCR data) ---
+            logger.info(
+                "TX DEBUG | root=%s stage=SCR_QUOTE_ATTEMPT wallet=%s source=FULL_TX_REFETCH "
+                "reason=SCR_OPS_EMPTY",
+                root_hash, wallet,
+            )
+            recovered_quote, recovered_wallet = recover_quote_received_from_full_tx(root_hash, wallet)
+            if recovered_quote:
+                quote_received = recovered_quote
+                wallet = recovered_wallet
+                quote_received_total = sum(quote_received.values())
+                best_qt, best_qa = sorted(quote_received.items(), key=lambda x: x[1], reverse=True)[0]
+                logger.info(
+                    "TX DEBUG | root=%s stage=SELL_RECOVERED_FROM_FULL_TX wallet=%s "
+                    "quote_token=%s quote_amount=%s quote_received_total=%s decision=SELL",
+                    root_hash, wallet, best_qt, best_qa, quote_received_total,
+                )
+            else:
+                logger.info(
+                    "TX DEBUG | root=%s stage=SELL_QUOTE_NOT_FOUND wallet=%s "
+                    "WOODY_SENT=%s QUOTE_RECEIVED=0 decision=UNMATCHED_FLOW",
+                    root_hash, wallet, woody_sent,
+                )
+                quote_received = non_woody_received
 
     dex = detect_pool_dex(tx)
 
