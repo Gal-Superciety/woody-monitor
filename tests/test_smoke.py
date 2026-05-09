@@ -232,7 +232,7 @@ def test_liquidity_invalid_sides_returns_none() -> None:
     assert main.classify_tx(tx_remove_missing_woody) is None
 
 
-def test_woody_only_transfer_is_not_buy_sell() -> None:
+def test_woody_only_transfer_is_classified_from_net_woody_delta() -> None:
     tx = {
         "txHash": "hash-woody-transfer",
         "operations": [
@@ -245,7 +245,10 @@ def test_woody_only_transfer_is_not_buy_sell() -> None:
             },
         ],
     }
-    assert main.classify_tx(tx) is None
+    parsed = main.classify_tx(tx)
+    assert parsed is not None
+    assert parsed["type"] in {"BUY", "SELL"}
+    assert parsed["woody_amount"] == 150
 
 
 def test_xexchange_real_hash_style_wrap_and_swap_is_buy() -> None:
@@ -267,3 +270,98 @@ def test_xexchange_real_hash_style_wrap_and_swap_is_buy() -> None:
     parsed = main.classify_tx(tx)
     assert parsed is not None
     assert parsed["type"] == "BUY"
+
+
+def test_scr_sell_quote_recovery() -> None:
+    """SELL where quote token is returned via SCR operations, not main ops.
+
+    Mirrors the failing root 487efc40... pattern: WOODY_SENT > 0 in main ops
+    but WEGLD is only visible inside a smartContractResults entry's operations
+    sub-list.  The new get_scr_flows() helper must recover it so classify_tx()
+    returns SELL instead of NONE/UNMATCHED_FLOW.
+    """
+    wallet = "erd1seller_scr_test"
+    tx = {
+        "txHash": "487efc40a2ee324501459201aabf33d5016ee3165a01e9634277044aade5854a",
+        "operations": [
+            {
+                "identifier": main.WOODY,
+                "value": str(100_000 * (10 ** 18)),
+                "decimals": 18,
+                "sender": wallet,
+                "receiver": main.XEXCHANGE_POOL_ADDRESS,
+            },
+        ],
+        "smartContractResults": [
+            {
+                "sender": main.XEXCHANGE_POOL_ADDRESS,
+                "receiver": wallet,
+                "operations": [
+                    {
+                        "identifier": main.WEGLD,
+                        "value": str(1 * (10 ** 18)),
+                        "decimals": 18,
+                        "sender": main.XEXCHANGE_POOL_ADDRESS,
+                        "receiver": wallet,
+                    }
+                ],
+            }
+        ],
+    }
+    parsed = main.classify_tx(tx)
+    assert parsed is not None, "Expected SELL but got None (UNMATCHED_FLOW)"
+    assert parsed["type"] == "SELL"
+    assert parsed["woody_amount"] == 100_000.0
+    assert parsed["quote_token"] == main.WEGLD
+
+
+def test_get_scr_flows_extracts_received() -> None:
+    """Unit test for get_scr_flows: received quote token from SCR operations."""
+    wallet = "erd1test_wallet"
+    tx = {
+        "smartContractResults": [
+            {
+                "sender": main.XEXCHANGE_POOL_ADDRESS,
+                "receiver": wallet,
+                "operations": [
+                    {
+                        "identifier": main.WEGLD,
+                        "value": str(2 * (10 ** 18)),
+                        "decimals": 18,
+                        "sender": main.XEXCHANGE_POOL_ADDRESS,
+                        "receiver": wallet,
+                    }
+                ],
+            }
+        ]
+    }
+    scr_sent, scr_received = main.get_scr_flows(tx, wallet)
+    assert main.WEGLD in scr_received
+    assert abs(scr_received[main.WEGLD] - 2.0) < 1e-9
+    assert main.WEGLD not in scr_sent
+
+
+def test_get_scr_flows_extracts_sent() -> None:
+    """Unit test for get_scr_flows: sent token from SCR operations."""
+    wallet = "erd1test_wallet"
+    tx = {
+        "scResults": [
+            {
+                "sender": wallet,
+                "receiver": main.XEXCHANGE_POOL_ADDRESS,
+                "operations": [
+                    {
+                        "identifier": main.WOODY,
+                        "value": str(500 * (10 ** 18)),
+                        "decimals": 18,
+                        "sender": wallet,
+                        "receiver": main.XEXCHANGE_POOL_ADDRESS,
+                    }
+                ],
+            }
+        ]
+    }
+    scr_sent, scr_received = main.get_scr_flows(tx, wallet)
+    assert main.WOODY in scr_sent
+    assert abs(scr_sent[main.WOODY] - 500.0) < 1e-9
+    assert main.WOODY not in scr_received
