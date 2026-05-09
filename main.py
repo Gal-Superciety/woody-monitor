@@ -1007,21 +1007,44 @@ def get_wallet_flows(tx: dict, wallet: str) -> Tuple[Dict[str, float], Dict[str,
     sent: Dict[str, float] = {}
     received: Dict[str, float] = {}
 
-    for op in tx.get("operations") or []:
-        token = operation_token(op)
-        if not token:
-            continue
-        amount = operation_amount(op)
-        if amount <= 0:
-            continue
+    def apply_flow(container: Any, label: str) -> None:
+        if not isinstance(container, list):
+            return
+        for op in container:
+            if not isinstance(op, dict):
+                continue
+            token = operation_token(op)
+            if not token:
+                continue
+            amount = operation_amount(op)
+            if amount <= 0:
+                continue
 
-        sender = str(op.get("sender") or "")
-        receiver = str(op.get("receiver") or "")
+            sender = str(op.get("sender") or "")
+            receiver = str(op.get("receiver") or "")
+            from_addr = str(op.get("from") or "")
+            to_addr = str(op.get("to") or "")
 
-        if sender == wallet:
-            sent[token] = sent.get(token, 0.0) + amount
-        if receiver == wallet:
-            received[token] = received.get(token, 0.0) + amount
+            if sender == wallet or from_addr == wallet:
+                sent[token] = sent.get(token, 0.0) + amount
+            if receiver == wallet or to_addr == wallet:
+                received[token] = received.get(token, 0.0) + amount
+
+    apply_flow(tx.get("operations") or [], "operations")
+    apply_flow(tx.get("transfers") or [], "transfers")
+    apply_flow(tx.get("results") or [], "results")
+
+    for result in tx.get("results") or []:
+        if not isinstance(result, dict):
+            continue
+        apply_flow(result.get("operations") or [], "results.operations")
+        apply_flow(result.get("transfers") or [], "results.transfers")
+
+    for event in (tx.get("logs", {}).get("events") or []):
+        if not isinstance(event, dict):
+            continue
+        apply_flow(event.get("transfers") or [], "logs.events.transfers")
+        apply_flow(event.get("operations") or [], "logs.events.operations")
 
     return sent, received
 
@@ -1104,6 +1127,20 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
     non_woody_received = {k: v for k, v in received.items() if k != WOODY and v > 0}
     quote_sent = {k: v for k, v in non_woody_sent.items() if is_quote_token(k)}
     quote_received = {k: v for k, v in non_woody_received.items() if is_quote_token(k)}
+    quote_sent_total = sum(quote_sent.values())
+    quote_received_total = sum(quote_received.values())
+    if woody_received > 0 and quote_sent_total <= 0:
+        logger.info(
+            "TX DEBUG | root=%s stage=QUOTE_RECOVERY reason=WOODY_RECEIVED_WITHOUT_QUOTE_SENT wallet=%s non_woody_sent=%s non_woody_received=%s",
+            root_hash, wallet, non_woody_sent, non_woody_received
+        )
+        quote_sent = non_woody_sent
+    if woody_sent > 0 and quote_received_total <= 0:
+        logger.info(
+            "TX DEBUG | root=%s stage=QUOTE_RECOVERY reason=WOODY_SENT_WITHOUT_QUOTE_RECEIVED wallet=%s non_woody_sent=%s non_woody_received=%s",
+            root_hash, wallet, non_woody_sent, non_woody_received
+        )
+        quote_received = non_woody_received
 
     dex = detect_pool_dex(tx)
 
@@ -1213,10 +1250,12 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
         }
 
     logger.info(
-        "TX DEBUG | root=%s WOODY_PRESENT=true REAL_WALLET=%s WOODY_SENT=%s WOODY_RECEIVED=%s QUOTE_SENT=%s QUOTE_RECEIVED=%s CLASSIFIED_AS=%s SKIP_REASON=%s",
+        "TX DEBUG | root=%s WOODY_PRESENT=true REAL_WALLET=%s WOODY_SENT=%s WOODY_RECEIVED=%s QUOTE_SENT=%s QUOTE_RECEIVED=%s NET_WOODY=%s NET_QUOTE=%s DEX=%s CLASSIFIED_AS=%s SKIP_REASON=%s SENT=%s RECEIVED=%s",
         root_hash, wallet, woody_sent, woody_received, quote_sent_total, quote_received_total,
+        net_woody, net_quote, dex,
         detected.get("type") if detected else "NONE",
-        "" if detected else "UNMATCHED_FLOW"
+        "" if detected else "UNMATCHED_FLOW",
+        sent, received
     )
     return detected
 
