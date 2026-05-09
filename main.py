@@ -1867,7 +1867,7 @@ async def ws_connect_loop(stop_event: asyncio.Event) -> None:
 # JOBS
 # =========================================================
 async def process_pending_roots(context: ContextTypes.DEFAULT_TYPE) -> None:
-    global LAST_TX_PROCESSED, PROCESS_PENDING_LOCK
+    global PROCESS_PENDING_LOCK
     if PROCESS_PENDING_LOCK is None:
         PROCESS_PENDING_LOCK = asyncio.Lock()
     if PROCESS_PENDING_LOCK.locked():
@@ -1879,7 +1879,6 @@ async def process_pending_roots(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def _process_pending_roots_inner(context: ContextTypes.DEFAULT_TYPE) -> None:
-    global LAST_TX_PROCESSED
     now = time.time()
     to_delete: List[str] = []
     ready_roots: List[Tuple[str, Dict[str, Any], float]] = []
