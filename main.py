@@ -1094,21 +1094,47 @@ def tx_contains_token(tx: dict, token_id: str) -> bool:
 
     def has_text(value: Any) -> bool:
         return needle in str(value or "").lower()
+    logged_flags = {
+        "scr": False,
+        "op": False,
+        "inner": False,
+    }
 
-    if has_text(tx.get("data")) or has_text(tx.get("function")):
-        return True
+    def log_context(path: str, key: str, value: Any) -> None:
+        path_low = path.lower()
+        if ("smartcontractresults" in path_low or "scresults" in path_low or "results" in path_low) and not logged_flags["scr"]:
+            logged_flags["scr"] = True
+            logger.info("TX DEBUG | stage=WOODY_FOUND_IN_SCR path=%s key=%s value=%s", path, key, value)
+        if "operations" in path_low and not logged_flags["op"]:
+            logged_flags["op"] = True
+            logger.info("TX DEBUG | stage=WOODY_FOUND_IN_OPERATION path=%s key=%s value=%s", path, key, value)
+        if ("innerresults" in path_low or "innertransactions" in path_low or "innertransfers" in path_low) and not logged_flags["inner"]:
+            logged_flags["inner"] = True
+            logger.info("TX DEBUG | stage=WOODY_FOUND_IN_INNER_TRANSFER path=%s key=%s value=%s", path, key, value)
 
-    for container in (tx.get("operations") or [], tx.get("transfers") or [], tx.get("results") or []):
-        for item in container:
-            for key in ("identifier", "tokenIdentifier", "collection", "ticker", "data", "function", "action", "type"):
-                if has_text(item.get(key)):
+    def walk(node: Any, path: str = "tx") -> bool:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                current_path = f"{path}.{key}"
+                if isinstance(value, (dict, list)):
+                    if walk(value, current_path):
+                        return True
+                    continue
+                if has_text(value):
+                    log_context(path, key, value)
                     return True
-
-    for log_event in (tx.get("logs", {}).get("events") or []):
-        if has_text(log_event.get("identifier")) or has_text(log_event.get("topics")) or has_text(log_event.get("data")):
+            return False
+        if isinstance(node, list):
+            for idx, item in enumerate(node):
+                if walk(item, f"{path}[{idx}]"):
+                    return True
+            return False
+        if has_text(node):
+            log_context(path, "value", node)
             return True
+        return False
 
-    return False
+    return walk(tx)
 
 
 
