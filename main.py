@@ -1341,7 +1341,7 @@ def recover_quote_received_from_full_tx(root_hash: str, wallet: str) -> Tuple[Di
         logger.info("TX DEBUG | root=%s stage=QUOTE_RECOVERY_FAILED reason=FULL_TX_FETCH_FAILED wallet=%s", root_hash, wallet)
         return {}, wallet
 
-    _, full_received = get_wallet_flows_aggregated(tx_full, wallet)
+    _, full_received = get_wallet_flows(tx_full, wallet)
     quote_received = {k: v for k, v in full_received.items() if is_quote_token(k) and v > 0}
     if quote_received:
         logger.info(
@@ -1353,7 +1353,7 @@ def recover_quote_received_from_full_tx(root_hash: str, wallet: str) -> Tuple[Di
     best_wallet = wallet
     best_quote: Dict[str, float] = {}
     for candidate in pick_real_wallet_candidates(tx_full):
-        candidate_sent, candidate_received = get_wallet_flows_aggregated(tx_full, candidate)
+        candidate_sent, candidate_received = get_wallet_flows(tx_full, candidate)
         candidate_woody_sent = candidate_sent.get(WOODY, 0.0)
         candidate_quote_received = {k: v for k, v in candidate_received.items() if is_quote_token(k) and v > 0}
         if candidate_woody_sent > 0 and sum(candidate_quote_received.values()) > sum(best_quote.values()):
@@ -1450,58 +1450,18 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
             root_hash, wallet, woody_sent, non_woody_sent, non_woody_received,
         )
         if not ROUTER_ADDRESS:
-            logger.warning(
-                "TX DEBUG | root=%s stage=QUOTE_RECOVERY reason=ROUTER_ADDRESS_MISSING "
-                "note=real_wallet_selection_may_be_inaccurate",
-                root_hash,
-            )
-
-        # --- Step 1: try SCR operations on the already-fetched tx (no extra API call) ---
-        logger.info(
-            "TX DEBUG | root=%s stage=SCR_QUOTE_ATTEMPT wallet=%s source=MAIN_TX_SCR_OPS",
-            root_hash, wallet,
-        )
-        scr_sent, scr_received = get_scr_flows(tx, wallet)
-        scr_quote_received = {k: v for k, v in scr_received.items() if is_quote_token(k) and v > 0}
-        logger.info(
-            "TX DEBUG | root=%s stage=SCR_QUOTE_RESULT wallet=%s scr_sent=%s scr_received=%s scr_quote_received=%s",
-            root_hash, wallet, scr_sent, scr_received, scr_quote_received,
-        )
-
-        if scr_quote_received:
-            quote_received = scr_quote_received
+            logger.warning("TX DEBUG | root=%s stage=QUOTE_RECOVERY reason=ROUTER_ADDRESS_MISSING note=real_wallet_selection_may_be_inaccurate", root_hash)
+        recovered_quote, recovered_wallet = recover_quote_received_from_full_tx(root_hash, wallet)
+        if recovered_quote:
+            quote_received = recovered_quote
+            wallet = recovered_wallet
             quote_received_total = sum(quote_received.values())
-            best_qt, best_qa = sorted(quote_received.items(), key=lambda x: x[1], reverse=True)[0]
             logger.info(
-                "TX DEBUG | root=%s stage=SELL_RECOVERED_FROM_SCR wallet=%s "
-                "quote_token=%s quote_amount=%s quote_received_total=%s decision=SELL",
-                root_hash, wallet, best_qt, best_qa, quote_received_total,
+                "TX DEBUG | root=%s stage=SELL_RECOVERED_FROM_FULL_TX wallet=%s quote_received_total=%s quote_received=%s",
+                root_hash, wallet, quote_received_total, quote_received
             )
         else:
-            # --- Step 2: fall back to full-tx re-fetch (includes hex-decoded SCR data) ---
-            logger.info(
-                "TX DEBUG | root=%s stage=SCR_QUOTE_ATTEMPT wallet=%s source=FULL_TX_REFETCH "
-                "reason=SCR_OPS_EMPTY",
-                root_hash, wallet,
-            )
-            recovered_quote, recovered_wallet = recover_quote_received_from_full_tx(root_hash, wallet)
-            if recovered_quote:
-                quote_received = recovered_quote
-                wallet = recovered_wallet
-                quote_received_total = sum(quote_received.values())
-                best_qt, best_qa = sorted(quote_received.items(), key=lambda x: x[1], reverse=True)[0]
-                logger.info(
-                    "TX DEBUG | root=%s stage=SELL_RECOVERED_FROM_FULL_TX wallet=%s "
-                    "quote_token=%s quote_amount=%s quote_received_total=%s decision=SELL",
-                    root_hash, wallet, best_qt, best_qa, quote_received_total,
-                )
-            else:
-                logger.info(
-                    "TX DEBUG | root=%s stage=SELL_QUOTE_NOT_FOUND wallet=%s "
-                    "WOODY_SENT=%s QUOTE_RECEIVED=0 decision=UNMATCHED_FLOW",
-                    root_hash, wallet, woody_sent,
-                )
-                quote_received = non_woody_received
+            quote_received = non_woody_received
 
     dex = detect_pool_dex(tx)
 
@@ -2089,20 +2049,6 @@ def main() -> None:
         raise ValueError("TELEGRAM_BOT_TOKEN is missing")
     load_runtime_state()
     validate_runtime_config()
-
-    logger.info(
-        "CONFIG | private_alerts=%s private_chat=%s group_alerts=%s group_chat=%s "
-        "min_usd=%.2f big_usd=%.2f whale_usd=%.2f ws_url=%s woody=%s",
-        ENABLE_PRIVATE_ALERTS,
-        PRIVATE_CHAT_ID or "(not set)",
-        ENABLE_GROUP_ALERTS,
-        GROUP_CHAT_ID or "(not set)",
-        MIN_ALERT_USD,
-        BIG_ALERT_USD,
-        WHALE_ALERT_USD,
-        WS_URL,
-        WOODY,
-    )
 
     async def post_init(application: Application) -> None:
         global WS_STOP_EVENT, WS_TASK
