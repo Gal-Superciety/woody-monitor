@@ -56,6 +56,7 @@ USDC_HINT = os.getenv("USDC_TOKEN_HINT", "USDC").strip()
 JEX = os.getenv("JEX_TOKEN_ID", "JEX-9040ca").strip()
 MEX = os.getenv("MEX_TOKEN_ID", "MEX-455c57").strip()
 BOBER = os.getenv("BOBER_TOKEN_ID", "BOBER-9eb764").strip()
+ONE = os.getenv("ONE_TOKEN_ID", "").strip()
 ROUTER_ADDRESS = os.getenv("ROUTER_ADDRESS", "erd1qqqqqqqqqqqqqpgq5rf2sppxk2xu4m0pkmugw2es4gak3rgjah0sxvajva").strip()
 
 XEXCHANGE_POOL_ADDRESS = os.getenv(
@@ -192,6 +193,16 @@ POOL_PAIR_HINTS = {
     WOODY_JEX_POOL_ADDRESS: JEX,
     WOODY_MEX_POOL_ADDRESS: MEX,
 }
+
+MARKET_CONTEXT_TOKENS: List[Tuple[str, str]] = [
+    ("EGLD", WEGLD),
+    ("BOBER", BOBER),
+    ("MEX", MEX),
+]
+if JEX:
+    MARKET_CONTEXT_TOKENS.append(("JEX", JEX))
+if ONE:
+    MARKET_CONTEXT_TOKENS.append(("ONE", ONE))
 
 DEFAULT_TECH_ADDRESSES = {
     XEXCHANGE_POOL_ADDRESS,
@@ -565,6 +576,85 @@ def get_price_text() -> str:
     )
 
 
+def _estimate_token_context_price(token_id: str) -> Dict[str, Any]:
+    for addr, label in WATCHED_POOLS.items():
+        res_map = reserves(addr)
+        token_amount = find_token_amount(res_map, token_id)
+        if token_amount <= 0:
+            continue
+        wegld_amount = find_token_amount(res_map, WEGLD)
+        if wegld_amount > 0:
+            egld_usd = get_egld_usd()
+            price_egld = wegld_amount / token_amount
+            return {
+                "ok": True,
+                "price_usd": price_egld * egld_usd,
+                "pool": label,
+                "pool_status": "active",
+            }
+        usdc_amount = find_token_amount(res_map, USDC_HINT)
+        if usdc_amount > 0:
+            return {
+                "ok": True,
+                "price_usd": usdc_amount / token_amount,
+                "pool": label,
+                "pool_status": "active",
+            }
+    return {"ok": False, "pool_status": "no readable pool"}
+
+
+def build_market_context() -> Dict[str, Any]:
+    woody = get_best_price() or {}
+    egld_usd = get_egld_usd()
+    trades = _recent_trades(24)
+    buy_count = sum(1 for x in trades if _entry_side(x) > 0)
+    sell_count = sum(1 for x in trades if _entry_side(x) < 0)
+    market_mood = "neutral"
+    if sell_count > buy_count * 1.25:
+        market_mood = "caution"
+    elif buy_count > sell_count * 1.15 and egld_usd > 0:
+        market_mood = "bullish"
+
+    ecosystem_activity = any(
+        symbol(str(x.get("token", ""))).upper() in {"BOBER", "MEX", "JEX", "ONE"}
+        for x in trades
+    )
+
+    token_context: Dict[str, Dict[str, Any]] = {}
+    for label, token_id in MARKET_CONTEXT_TOKENS:
+        token_context[label] = _estimate_token_context_price(token_id)
+
+    return {
+        "woody_price_usd": safe_float(woody.get("price_usd")),
+        "egld_price_usd": egld_usd,
+        "tokens": token_context,
+        "market_mood": market_mood,
+        "ecosystem_activity": ecosystem_activity,
+        "volume_24h_usd": sum(safe_float(x.get("usd")) for x in trades),
+    }
+
+
+def get_market_context_text() -> str:
+    ctx = build_market_context()
+    bober = ctx["tokens"].get("BOBER", {})
+    mex = ctx["tokens"].get("MEX", {})
+    def fmt_row(name: str, data: Dict[str, Any]) -> str:
+        if safe_float(data.get("price_usd")) > 0:
+            return f"• {name}: *${safe_float(data.get('price_usd')):.8f}* ({data.get('pool', 'pool n/a')})"
+        return f"• {name}: _context unavailable_ ({data.get('pool_status', 'n/a')})"
+    return (
+        "🌐 *Market Context*\n"
+        "_Public-safe context for WOODY ecosystem_\n\n"
+        f"• WOODY price: *${ctx['woody_price_usd']:.10f}*\n" if ctx["woody_price_usd"] > 0 else "🌐 *Market Context*\n_Public-safe context for WOODY ecosystem_\n\n• WOODY price: *N/A*\n"
+    ) + (
+        f"• EGLD price: *${ctx['egld_price_usd']:.4f}*\n"
+        f"{fmt_row('BOBER', bober)}\n"
+        f"{fmt_row('MEX', mex)}\n"
+        f"• Market mood: *{ctx['market_mood']}*\n"
+        f"• 24h detected volume: *${ctx['volume_24h_usd']:,.2f}*"
+    )
+
+
 def get_token_supply() -> Tuple[float, float]:
     """
     Returns (total_supply, circulating_supply) when available.
@@ -831,6 +921,7 @@ def build_ai_recommendation() -> Dict[str, Any]:
     if LAST_HOLDERS_COUNT is not None and PENDING_HOLDER_VALUE is not None:
         holders_delta = PENDING_HOLDER_VALUE - LAST_HOLDERS_COUNT
 
+    market_ctx = build_market_context()
     score = 50
     if buy_usd > sell_usd * 1.15:
         score += 12
@@ -851,6 +942,11 @@ def build_ai_recommendation() -> Dict[str, Any]:
 
     score += max(-8, min(8, holders_delta * 2))
     score -= min(20, len(warnings) * 5)
+    if market_ctx["egld_price_usd"] > 0:
+        score += 4 if market_ctx["market_mood"] == "bullish" else 0
+        score -= 6 if market_ctx["market_mood"] == "caution" else 0
+    if market_ctx["ecosystem_activity"]:
+        score += 3
     confidence = max(0, min(100, int(score)))
 
     if confidence >= 72:
@@ -891,6 +987,9 @@ def build_ai_recommendation() -> Dict[str, Any]:
         "holders_count": LAST_HOLDERS_COUNT,
         "price_usd": safe_float(best.get("price_usd")) if best else 0.0,
         "warnings": warnings,
+        "market_mood": market_ctx["market_mood"],
+        "ecosystem_activity": market_ctx["ecosystem_activity"],
+        "egld_price_usd": market_ctx["egld_price_usd"],
     }
 
 
@@ -921,6 +1020,8 @@ def get_ai_recommendation_text(is_public: bool) -> str:
         f"• Holder changes (pending): *{rec['holders_delta']:+d}*",
         f"• Holders count: *{rec['holders_count'] if rec['holders_count'] is not None else 'N/A'}*",
         f"• Current price estimate: *${rec['price_usd']:.10f}*" if rec['price_usd'] > 0 else "• Current price estimate: *N/A*",
+        f"• EGLD market context: *${rec['egld_price_usd']:.4f}* / mood *{rec['market_mood']}*" if rec["egld_price_usd"] > 0 else f"• EGLD market context: *{rec['market_mood']}*",
+        f"• Ecosystem activity: *{'detected' if rec['ecosystem_activity'] else 'low'}*",
         f"• Diagnostics warnings: *{warning_count}*",
     ]
 
@@ -1208,6 +1309,7 @@ def public_menu_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("📈 Market Summary", callback_data="market_summary"),
+            InlineKeyboardButton("🌐 Market Context", callback_data="market_context"),
         ],
     ])
 
@@ -1246,6 +1348,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton("📈 Market Summary", callback_data="market_summary"),
             InlineKeyboardButton("🧠 AI Analysis", callback_data="ai_analysis"),
+            InlineKeyboardButton("🌐 Market Context", callback_data="market_context"),
         ],
         [
             InlineKeyboardButton("𝕏 Twitter", url=TWITTER_URL),
@@ -2514,6 +2617,8 @@ async def menu_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.message.reply_text(await asyncio.to_thread(get_market_summary_text), parse_mode=ParseMode.MARKDOWN)
     elif query.data == "ai_analysis":
         await query.message.reply_text(await asyncio.to_thread(get_ai_analysis_text), parse_mode=ParseMode.MARKDOWN)
+    elif query.data == "market_context":
+        await query.message.reply_text(await asyncio.to_thread(get_market_context_text), parse_mode=ParseMode.MARKDOWN)
     elif query.data == "ai_recommendation":
         is_public = is_public_menu_context(query.message.chat.type if query.message and query.message.chat else None, query.from_user.id if query.from_user else None)
         await query.message.reply_text(await asyncio.to_thread(get_ai_recommendation_text, is_public), parse_mode=ParseMode.MARKDOWN)
