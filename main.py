@@ -33,7 +33,7 @@ GROUP_CHAT_ID = os.getenv("TELEGRAM_GROUP_CHAT_ID", "").strip()
 
 ENABLE_PRIVATE_ALERTS = os.getenv("ENABLE_PRIVATE_ALERTS", "true").strip().lower() == "true"
 ENABLE_GROUP_ALERTS = os.getenv("ENABLE_GROUP_ALERTS", "false").strip().lower() == "true"
-ADMIN_TELEGRAM_ID = os.getenv("ADMIN_TELEGRAM_ID", "").strip()
+ADMIN_TELEGRAM_ID = os.getenv("5279028327", "").strip()
 
 MVX_API = os.getenv("MVX_API", "https://api.multiversx.com").strip()
 WS_URL = os.getenv("WS_URL", "https://socket-api-ovh.multiversx.com").strip()
@@ -723,6 +723,78 @@ def get_volume_24h_text() -> str:
     )
 
 
+def _recent_trades(hours: int = 24) -> List[Dict[str, Any]]:
+    cutoff = time.time() - (hours * 3600)
+    return [x for x in VOLUME_HISTORY if safe_float(x.get("ts")) >= cutoff]
+
+
+def _entry_side(entry: Dict[str, Any]) -> int:
+    raw_type = entry.get("type")
+    if isinstance(raw_type, str):
+        upper = raw_type.upper()
+        if upper == "BUY":
+            return 1
+        if upper == "SELL":
+            return -1
+    numeric_type = safe_float(raw_type)
+    return 1 if numeric_type > 0 else (-1 if numeric_type < 0 else 0)
+
+
+def get_market_summary_text(hours: int = 24) -> str:
+    trades = _recent_trades(hours)
+    buys = [x for x in trades if _entry_side(x) > 0]
+    sells = [x for x in trades if _entry_side(x) < 0]
+    total_usd = sum(safe_float(x.get("usd")) for x in trades)
+    biggest_buy = max((safe_float(x.get("usd")) for x in buys), default=0.0)
+    biggest_sell = max((safe_float(x.get("usd")) for x in sells), default=0.0)
+    dex_histogram: Dict[str, int] = {}
+    for side in ("BUY", "SELL"):
+        dex = str(LAST_ALERTS.get(side, {}).get("dex", "")).strip()
+        if dex:
+            dex_histogram[dex] = dex_histogram.get(dex, 0) + 1
+    dominant_dex = max(dex_histogram.items(), key=lambda x: x[1])[0] if dex_histogram else "Unknown"
+    sentiment = "bullish" if len(buys) > len(sells) else ("bearish" if len(sells) > len(buys) else "neutral")
+    logger.info("MARKET SUMMARY GENERATED")
+    return (
+        "📈 *Market Summary*\n\n"
+        f"BUY count: *{len(buys)}*\n"
+        f"SELL count: *{len(sells)}*\n"
+        f"Approx USD volume: *${total_usd:,.2f}*\n"
+        f"Biggest BUY: *${biggest_buy:,.2f}*\n"
+        f"Biggest SELL: *${biggest_sell:,.2f}*\n"
+        f"Dominant DEX: *{dominant_dex}*\n"
+        f"Sentiment: *{sentiment}*"
+    )
+
+
+def get_ai_analysis_text(hours: int = 24) -> str:
+    trades = _recent_trades(hours)
+    buys = [x for x in trades if _entry_side(x) > 0]
+    sells = [x for x in trades if _entry_side(x) < 0]
+    buy_volume = sum(safe_float(x.get("usd")) for x in buys)
+    sell_volume = sum(safe_float(x.get("usd")) for x in sells)
+    whale_buy = max((safe_float(x.get("usd")) for x in buys), default=0.0) >= WHALE_ALERT_USD
+    whale_sell = max((safe_float(x.get("usd")) for x in sells), default=0.0) >= WHALE_ALERT_USD
+    recent_6h_volume = sum(safe_float(x.get("usd")) for x in _recent_trades(6))
+    old_6h_volume = max(0.0, sum(safe_float(x.get("usd")) for x in _recent_trades(12)) - recent_6h_volume)
+    bullets: List[str] = []
+    if len(buys) > len(sells):
+        bullets.append("• bullish pressure")
+    elif len(sells) > len(buys):
+        bullets.append("• sell pressure")
+    else:
+        bullets.append("• balanced pressure")
+    if whale_buy:
+        bullets.append("• accumulation detected")
+    if whale_sell:
+        bullets.append("• caution")
+    if recent_6h_volume > old_6h_volume and recent_6h_volume > 0:
+        bullets.append("• increased activity")
+    bullets.append(f"• buy volume ${buy_volume:,.2f} vs sell volume ${sell_volume:,.2f}")
+    logger.info("AI ANALYSIS GENERATED")
+    return "🧠 *WOODY AI Analysis V1*\n\n" + "\n".join(bullets)
+
+
 def get_top_volume_text(limit: int = 10) -> str:
     rows: List[Tuple[str, Dict[str, float]]] = []
     for wallet, slot in TOP_VOLUME.items():
@@ -911,6 +983,10 @@ def public_menu_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("🤖 Bot Status", callback_data="bot_status"),
+            InlineKeyboardButton("🧠 AI Analysis", callback_data="ai_analysis"),
+        ],
+        [
+            InlineKeyboardButton("📈 Market Summary", callback_data="market_summary"),
         ],
     ])
 
@@ -946,7 +1022,12 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🧪 Diagnostics", callback_data="diagnostics"),
         ],
         [
+            InlineKeyboardButton("📈 Market Summary", callback_data="market_summary"),
+            InlineKeyboardButton("🧠 AI Analysis", callback_data="ai_analysis"),
+        ],
+        [
             InlineKeyboardButton("𝕏 Twitter", url=TWITTER_URL),
+            InlineKeyboardButton("💬 Telegram Community", url=TELEGRAM_URL),
         ],
     ])
 
@@ -981,6 +1062,7 @@ async def send_start_menu(
 ) -> None:
     is_public = is_public_menu_context(chat_type, user_id)
     keyboard = public_menu_keyboard() if is_public else main_menu_keyboard()
+    logger.info("MENU PUBLIC LOADED" if is_public else "MENU PRIVATE ADMIN LOADED")
     if file_exists(BANNER_IMAGE):
         with open(image_path(BANNER_IMAGE), "rb") as photo:
             await context.bot.send_photo(
@@ -2088,14 +2170,58 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = get_bot_status_text()
+    text = await asyncio.to_thread(get_bot_status_text)
     if update.message:
         await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 
-async def diagnostics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def price_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message:
-        await update.message.reply_text(get_diagnostics_text(), parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(await asyncio.to_thread(get_price_text), parse_mode=ParseMode.MARKDOWN)
+
+
+async def liquidity_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message:
+        await update.message.reply_text(await asyncio.to_thread(get_liquidity_text), parse_mode=ParseMode.MARKDOWN)
+
+
+async def holders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message:
+        holders = await asyncio.to_thread(get_holders_count)
+        await update.message.reply_text(
+            f"👥 *WOODY Holders*\n\nCurrent holders: *{holders or 'N/A'}*",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+
+async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message:
+        await update.message.reply_text(f"📊 Chart: {CHART_URL}")
+
+
+async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message:
+        await update.message.reply_text(
+            f"🟢 Buy xExchange:\n{BUY_XEXCHANGE_URL}\n\n🟢 Buy XOXNO:\n{BUY_XOXNO_URL}"
+        )
+
+
+async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message:
+        await update.message.reply_text(await asyncio.to_thread(get_market_summary_text), parse_mode=ParseMode.MARKDOWN)
+
+
+async def analysis_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message:
+        await update.message.reply_text(await asyncio.to_thread(get_ai_analysis_text), parse_mode=ParseMode.MARKDOWN)
+
+
+async def diagnostics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if is_public_menu_context(update.effective_chat.type if update.effective_chat else None, update.effective_user.id if update.effective_user else None):
+        return
+    if update.message:
+        text = await asyncio.to_thread(get_diagnostics_text)
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 
 async def id_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2122,30 +2248,44 @@ async def menu_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
     if query.data == "price":
-        await query.message.reply_text(get_price_text(), parse_mode=ParseMode.MARKDOWN)
+        await query.message.reply_text(await asyncio.to_thread(get_price_text), parse_mode=ParseMode.MARKDOWN)
     elif query.data == "liquidity":
-        await query.message.reply_text(get_liquidity_text(), parse_mode=ParseMode.MARKDOWN)
+        await query.message.reply_text(await asyncio.to_thread(get_liquidity_text), parse_mode=ParseMode.MARKDOWN)
     elif query.data == "holders":
         await query.message.reply_text(
             f"👥 *WOODY Holders*\n\nCurrent holders: *{get_holders_count() or 'N/A'}*",
             parse_mode=ParseMode.MARKDOWN,
         )
     elif query.data == "top_holders":
-        await query.message.reply_text(get_top_holders_text(), parse_mode=ParseMode.MARKDOWN)
+        if is_public_menu_context(query.message.chat.type if query.message and query.message.chat else None, query.from_user.id if query.from_user else None):
+            return
+        await query.message.reply_text(await asyncio.to_thread(get_top_holders_text), parse_mode=ParseMode.MARKDOWN)
     elif query.data == "last_buy":
         await query.message.reply_text(get_last_trade_text("BUY"), parse_mode=ParseMode.MARKDOWN)
     elif query.data == "last_sell":
         await query.message.reply_text(get_last_trade_text("SELL"), parse_mode=ParseMode.MARKDOWN)
     elif query.data == "volume_24h":
-        await query.message.reply_text(get_volume_24h_text(), parse_mode=ParseMode.MARKDOWN)
+        if is_public_menu_context(query.message.chat.type if query.message and query.message.chat else None, query.from_user.id if query.from_user else None):
+            return
+        await query.message.reply_text(await asyncio.to_thread(get_volume_24h_text), parse_mode=ParseMode.MARKDOWN)
     elif query.data == "top_volume":
-        await query.message.reply_text(get_top_volume_text(), parse_mode=ParseMode.MARKDOWN)
+        if is_public_menu_context(query.message.chat.type if query.message and query.message.chat else None, query.from_user.id if query.from_user else None):
+            return
+        await query.message.reply_text(await asyncio.to_thread(get_top_volume_text), parse_mode=ParseMode.MARKDOWN)
     elif query.data == "pools":
-        await query.message.reply_text(get_pools_text(), parse_mode=ParseMode.MARKDOWN)
+        if is_public_menu_context(query.message.chat.type if query.message and query.message.chat else None, query.from_user.id if query.from_user else None):
+            return
+        await query.message.reply_text(await asyncio.to_thread(get_pools_text), parse_mode=ParseMode.MARKDOWN)
     elif query.data == "bot_status":
-        await query.message.reply_text(get_bot_status_text(), parse_mode=ParseMode.MARKDOWN)
+        await query.message.reply_text(await asyncio.to_thread(get_bot_status_text), parse_mode=ParseMode.MARKDOWN)
     elif query.data == "diagnostics":
-        await query.message.reply_text(get_diagnostics_text(), parse_mode=ParseMode.MARKDOWN)
+        if is_public_menu_context(query.message.chat.type if query.message and query.message.chat else None, query.from_user.id if query.from_user else None):
+            return
+        await query.message.reply_text(await asyncio.to_thread(get_diagnostics_text), parse_mode=ParseMode.MARKDOWN)
+    elif query.data == "market_summary":
+        await query.message.reply_text(await asyncio.to_thread(get_market_summary_text), parse_mode=ParseMode.MARKDOWN)
+    elif query.data == "ai_analysis":
+        await query.message.reply_text(await asyncio.to_thread(get_ai_analysis_text), parse_mode=ParseMode.MARKDOWN)
     else:
         logger.warning("Unhandled callback_data=%s", query.data)
 
@@ -2196,6 +2336,14 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("menu", menu_command))
     app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("price", price_command))
+    app.add_handler(CommandHandler("pret", price_command))
+    app.add_handler(CommandHandler("liquidity", liquidity_command))
+    app.add_handler(CommandHandler("holders", holders_command))
+    app.add_handler(CommandHandler("chart", chart_command))
+    app.add_handler(CommandHandler("buy", buy_command))
+    app.add_handler(CommandHandler("summary", summary_command))
+    app.add_handler(CommandHandler("analysis", analysis_command))
     app.add_handler(CommandHandler("diag", diagnostics_command))
     app.add_handler(CommandHandler("id", id_command))
     app.add_handler(CommandHandler("testalert", testalert_command))
