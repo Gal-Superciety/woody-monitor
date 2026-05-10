@@ -1319,8 +1319,6 @@ def get_scr_flows(tx: dict, wallet: str) -> Tuple[Dict[str, float], Dict[str, fl
     for scr in containers:
         if not isinstance(scr, dict):
             continue
-        scr_sender = str(scr.get("sender") or scr.get("from") or "")
-        scr_receiver = str(scr.get("receiver") or scr.get("to") or "")
 
         # Process the SCR's own operations sub-list
         for op in scr.get("operations") or []:
@@ -1343,14 +1341,14 @@ def get_scr_flows(tx: dict, wallet: str) -> Tuple[Dict[str, float], Dict[str, fl
             if op_sender == wallet:
                 sent[token] = sent.get(token, 0.0) + amount
                 logger.info(
-                    "TX DEBUG | stage=SCR_OP_FLOW direction=SENT token=%s amount=%s wallet=%s scr_sender=%s scr_receiver=%s",
-                    token, amount, wallet, scr_sender, scr_receiver,
+                    "TX DEBUG | stage=SCR_OP_FLOW direction=SENT token=%s amount=%s wallet=%s op_sender=%s op_receiver=%s",
+                    token, amount, wallet, op_sender, op_receiver,
                 )
             if op_receiver == wallet:
                 received[token] = received.get(token, 0.0) + amount
                 logger.info(
-                    "TX DEBUG | stage=SCR_OP_FLOW direction=RECEIVED token=%s amount=%s wallet=%s scr_sender=%s scr_receiver=%s",
-                    token, amount, wallet, scr_sender, scr_receiver,
+                    "TX DEBUG | stage=SCR_OP_FLOW direction=RECEIVED token=%s amount=%s wallet=%s op_sender=%s op_receiver=%s",
+                    token, amount, wallet, op_sender, op_receiver,
                 )
 
     return sent, received
