@@ -128,6 +128,56 @@ def test_aggregator_style_sell_is_sell_not_liquidity() -> None:
     assert parsed["type"] == "SELL"
 
 
+def test_normal_buy_is_buy() -> None:
+    tx = {
+        "txHash": "hash-buy-normal",
+        "operations": [
+            {
+                "identifier": main.WEGLD,
+                "value": str(1 * (10 ** 18)),
+                "decimals": 18,
+                "sender": "erd1buyer",
+                "receiver": main.XEXCHANGE_POOL_ADDRESS,
+            },
+            {
+                "identifier": main.WOODY,
+                "value": str(700 * (10 ** 18)),
+                "decimals": 18,
+                "sender": main.XEXCHANGE_POOL_ADDRESS,
+                "receiver": "erd1buyer",
+            },
+        ],
+    }
+    parsed = main.classify_tx(tx)
+    assert parsed is not None
+    assert parsed["type"] == "BUY"
+
+
+def test_normal_sell_is_sell() -> None:
+    tx = {
+        "txHash": "hash-sell-normal",
+        "operations": [
+            {
+                "identifier": main.WOODY,
+                "value": str(700 * (10 ** 18)),
+                "decimals": 18,
+                "sender": "erd1seller",
+                "receiver": main.XEXCHANGE_POOL_ADDRESS,
+            },
+            {
+                "identifier": main.WEGLD,
+                "value": str(1 * (10 ** 18)),
+                "decimals": 18,
+                "sender": main.XEXCHANGE_POOL_ADDRESS,
+                "receiver": "erd1seller",
+            },
+        ],
+    }
+    parsed = main.classify_tx(tx)
+    assert parsed is not None
+    assert parsed["type"] == "SELL"
+
+
 def test_non_woody_transaction_returns_none() -> None:
     tx = {
         "txHash": "hash-non-woody",
