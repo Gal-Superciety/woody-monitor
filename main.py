@@ -41,6 +41,14 @@ COINGECKO_EGLD_API = os.getenv(
     "COINGECKO_EGLD_API",
     "https://api.coingecko.com/api/v3/simple/price?ids=elrond-erd-2&vs_currencies=usd",
 ).strip()
+BINANCE_EGLD_PRICE_API = os.getenv(
+    "BINANCE_EGLD_PRICE_API",
+    "https://api.binance.com/api/v3/ticker/price?symbol=EGLDUSDT",
+).strip()
+COINBASE_EGLD_SPOT_API = os.getenv(
+    "COINBASE_EGLD_SPOT_API",
+    "https://api.coinbase.com/v2/prices/EGLD-USD/spot",
+).strip()
 
 WOODY = os.getenv("WOODY_TOKEN_ID", "WOODY-5f9d9c").strip()
 WEGLD = os.getenv("WEGLD_TOKEN_ID", "WEGLD-bd4d79").strip()
@@ -105,6 +113,8 @@ WS_RECONNECT_DELAY = int(os.getenv("WS_RECONNECT_DELAY", "8"))
 API_TIMEOUT_SECONDS = int(os.getenv("API_TIMEOUT_SECONDS", "10"))
 PRICE_TTL_SECONDS = int(os.getenv("PRICE_TTL_SECONDS", "20"))
 POOL_SNAPSHOT_TTL_SECONDS = int(os.getenv("POOL_SNAPSHOT_TTL_SECONDS", "20"))
+EGLD_PRICE_SOFT_TTL_SECONDS = int(os.getenv("EGLD_PRICE_SOFT_TTL_SECONDS", "60"))
+EGLD_PRICE_HARD_TTL_SECONDS = int(os.getenv("EGLD_PRICE_HARD_TTL_SECONDS", "21600"))
 
 EXTRA_TECHNICAL_ADDRESSES = {
     x.strip()
@@ -389,18 +399,46 @@ def reserves(pair_address: str) -> Dict[str, float]:
 def get_egld_usd() -> float:
     now = time.time()
     cached = PRICE_CACHE.get("egld_usd")
-    if cached and now - cached[1] < 60:
+    if cached and cached[0] > 0 and now - cached[1] < EGLD_PRICE_SOFT_TTL_SECONDS:
         return cached[0]
 
+    fallback_price = safe_float(cached[0]) if cached else 0.0
+    fallback_age = now - cached[1] if cached else -1.0
+
     data = get_json(COINGECKO_EGLD_API)
-    price = 0.0
     try:
         price = safe_float(data["elrond-erd-2"]["usd"])
     except Exception:
         price = 0.0
 
-    PRICE_CACHE["egld_usd"] = (price, now)
-    return price
+    if price > 0:
+        PRICE_CACHE["egld_usd"] = (price, now)
+        return price
+
+    for source_name, source_url, parser in (
+        ("binance", BINANCE_EGLD_PRICE_API, lambda payload: safe_float(payload.get("price")) if isinstance(payload, dict) else 0.0),
+        ("coinbase", COINBASE_EGLD_SPOT_API, lambda payload: safe_float(payload.get("data", {}).get("amount")) if isinstance(payload, dict) else 0.0),
+    ):
+        payload = get_json(source_url)
+        parsed = parser(payload)
+        if parsed > 0:
+            PRICE_CACHE["egld_usd"] = (parsed, now)
+            logger.warning(
+                "PRICE_FALLBACK_USED | token=EGLD source=%s computed_usd=%.8f reason=coingecko_unavailable",
+                source_name,
+                parsed,
+            )
+            return parsed
+
+    if fallback_price > 0 and (fallback_age < 0 or fallback_age <= EGLD_PRICE_HARD_TTL_SECONDS):
+        logger.warning(
+            "PRICE_FALLBACK_USED | token=EGLD source=last_known computed_usd=%.8f age_sec=%.1f reason=coingecko_unavailable",
+            fallback_price,
+            max(fallback_age, 0.0),
+        )
+        return fallback_price
+
+    return 0.0
 
 
 def find_token_amount(res_map: Dict[str, float], token_hint: str) -> float:
@@ -1399,7 +1437,16 @@ def token_usd_estimate(token: str, amount: float) -> float:
         return 0.0
 
     if token == WEGLD or symbol(token).upper() in {"WEGLD", "XEGLD", "EGLD"}:
-        return amount * get_egld_usd()
+        egld_usd = get_egld_usd()
+        usd_value = amount * egld_usd
+        if amount > 0 and usd_value > 0:
+            logger.info(
+                "PRICE_FALLBACK_USED | token=EGLD quote_amount=%.6f egld_usd=%.8f computed_usd=%.2f",
+                amount,
+                egld_usd,
+                usd_value,
+            )
+        return usd_value
 
     if USDC_HINT.upper() in token.upper():
         return amount
