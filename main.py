@@ -91,8 +91,10 @@ ONEDEX_BURN_ADDRESS = os.getenv(
 PRICE_URL = os.getenv("PRICE_URL", "https://e-compass.io/token/WOODY-5f9d9c").strip()
 CHART_URL = os.getenv("CHART_URL", PRICE_URL).strip()
 TWITTER_URL = os.getenv("TWITTER_URL", "https://x.com/WOODY_EX").strip()
-TELEGRAM_URL = os.getenv("TELEGRAM_URL", "https://t.me/WOODYPortal").strip()
-BUY_XEXCHANGE_URL = "https://xexchange.com/trade?firstToken=EGLD&secondToken=WOODY-5f9d9c"
+BUY_XEXCHANGE_URL = os.getenv(
+    "BUY_XEXCHANGE_URL",
+    "https://xexchange.com/trade?firstToken=EGLD&secondToken=WOODY-5f9d9c",
+).strip()
 BUY_XOXNO_URL = os.getenv("BUY_XOXNO_URL", "https://xoxno.com").strip()
 
 BANNER_IMAGE = os.getenv("BANNER_IMAGE", "banner.png").strip()
@@ -978,7 +980,6 @@ def public_menu_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("𝕏 Twitter", url=TWITTER_URL),
-            InlineKeyboardButton("💬 Telegram Community", url=TELEGRAM_URL),
         ],
         [
             InlineKeyboardButton("🤖 Bot Status", callback_data="bot_status"),
