@@ -802,6 +802,136 @@ def get_ai_analysis_text(hours: int = 24) -> str:
     return "🧠 *WOODY AI Analysis V1*\n\n" + "\n".join(bullets)
 
 
+
+
+def build_ai_recommendation() -> Dict[str, Any]:
+    best = get_best_price()
+    last_buy = LAST_ALERTS.get("BUY", {})
+    last_sell = LAST_ALERTS.get("SELL", {})
+    warnings = get_diagnostic_warnings()
+
+    volume_24h = sum(safe_float(x.get("usd")) for x in _recent_trades(24))
+    recent_trades = _recent_trades(24)
+    buy_usd = sum(safe_float(x.get("usd")) for x in recent_trades if _entry_side(x) > 0)
+    sell_usd = sum(safe_float(x.get("usd")) for x in recent_trades if _entry_side(x) < 0)
+
+    top_wallets = [
+        (wallet, safe_float(slot.get("total_usd")))
+        for wallet, slot in TOP_VOLUME.items()
+        if is_real_wallet(wallet)
+    ]
+    top_wallets.sort(key=lambda x: x[1], reverse=True)
+    top_wallets = top_wallets[:3]
+
+    liquidity_snapshots = [get_pool_snapshot(addr, label) for addr, label in WATCHED_POOLS.items()]
+    liquidity_ok = sum(1 for s in liquidity_snapshots if s.get("ok"))
+    total_liquidity_usd = sum(safe_float(s.get("pool_value_usd")) for s in liquidity_snapshots if s.get("ok"))
+
+    holders_delta = 0
+    if LAST_HOLDERS_COUNT is not None and PENDING_HOLDER_VALUE is not None:
+        holders_delta = PENDING_HOLDER_VALUE - LAST_HOLDERS_COUNT
+
+    score = 50
+    if buy_usd > sell_usd * 1.15:
+        score += 12
+    elif sell_usd > buy_usd * 1.15:
+        score -= 12
+
+    if volume_24h >= WHALE_ALERT_USD * 20:
+        score += 8
+    elif volume_24h < BIG_ALERT_USD * 2:
+        score -= 8
+
+    if liquidity_ok == len(liquidity_snapshots) and total_liquidity_usd > 0:
+        score += 12
+    elif liquidity_ok == 0:
+        score -= 20
+    else:
+        score -= 6
+
+    score += max(-8, min(8, holders_delta * 2))
+    score -= min(20, len(warnings) * 5)
+    confidence = max(0, min(100, int(score)))
+
+    if confidence >= 72:
+        recommendation = "ACCUMULATE"
+        risk = "LOW"
+        action = "Volume is rising, consider social update"
+        reason = "Buy-side activity and liquidity look constructive."
+    elif confidence >= 56:
+        recommendation = "HOLD"
+        risk = "MEDIUM"
+        action = "Liquidity looks stable"
+        reason = "Signals are mostly balanced with acceptable market health."
+    elif confidence >= 40:
+        recommendation = "WATCH"
+        risk = "MEDIUM"
+        action = "Monitor next 30 minutes"
+        reason = "Mixed momentum and incomplete confirmation from recent flows."
+    else:
+        recommendation = "CAUTION"
+        risk = "HIGH"
+        action = "Avoid hype announcement now"
+        reason = "Risk signals are elevated from sell pressure, warnings, or weak liquidity."
+
+    return {
+        "recommendation": recommendation,
+        "confidence": confidence,
+        "reason": reason,
+        "risk": risk,
+        "action": action,
+        "last_buy_ts": safe_int(last_buy.get("time"), 0),
+        "last_sell_ts": safe_int(last_sell.get("time"), 0),
+        "volume_24h": volume_24h,
+        "top_wallets": top_wallets,
+        "liquidity_ok": liquidity_ok,
+        "liquidity_total": len(liquidity_snapshots),
+        "total_liquidity_usd": total_liquidity_usd,
+        "holders_delta": holders_delta,
+        "holders_count": LAST_HOLDERS_COUNT,
+        "price_usd": safe_float(best.get("price_usd")) if best else 0.0,
+        "warnings": warnings,
+    }
+
+
+def get_ai_recommendation_text(is_public: bool) -> str:
+    rec = build_ai_recommendation()
+    top_wallet_line = ", ".join(
+        f"{short_wallet(wallet)} (${usd:,.0f})" for wallet, usd in rec["top_wallets"]
+    ) or "N/A"
+    warning_count = len(rec["warnings"])
+
+    lines = [
+        "🤖 *AI Recommendation Signal*",
+        "_Public-safe observation. Not financial advice._",
+        "",
+        f"Signal: *{rec['recommendation']}*",
+        f"Confidence: *{rec['confidence']} / 100*",
+        f"Risk level: *{rec['risk']}*",
+        f"Reason: _{rec['reason']}_",
+        f"Suggested next action: *{rec['action']}*",
+        "",
+        "📌 *Inputs analyzed*",
+        f"• Last BUY: *{_format_ts(rec['last_buy_ts'])}*",
+        f"• Last SELL: *{_format_ts(rec['last_sell_ts'])}*",
+        f"• 24h volume (est.): *${rec['volume_24h']:,.2f}*",
+        f"• Top volume wallets: `{top_wallet_line}`",
+        f"• Liquidity status: *{rec['liquidity_ok']}/{rec['liquidity_total']} pools readable*",
+        f"• Liquidity estimate: *${rec['total_liquidity_usd']:,.2f}*",
+        f"• Holder changes (pending): *{rec['holders_delta']:+d}*",
+        f"• Holders count: *{rec['holders_count'] if rec['holders_count'] is not None else 'N/A'}*",
+        f"• Current price estimate: *${rec['price_usd']:.10f}*" if rec['price_usd'] > 0 else "• Current price estimate: *N/A*",
+        f"• Diagnostics warnings: *{warning_count}*",
+    ]
+
+    if (not is_public) and rec["warnings"]:
+        lines.append("\n⚠️ *Warnings detail:*")
+        lines.extend([f"• {w}" for w in rec["warnings"]])
+
+    if is_public:
+        lines.append("\n🔒 Admin-only internals remain hidden.")
+
+    return "\n".join(lines)
 def get_top_volume_text(limit: int = 10) -> str:
     rows: List[Tuple[str, Dict[str, float]]] = []
     for wallet, slot in TOP_VOLUME.items():
@@ -1074,6 +1204,7 @@ def public_menu_keyboard() -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton("🤖 AI Status", callback_data="ai_status"),
             InlineKeyboardButton("🧠 AI Analysis", callback_data="ai_analysis"),
+            InlineKeyboardButton("🤖 AI Recommendation", callback_data="ai_recommendation"),
         ],
         [
             InlineKeyboardButton("📈 Market Summary", callback_data="market_summary"),
@@ -1110,6 +1241,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton("🤖 AI Status", callback_data="ai_status"),
             InlineKeyboardButton("🧪 Diagnostics", callback_data="diagnostics"),
+            InlineKeyboardButton("🤖 AI Recommendation", callback_data="ai_recommendation"),
         ],
         [
             InlineKeyboardButton("📈 Market Summary", callback_data="market_summary"),
@@ -2382,6 +2514,9 @@ async def menu_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.message.reply_text(await asyncio.to_thread(get_market_summary_text), parse_mode=ParseMode.MARKDOWN)
     elif query.data == "ai_analysis":
         await query.message.reply_text(await asyncio.to_thread(get_ai_analysis_text), parse_mode=ParseMode.MARKDOWN)
+    elif query.data == "ai_recommendation":
+        is_public = is_public_menu_context(query.message.chat.type if query.message and query.message.chat else None, query.from_user.id if query.from_user else None)
+        await query.message.reply_text(await asyncio.to_thread(get_ai_recommendation_text, is_public), parse_mode=ParseMode.MARKDOWN)
     else:
         logger.warning("Unhandled callback_data=%s", query.data)
 
