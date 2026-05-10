@@ -154,6 +154,9 @@ API_FAIL_COUNT = 0
 LAST_API_ERROR = "N/A"
 LAST_ALERT_SENT_AT = 0
 LAST_TX_PROCESSED = ""
+LAST_ROOT_PROCESSED_AT = 0
+LAST_WOODY_TX_AT = 0
+LAST_EGLD_USD_SOURCE = "N/A"
 TX_DETAILS_CACHE: Dict[str, Tuple[Optional[dict], float]] = {}
 TX_DETAILS_CACHE_TTL_SECONDS = int(os.getenv("TX_DETAILS_CACHE_TTL_SECONDS", "45"))
 ROOT_PROCESSING_CONCURRENCY = max(1, int(os.getenv("ROOT_PROCESSING_CONCURRENCY", "4")))
@@ -400,6 +403,7 @@ def reserves(pair_address: str) -> Dict[str, float]:
 
 
 def get_egld_usd() -> float:
+    global LAST_EGLD_USD_SOURCE
     now = time.time()
     cached = PRICE_CACHE.get("egld_usd")
     if cached and cached[0] > 0 and now - cached[1] < EGLD_PRICE_SOFT_TTL_SECONDS:
@@ -416,6 +420,7 @@ def get_egld_usd() -> float:
 
     if price > 0:
         PRICE_CACHE["egld_usd"] = (price, now)
+        LAST_EGLD_USD_SOURCE = "coingecko"
         return price
 
     for source_name, source_url, parser in (
@@ -426,6 +431,7 @@ def get_egld_usd() -> float:
         parsed = parser(payload)
         if parsed > 0:
             PRICE_CACHE["egld_usd"] = (parsed, now)
+            LAST_EGLD_USD_SOURCE = source_name
             logger.warning(
                 "PRICE_FALLBACK_USED | token=EGLD source=%s computed_usd=%.8f reason=coingecko_unavailable",
                 source_name,
@@ -439,6 +445,7 @@ def get_egld_usd() -> float:
             fallback_price,
             max(fallback_age, 0.0),
         )
+        LAST_EGLD_USD_SOURCE = "last_known"
         return fallback_price
 
     return 0.0
@@ -920,6 +927,89 @@ def get_pools_text(title: str = "📦 *WOODY Pools*") -> str:
     )
 
 
+def _format_ts(ts: int) -> str:
+    if ts <= 0:
+        return "N/A"
+    return time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(ts))
+
+
+def _parse_chat_id(raw: str) -> Tuple[bool, bool]:
+    text = str(raw or "").strip()
+    if not text:
+        return False, False
+    if text in {"123456789", "-1001234567890"}:
+        return False, True
+    try:
+        int(text)
+        return True, False
+    except Exception:
+        return False, True
+
+
+def get_diagnostic_warnings(no_woody_minutes: int = 30) -> List[str]:
+    warnings: List[str] = []
+    private_ok, private_placeholder = _parse_chat_id(PRIVATE_CHAT_ID)
+    group_ok, group_placeholder = _parse_chat_id(GROUP_CHAT_ID)
+
+    if not private_ok:
+        warnings.append("TELEGRAM_PRIVATE_CHAT_ID missing or invalid")
+    if not group_ok:
+        warnings.append("TELEGRAM_GROUP_CHAT_ID missing or invalid")
+    if private_placeholder:
+        warnings.append("TELEGRAM_PRIVATE_CHAT_ID appears to be a placeholder")
+    if group_placeholder:
+        warnings.append("TELEGRAM_GROUP_CHAT_ID appears to be a placeholder")
+    if ENABLE_PRIVATE_ALERTS and private_ok and (not ENABLE_GROUP_ALERTS or not group_ok):
+        warnings.append("Alerts are currently routed only to private chat")
+    if not WS_CONNECTED:
+        warnings.append("WebSocket is not connected")
+
+    now = int(time.time())
+    if LAST_WOODY_TX_AT <= 0 or (now - LAST_WOODY_TX_AT) > (no_woody_minutes * 60):
+        warnings.append(f"No WOODY tx detected in the last {no_woody_minutes} minutes")
+
+    for warning in warnings:
+        logger.warning("DIAGNOSTIC_WARNING | %s", warning)
+    return warnings
+
+
+def get_ai_status_text(is_public: bool = False) -> str:
+    best = get_best_price()
+    last_buy = LAST_ALERTS.get("BUY", {})
+    last_sell = LAST_ALERTS.get("SELL", {})
+    warnings = get_diagnostic_warnings()
+
+    lines = [
+        "🤖 *AI Status*",
+        "",
+        f"Bot state: *{'ONLINE' if WS_TASK and not WS_TASK.done() else 'OFFLINE'}*",
+        f"WebSocket: *{'CONNECTED' if WS_CONNECTED else 'DISCONNECTED'}*",
+        f"Subscribed pools: *{len(WATCHED_POOLS)}*",
+        f"Pending roots queue: *{len(ROOT_PENDING)}*",
+        f"Last processed root: *{_format_ts(LAST_ROOT_PROCESSED_AT)}*",
+        f"Last alert time: *{_format_ts(LAST_ALERT_SENT_AT)}*",
+        f"Last BUY detected: *{_format_ts(safe_int(last_buy.get('time'), 0))}*",
+        f"Last SELL detected: *{_format_ts(safe_int(last_sell.get('time'), 0))}*",
+        f"Holders count: *{LAST_HOLDERS_COUNT if LAST_HOLDERS_COUNT is not None else 'N/A'}*",
+        f"WOODY price estimate: *${safe_float(best.get('price_usd')):.10f}*" if best else "WOODY price estimate: *N/A*",
+        f"EGLD/USD source: *{LAST_EGLD_USD_SOURCE}*",
+    ]
+
+    if warnings:
+        lines.append("")
+        lines.append("⚠️ *Diagnostics warnings:*")
+        lines.extend([f"• {w}" for w in warnings])
+    else:
+        lines.append("")
+        lines.append("✅ No active diagnostic warnings.")
+
+    if is_public:
+        lines.append("")
+        lines.append("🔒 Public-safe summary (no secrets exposed).")
+
+    return "\n".join(lines)
+
+
 def get_bot_status_text() -> str:
     return (
         "🤖 *Bot Status*\n\n"
@@ -982,7 +1072,7 @@ def public_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("𝕏 Twitter", url=TWITTER_URL),
         ],
         [
-            InlineKeyboardButton("🤖 Bot Status", callback_data="bot_status"),
+            InlineKeyboardButton("🤖 AI Status", callback_data="ai_status"),
             InlineKeyboardButton("🧠 AI Analysis", callback_data="ai_analysis"),
         ],
         [
@@ -1018,7 +1108,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🟢 Buy XOXNO", url=BUY_XOXNO_URL),
         ],
         [
-            InlineKeyboardButton("🤖 Bot Status", callback_data="bot_status"),
+            InlineKeyboardButton("🤖 AI Status", callback_data="ai_status"),
             InlineKeyboardButton("🧪 Diagnostics", callback_data="diagnostics"),
         ],
         [
@@ -1027,7 +1117,6 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("𝕏 Twitter", url=TWITTER_URL),
-            InlineKeyboardButton("💬 Telegram Community", url=TELEGRAM_URL),
         ],
     ])
 
@@ -2046,7 +2135,7 @@ async def _process_pending_roots_inner(context: ContextTypes.DEFAULT_TYPE) -> No
     semaphore = asyncio.Semaphore(ROOT_PROCESSING_CONCURRENCY)
 
     async def process_one(root_hash: str, age: float) -> Optional[str]:
-        global LAST_TX_PROCESSED
+        global LAST_TX_PROCESSED, LAST_ROOT_PROCESSED_AT, LAST_WOODY_TX_AT
         async with semaphore:
             ROOT_IN_PROGRESS.add(root_hash)
             try:
@@ -2111,6 +2200,9 @@ async def _process_pending_roots_inner(context: ContextTypes.DEFAULT_TYPE) -> No
 
                 ROOT_PROCESSED.add(root_hash)
                 LAST_TX_PROCESSED = root_hash
+                LAST_ROOT_PROCESSED_AT = int(time.time())
+                if parsed and parsed.get("type") in {"BUY", "SELL"}:
+                    LAST_WOODY_TX_AT = LAST_ROOT_PROCESSED_AT
                 return root_hash
             finally:
                 ROOT_IN_PROGRESS.discard(root_hash)
@@ -2170,7 +2262,9 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = await asyncio.to_thread(get_bot_status_text)
+    logger.info("STATUS_COMMAND_USED | user=%s chat=%s", update.effective_user.id if update.effective_user else "?", update.effective_chat.id if update.effective_chat else "?")
+    is_public = is_public_menu_context(update.effective_chat.type if update.effective_chat else None, update.effective_user.id if update.effective_user else None)
+    text = await asyncio.to_thread(get_ai_status_text, is_public)
     if update.message:
         await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
@@ -2276,8 +2370,10 @@ async def menu_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if is_public_menu_context(query.message.chat.type if query.message and query.message.chat else None, query.from_user.id if query.from_user else None):
             return
         await query.message.reply_text(await asyncio.to_thread(get_pools_text), parse_mode=ParseMode.MARKDOWN)
-    elif query.data == "bot_status":
-        await query.message.reply_text(await asyncio.to_thread(get_bot_status_text), parse_mode=ParseMode.MARKDOWN)
+    elif query.data in {"bot_status", "ai_status"}:
+        is_public = is_public_menu_context(query.message.chat.type if query.message and query.message.chat else None, query.from_user.id if query.from_user else None)
+        logger.info("AI_STATUS_BUTTON_USED | user=%s chat=%s public=%s", query.from_user.id if query.from_user else "?", query.message.chat_id if query.message else "?", is_public)
+        await query.message.reply_text(await asyncio.to_thread(get_ai_status_text, is_public), parse_mode=ParseMode.MARKDOWN)
     elif query.data == "diagnostics":
         if is_public_menu_context(query.message.chat.type if query.message and query.message.chat else None, query.from_user.id if query.from_user else None):
             return
