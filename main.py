@@ -1117,7 +1117,6 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("𝕏 Twitter", url=TWITTER_URL),
-            InlineKeyboardButton("💬 Telegram Community", url=TELEGRAM_URL),
         ],
     ])
 
