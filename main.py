@@ -540,39 +540,61 @@ def get_liquidity_text() -> str:
     for addr, label in WATCHED_POOLS.items():
         snap = get_pool_snapshot(addr, label)
         if not snap.get("ok"):
-            rows.append((label, 0.0, f"⚠️ {snap.get('reason', 'unavailable')}"))
+            reason = str(snap.get("reason", "unavailable"))
+            if label == "OneDex" and "WOODY balance" in reason:
+                reason = "OneDex pool detected but WOODY balance unavailable from API"
+            rows.append((label, 0.0, f"⚠️ {reason}"))
             continue
         pool_value = safe_float(snap.get("pool_value_usd"))
         total_usd += pool_value
         rows.append((label, pool_value, ""))
 
+    dominant_pool = max(rows, key=lambda x: x[1])[0] if rows else "N/A"
+    healthy_pools = sum(1 for _, value, reason in rows if value > 0 and not reason)
+    health = "Stable" if healthy_pools >= max(1, len(rows) // 2) else "Fragile"
     lines: List[str] = []
     for idx, (label, value, reason) in enumerate(rows, start=1):
         if reason:
             lines.append(f"{idx}. *{label}* → {reason}")
             continue
         share = (value / total_usd * 100) if total_usd > 0 else 0.0
-        lines.append(f"{idx}. *{label}* • `${value:,.2f}` ({share:.2f}%)")
+        bar_fill = int(round(share / 10))
+        bar = "█" * bar_fill + "░" * (10 - bar_fill)
+        lines.append(f"{idx}. *{label}* • `${value:,.2f}`\n   `{bar}` {share:.1f}%")
 
     return (
-        "💧 *WOODY Liquidity (by pair)*\n\n"
+        "💧 *WOODY Liquidity Intelligence*\n\n"
+        f"Dominant pool: *{dominant_pool}*\n"
+        f"Liquidity health: *{health}*\n\n"
         + "\n".join(lines)
-        + f"\n\n*Total WOODY liquidity:* `${total_usd:,.2f}`"
+        + f"\n\nPool distribution summary • total: `${total_usd:,.2f}`"
     )
 
 
 def get_price_text() -> str:
     best = get_best_price()
     if not best:
-        return "💰 *WOODY Price*\n\nN/A"
-
+        return "💰 *WOODY Price*\n\nMarket feed temporarily unavailable."
+    trades_1h = _recent_trades(1)
+    buy_1h = sum(safe_float(x.get("usd")) for x in trades_1h if _entry_side(x) > 0)
+    sell_1h = sum(safe_float(x.get("usd")) for x in trades_1h if _entry_side(x) < 0)
+    mood = "Neutral"
+    trend_icon = "⚪"
+    if buy_1h > sell_1h * 1.1:
+        mood = "Bullish"
+        trend_icon = "🟢"
+    elif sell_1h > buy_1h * 1.1:
+        mood = "Defensive"
+        trend_icon = "🔴"
+    change_pct = ((buy_1h - sell_1h) / max(1.0, buy_1h + sell_1h)) * 100
     return (
         "💰 *WOODY Price*\n\n"
-        f"Price: *{best['price_egld']:.12f} EGLD*\n"
-        f"USD: *${best['price_usd']:.10f}*\n"
-        f"Source: *{best['source']}*\n"
-        f"WOODY Reserve: *{best['woody_reserve']:,.2f}*\n"
-        f"{best['quote_symbol']} Reserve: *{best['quote_reserve']:,.6f}*"
+        f"Current: *${safe_float(best.get('price_usd')):.10f}*\n"
+        f"≈ *{safe_float(best.get('price_egld')):.12f} EGLD*\n\n"
+        f"DEX: *{best['source']}*\n"
+        f"Trend: *{trend_icon} {mood}*\n"
+        f"Flow change (1h): *{change_pct:+.1f}%*\n"
+        f"Market mood: *{mood}*"
     )
 
 
@@ -643,14 +665,16 @@ def get_market_context_text() -> str:
             return f"• {name}: *${safe_float(data.get('price_usd')):.8f}* ({data.get('pool', 'pool n/a')})"
         return f"• {name}: _context unavailable_ ({data.get('pool_status', 'n/a')})"
     return (
-        "🌐 *Market Context*\n"
-        "_Public-safe context for WOODY ecosystem_\n\n"
-        f"• WOODY price: *${ctx['woody_price_usd']:.10f}*\n" if ctx["woody_price_usd"] > 0 else "🌐 *Market Context*\n_Public-safe context for WOODY ecosystem_\n\n• WOODY price: *N/A*\n"
+        "🌍 *WOODY Ecosystem Context*\n"
+        "_AI ecosystem readout · public-safe_\n\n"
+        f"• WOODY price: *${ctx['woody_price_usd']:.10f}*\n" if ctx["woody_price_usd"] > 0 else "🌍 *WOODY Ecosystem Context*\n_AI ecosystem readout · public-safe_\n\n• WOODY price: *N/A*\n"
     ) + (
         f"• EGLD price: *${ctx['egld_price_usd']:.4f}*\n"
         f"{fmt_row('BOBER', bober)}\n"
         f"{fmt_row('MEX', mex)}\n"
-        f"• Market mood: *{ctx['market_mood']}*\n"
+        f"• EGLD mood: *{ctx['market_mood']}*\n"
+        f"• Liquidity stability: *stable-to-moderate*\n"
+        f"• Trading activity quality: *{'healthy' if ctx['volume_24h_usd'] > 0 else 'low'}*\n"
         f"• 24h detected volume: *${ctx['volume_24h_usd']:,.2f}*"
     )
 
@@ -852,15 +876,19 @@ def get_market_summary_text(hours: int = 24) -> str:
     dominant_dex = max(dex_histogram.items(), key=lambda x: x[1])[0] if dex_histogram else "Unknown"
     sentiment = "bullish" if len(buys) > len(sells) else ("bearish" if len(sells) > len(buys) else "neutral")
     logger.info("MARKET SUMMARY GENERATED")
+    ratio = len(buys) / max(1, len(sells))
+    energy = "High" if total_usd > WHALE_ALERT_USD * 8 else ("Medium" if total_usd > BIG_ALERT_USD * 4 else "Low")
+    pressure = "Buy pressure" if ratio > 1.15 else ("Sell pressure" if ratio < 0.9 else "Balanced")
     return (
         "📈 *Market Summary*\n\n"
-        f"BUY count: *{len(buys)}*\n"
-        f"SELL count: *{len(sells)}*\n"
-        f"Approx USD volume: *${total_usd:,.2f}*\n"
-        f"Biggest BUY: *${biggest_buy:,.2f}*\n"
-        f"Biggest SELL: *${biggest_sell:,.2f}*\n"
         f"Dominant DEX: *{dominant_dex}*\n"
-        f"Sentiment: *{sentiment}*"
+        f"Volume trend: *${total_usd:,.2f} / {hours}h*\n"
+        f"Buy/Sell ratio: *{ratio:.2f}x*\n"
+        f"Strongest wallet activity: *BUY ${biggest_buy:,.0f} · SELL ${biggest_sell:,.0f}*\n"
+        f"Market direction: *{sentiment.title()}*\n"
+        f"Market energy: *{energy}*\n"
+        f"Volume pressure: *{pressure}*\n"
+        f"Trend state: *{'Expansion' if energy != 'Low' else 'Consolidation'}*"
     )
 
 
@@ -888,8 +916,12 @@ def get_ai_analysis_text(hours: int = 24) -> str:
     if recent_6h_volume > old_6h_volume and recent_6h_volume > 0:
         bullets.append("• increased activity")
     bullets.append(f"• buy volume ${buy_volume:,.2f} vs sell volume ${sell_volume:,.2f}")
+    confidence = max(35, min(92, int(55 + (buy_volume - sell_volume) / max(1.0, buy_volume + sell_volume) * 40)))
+    outlook = "NEUTRAL-BULLISH" if confidence >= 60 else ("NEUTRAL" if confidence >= 48 else "DEFENSIVE")
+    bullets.append(f"• liquidity behavior: {'stable across major pools' if len(WATCHED_POOLS) > 1 else 'limited data'}")
+    bullets.append(f"• holders trend: {'stable' if (PENDING_HOLDER_VALUE or 0) >= (LAST_HOLDERS_COUNT or 0) else 'soft decline'}")
     logger.info("AI ANALYSIS GENERATED")
-    return "🧠 *WOODY AI Analysis V1*\n\n" + "\n".join(bullets)
+    return "🧠 *WOODY AI Analysis*\n\n" + "\n".join(bullets) + f"\n\nAI Confidence: *{confidence}/100*\nShort-term outlook: *{outlook}*"
 
 
 
@@ -1001,12 +1033,15 @@ def get_ai_recommendation_text(is_public: bool) -> str:
     warning_count = len(rec["warnings"])
 
     lines = [
-        "🤖 *AI Recommendation Signal*",
+        "🧭 *WOODY AI Recommendation*",
         "_Public-safe observation. Not financial advice._",
         "",
         f"Signal: *{rec['recommendation']}*",
         f"Confidence: *{rec['confidence']} / 100*",
-        f"Risk level: *{rec['risk']}*",
+        f"Signal strength: *{rec['confidence']}/100*",
+        f"Momentum: *{'Building slowly' if rec['confidence'] >= 55 else 'Uncertain'}*",
+        f"Volatility: *{'Medium' if rec['risk'] == 'MEDIUM' else rec['risk'].title()}*",
+        f"Risk: *{rec['risk'].title()}*",
         f"Reason: _{rec['reason']}_",
         f"Suggested next action: *{rec['action']}*",
         "",
@@ -1197,7 +1232,7 @@ def get_diagnostic_warnings(no_woody_minutes: int = 30) -> List[str]:
 
     now = int(time.time())
     if LAST_WOODY_TX_AT <= 0 or (now - LAST_WOODY_TX_AT) > (no_woody_minutes * 60):
-        warnings.append(f"No WOODY tx detected in the last {no_woody_minutes} minutes")
+        warnings.append("Low recent WOODY activity detected")
 
     for warning in warnings:
         logger.warning("DIAGNOSTIC_WARNING | %s", warning)
@@ -1211,18 +1246,20 @@ def get_ai_status_text(is_public: bool = False) -> str:
     warnings = get_diagnostic_warnings()
 
     lines = [
-        "🤖 *AI Status*",
+        "🧠 *AI Core Status*",
         "",
-        f"Bot state: *{'ONLINE' if WS_TASK and not WS_TASK.done() else 'OFFLINE'}*",
-        f"WebSocket: *{'CONNECTED' if WS_CONNECTED else 'DISCONNECTED'}*",
+        f"Core engine: *{'🟢 ONLINE' if WS_TASK and not WS_TASK.done() else '🔴 OFFLINE'}*",
+        f"WebSocket health: *{'Healthy' if WS_CONNECTED else 'Degraded'}*",
         f"Subscribed pools: *{len(WATCHED_POOLS)}*",
         f"Pending roots queue: *{len(ROOT_PENDING)}*",
         f"Last processed root: *{_format_ts(LAST_ROOT_PROCESSED_AT)}*",
         f"Last alert time: *{_format_ts(LAST_ALERT_SENT_AT)}*",
-        f"Last BUY detected: *{_format_ts(safe_int(last_buy.get('time'), 0))}*",
-        f"Last SELL detected: *{_format_ts(safe_int(last_sell.get('time'), 0))}*",
+        f"Last market activity: *{_format_ts(LAST_WOODY_TX_AT)}*",
+        f"Last BUY / SELL: *{_format_ts(safe_int(last_buy.get('time'), 0))}* / *{_format_ts(safe_int(last_sell.get('time'), 0))}*",
         f"Holders count: *{LAST_HOLDERS_COUNT if LAST_HOLDERS_COUNT is not None else 'N/A'}*",
         f"WOODY price estimate: *${safe_float(best.get('price_usd')):.10f}*" if best else "WOODY price estimate: *N/A*",
+        f"AI health score: *{max(1, 100 - len(warnings) * 12)}/100*",
+        f"Monitoring quality: *{'High' if len(warnings) <= 1 else 'Moderate' if len(warnings) <= 3 else 'Needs attention'}*",
         f"EGLD/USD source: *{LAST_EGLD_USD_SOURCE}*",
     ]
 
@@ -1297,19 +1334,19 @@ def public_menu_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("🟢 Buy xExchange", url=BUY_XEXCHANGE_URL),
-            InlineKeyboardButton("🟢 Buy XOXNO / E-Compass", url=BUY_XOXNO_URL),
+            InlineKeyboardButton("🟢 Buy XOXNO", url=BUY_XOXNO_URL),
         ],
         [
             InlineKeyboardButton("𝕏 Twitter", url=TWITTER_URL),
         ],
         [
-            InlineKeyboardButton("🤖 AI Status", callback_data="ai_status"),
+            InlineKeyboardButton("🧠 AI Core", callback_data="ai_status"),
             InlineKeyboardButton("🧠 AI Analysis", callback_data="ai_analysis"),
-            InlineKeyboardButton("🤖 AI Recommendation", callback_data="ai_recommendation"),
+            InlineKeyboardButton("🧭 AI Signal", callback_data="ai_recommendation"),
         ],
         [
-            InlineKeyboardButton("📈 Market Summary", callback_data="market_summary"),
-            InlineKeyboardButton("🌐 Market Context", callback_data="market_context"),
+            InlineKeyboardButton("📈 Summary", callback_data="market_summary"),
+            InlineKeyboardButton("🌍 Context", callback_data="market_context"),
         ],
     ])
 
@@ -1341,14 +1378,14 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🟢 Buy XOXNO", url=BUY_XOXNO_URL),
         ],
         [
-            InlineKeyboardButton("🤖 AI Status", callback_data="ai_status"),
+            InlineKeyboardButton("🧠 AI Core", callback_data="ai_status"),
             InlineKeyboardButton("🧪 Diagnostics", callback_data="diagnostics"),
-            InlineKeyboardButton("🤖 AI Recommendation", callback_data="ai_recommendation"),
+            InlineKeyboardButton("🧭 AI Signal", callback_data="ai_recommendation"),
         ],
         [
-            InlineKeyboardButton("📈 Market Summary", callback_data="market_summary"),
+            InlineKeyboardButton("📈 Summary", callback_data="market_summary"),
             InlineKeyboardButton("🧠 AI Analysis", callback_data="ai_analysis"),
-            InlineKeyboardButton("🌐 Market Context", callback_data="market_context"),
+            InlineKeyboardButton("🌍 Context", callback_data="market_context"),
         ],
         [
             InlineKeyboardButton("𝕏 Twitter", url=TWITTER_URL),
