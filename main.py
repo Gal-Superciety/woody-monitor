@@ -996,6 +996,128 @@ def get_risk_radar_text(hours: int = 24) -> str:
     )
 
 
+
+
+def get_accumulation_detection_text(hours: int = 24) -> str:
+    trades = _recent_trades(hours)
+    buys = [x for x in trades if _entry_side(x) > 0]
+    sells = [x for x in trades if _entry_side(x) < 0]
+
+    buy_volume = sum(safe_float(x.get("usd")) for x in buys)
+    sell_volume = sum(safe_float(x.get("usd")) for x in sells)
+    total_volume = buy_volume + sell_volume
+
+    buy_ratio = buy_volume / max(1.0, total_volume)
+    sell_pressure = sell_volume / max(1.0, total_volume)
+
+    small_medium_buy_count = sum(
+        1 for x in buys if MIN_ALERT_USD <= safe_float(x.get("usd")) <= WHALE_ALERT_USD
+    )
+    repeated_buy_activity = len(buys) >= 5 and small_medium_buy_count >= max(3, int(len(buys) * 0.45))
+
+    whale_buy_volume = sum(
+        safe_float(x.get("usd")) for x in buys if safe_float(x.get("usd")) >= WHALE_ALERT_USD
+    )
+    whale_sell_volume = sum(
+        safe_float(x.get("usd")) for x in sells if safe_float(x.get("usd")) >= WHALE_ALERT_USD
+    )
+    whale_accumulation = whale_buy_volume > whale_sell_volume * 1.10 and whale_buy_volume > 0
+
+    top_wallets = [
+        (wallet, slot)
+        for wallet, slot in TOP_VOLUME.items()
+        if is_real_wallet(wallet)
+    ]
+    top_wallets = sorted(top_wallets, key=lambda x: safe_float(x[1].get("total_usd")), reverse=True)[:8]
+
+    wallet_buyers = 0
+    concentration_total = 0.0
+    concentration_buy = 0.0
+    for _, slot in top_wallets:
+        b = safe_float(slot.get("buy_usd"))
+        t = safe_float(slot.get("total_usd"))
+        if b > safe_float(slot.get("sell_usd")):
+            wallet_buyers += 1
+        concentration_total += t
+        concentration_buy += b
+
+    buyer_concentration_ok = (wallet_buyers >= max(2, len(top_wallets) // 2)) if top_wallets else False
+    wallet_concentration_bias = concentration_buy / max(1.0, concentration_total)
+
+    recent_6h = _recent_trades(6)
+    older_6h = [x for x in _recent_trades(12) if safe_float(x.get("ts")) < (time.time() - 6 * 3600)]
+    recent_6h_buys = sum(1 for x in recent_6h if _entry_side(x) > 0)
+    older_6h_buys = sum(1 for x in older_6h if _entry_side(x) > 0)
+    activity_consistent = recent_6h_buys >= max(2, int(older_6h_buys * 0.7)) if older_6h else recent_6h_buys >= 2
+
+    holder_growth = 0
+    if LAST_HOLDERS_COUNT is not None and PENDING_HOLDER_VALUE is not None:
+        holder_growth = PENDING_HOLDER_VALUE - LAST_HOLDERS_COUNT
+
+    pool_snapshots = [get_pool_snapshot(addr, label) for addr, label in WATCHED_POOLS.items()]
+    readable_pools = [snap for snap in pool_snapshots if snap.get("ok")]
+    stable_liquidity = len(readable_pools) >= max(1, len(pool_snapshots) // 2)
+
+    score = 40
+    detected: List[str] = []
+
+    if buy_ratio >= 0.58 and buy_volume > 0:
+        score += 14
+        detected.append("repeated buy activity" if repeated_buy_activity else "buy flow dominance")
+    if repeated_buy_activity:
+        score += 10
+    if sell_pressure <= 0.40 and total_volume > 0:
+        score += 12
+        detected.append("low sell pressure")
+    if holder_growth > 0:
+        score += min(12, holder_growth * 2)
+        detected.append("gradual holder growth")
+    if whale_accumulation:
+        score += 12
+        detected.append("whale accumulation")
+    if buyer_concentration_ok and wallet_concentration_bias >= 0.52:
+        score += 8
+        detected.append("wallet concentration favors buys")
+    if activity_consistent:
+        score += 8
+        detected.append("consistent activity cadence")
+    if stable_liquidity:
+        score += 6
+        detected.append("stable liquidity")
+
+    if total_volume < BIG_ALERT_USD:
+        score -= 8
+    if sell_pressure >= 0.52 and total_volume > 0:
+        score -= 16
+
+    score = max(0, min(100, int(score)))
+
+    if score >= 78:
+        level = "STRONG"
+        interpretation = "Market structure suggests possible smart money accumulation behavior."
+    elif score >= 62:
+        level = "MODERATE"
+        interpretation = "Market structure suggests controlled accumulation behavior."
+    elif score >= 46:
+        level = "NEUTRAL"
+        interpretation = "Signals are mixed; accumulation is present but not decisive."
+    else:
+        level = "WEAK"
+        interpretation = "Accumulation signals are weak or absent right now."
+
+    if not detected:
+        detected = ["no clear accumulation edge yet"]
+
+    logger.info("ACCUMULATION DETECTION GENERATED | level=%s confidence=%s detected=%s", level, score, len(detected))
+    return (
+        "🧠 *WOODY Accumulation Detection*\n\n"
+        f"Accumulation Level: *{level}*\n"
+        f"Confidence: *{score}/100*\n\n"
+        "Detected:\n"
+        + "\n".join(f"• {item}" for item in detected[:6])
+        + "\n\nAI Interpretation:\n"
+        + interpretation
+    )
 def get_market_pulse_text(hours: int = 24) -> str:
     trades = _recent_trades(hours)
     buys = [x for x in trades if _entry_side(x) > 0]
@@ -1603,6 +1725,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("🧠 Wallet Intel", callback_data="wallet_intelligence"),
+            InlineKeyboardButton("🧠 Accumulation", callback_data="accumulation_detection"),
         ],
         [
             InlineKeyboardButton("📈 Summary", callback_data="market_summary"),
@@ -2825,6 +2948,14 @@ async def wallets_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text(await asyncio.to_thread(get_wallet_intelligence_text), parse_mode=ParseMode.MARKDOWN)
 
 
+
+
+async def accumulation_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if is_public_menu_context(update.effective_chat.type if update.effective_chat else None, update.effective_user.id if update.effective_user else None):
+        return
+    if update.message:
+        await update.message.reply_text(await asyncio.to_thread(get_accumulation_detection_text), parse_mode=ParseMode.MARKDOWN)
+
 async def diagnostics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if is_public_menu_context(update.effective_chat.type if update.effective_chat else None, update.effective_user.id if update.effective_user else None):
         return
@@ -2897,6 +3028,10 @@ async def menu_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if is_public_menu_context(query.message.chat.type if query.message and query.message.chat else None, query.from_user.id if query.from_user else None):
             return
         await query.message.reply_text(await asyncio.to_thread(get_wallet_intelligence_text), parse_mode=ParseMode.MARKDOWN)
+    elif query.data == "accumulation_detection":
+        if is_public_menu_context(query.message.chat.type if query.message and query.message.chat else None, query.from_user.id if query.from_user else None):
+            return
+        await query.message.reply_text(await asyncio.to_thread(get_accumulation_detection_text), parse_mode=ParseMode.MARKDOWN)
     elif query.data == "market_summary":
         await query.message.reply_text(await asyncio.to_thread(get_market_summary_text), parse_mode=ParseMode.MARKDOWN)
     elif query.data == "ai_analysis":
@@ -2971,6 +3106,7 @@ def main() -> None:
     app.add_handler(CommandHandler("pulse", pulse_command))
     app.add_handler(CommandHandler("risk", risk_command))
     app.add_handler(CommandHandler("wallets", wallets_command))
+    app.add_handler(CommandHandler("accumulation", accumulation_command))
     app.add_handler(CommandHandler("diag", diagnostics_command))
     app.add_handler(CommandHandler("id", id_command))
     app.add_handler(CommandHandler("testalert", testalert_command))
