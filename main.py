@@ -4,10 +4,12 @@ import random
 import logging
 import asyncio
 import json
+import threading
 from typing import Dict, Optional, Tuple, List, Any, Set
 
 import requests
 import socketio
+from aiohttp import web
 from dotenv import load_dotenv
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
@@ -150,6 +152,7 @@ PROCESS_PENDING_LOCK: Optional[asyncio.Lock] = None
 WS_CONNECTED = False
 WS_STOP_EVENT: Optional[asyncio.Event] = None
 WS_TASK: Optional[asyncio.Task] = None
+PUBLIC_HTTP_THREAD: Optional[threading.Thread] = None
 API_OK_COUNT = 0
 API_FAIL_COUNT = 0
 LAST_API_ERROR = "N/A"
@@ -172,6 +175,12 @@ VOLUME_HISTORY_FILE = os.getenv("VOLUME_HISTORY_FILE", "data/volume_history.json
 ROOT_CACHE_FILE = os.getenv("ROOT_CACHE_FILE", "data/root_cache.json").strip()
 PUBLIC_STATUS_FILE = os.getenv("PUBLIC_STATUS_FILE", "public/woody-monitor-status.json").strip()
 PUBLIC_STATUS_INTERVAL = int(os.getenv("PUBLIC_STATUS_INTERVAL", "30"))
+PUBLIC_STATUS_HOST = os.getenv("PUBLIC_STATUS_HOST", "0.0.0.0").strip()
+PUBLIC_STATUS_PORT = int(
+    os.getenv("PUBLIC_STATUS_PORT")
+    or os.getenv("PORT")
+    or "8080"
+)
 
 TOP_VOLUME: Dict[str, Dict[str, float]] = {}
 VOLUME_HISTORY: List[Dict[str, float]] = []
@@ -1384,6 +1393,19 @@ def write_dashboard_status_json() -> None:
     with open(PUBLIC_STATUS_FILE, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
     logger.info("WOODY DASHBOARD JSON UPDATED")
+
+
+async def status_json_handler(_: web.Request) -> web.Response:
+    payload = await asyncio.to_thread(build_dashboard_status_payload)
+    logger.info("PUBLIC STATUS ENDPOINT SERVED")
+    return web.json_response(payload, content_type="application/json")
+
+
+def start_public_status_server() -> None:
+    app = web.Application()
+    app.router.add_get("/status.json", status_json_handler)
+    logger.info("Starting public status endpoint on %s:%s", PUBLIC_STATUS_HOST, PUBLIC_STATUS_PORT)
+    web.run_app(app, host=PUBLIC_STATUS_HOST, port=PUBLIC_STATUS_PORT, handle_signals=False)
 
 def build_ai_recommendation() -> Dict[str, Any]:
     best = get_best_price()
@@ -3295,9 +3317,12 @@ def main() -> None:
     validate_runtime_config()
 
     async def post_init(application: Application) -> None:
-        global WS_STOP_EVENT, WS_TASK
+        global WS_STOP_EVENT, WS_TASK, PUBLIC_HTTP_THREAD
         WS_STOP_EVENT = asyncio.Event()
         WS_TASK = application.create_task(ws_connect_loop(WS_STOP_EVENT))
+        if PUBLIC_HTTP_THREAD is None or not PUBLIC_HTTP_THREAD.is_alive():
+            PUBLIC_HTTP_THREAD = threading.Thread(target=start_public_status_server, daemon=True)
+            PUBLIC_HTTP_THREAD.start()
         await asyncio.to_thread(write_dashboard_status_json)
         logger.info("Startup complete, websocket task launched")
 
