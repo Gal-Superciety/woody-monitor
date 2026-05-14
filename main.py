@@ -4,10 +4,12 @@ import random
 import logging
 import asyncio
 import json
+import threading
 from typing import Dict, Optional, Tuple, List, Any, Set
 
 import requests
 import socketio
+from aiohttp import web
 from dotenv import load_dotenv
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
@@ -150,6 +152,7 @@ PROCESS_PENDING_LOCK: Optional[asyncio.Lock] = None
 WS_CONNECTED = False
 WS_STOP_EVENT: Optional[asyncio.Event] = None
 WS_TASK: Optional[asyncio.Task] = None
+PUBLIC_HTTP_THREAD: Optional[threading.Thread] = None
 API_OK_COUNT = 0
 API_FAIL_COUNT = 0
 LAST_API_ERROR = "N/A"
@@ -170,6 +173,10 @@ LAST_ALERTS_FILE = os.getenv("LAST_ALERTS_FILE", "data/last_alerts.json").strip(
 TOP_VOLUME_FILE = os.getenv("TOP_VOLUME_FILE", "data/top_volume.json").strip()
 VOLUME_HISTORY_FILE = os.getenv("VOLUME_HISTORY_FILE", "data/volume_history.json").strip()
 ROOT_CACHE_FILE = os.getenv("ROOT_CACHE_FILE", "data/root_cache.json").strip()
+PUBLIC_STATUS_FILE = os.getenv("PUBLIC_STATUS_FILE", "public/woody-monitor-status.json").strip()
+PUBLIC_STATUS_INTERVAL = int(os.getenv("PUBLIC_STATUS_INTERVAL", "30"))
+PUBLIC_STATUS_HOST = os.getenv("PUBLIC_STATUS_HOST", "0.0.0.0").strip()
+PUBLIC_STATUS_PORT = int(os.getenv("PORT", os.getenv("PUBLIC_STATUS_PORT", "8080")))
 
 TOP_VOLUME: Dict[str, Dict[str, float]] = {}
 VOLUME_HISTORY: List[Dict[str, float]] = []
@@ -1293,6 +1300,108 @@ def get_fake_pump_detection_text(hours: int = 24) -> str:
         + "\n\nAI Interpretation:\n"
         + interpretation
     )
+
+
+def get_accumulation_detection_payload(hours: int = 24) -> Dict[str, Any]:
+    text = get_accumulation_detection_text(hours)
+    confidence = 0
+    for token in text.splitlines():
+        if "Confidence:" in token:
+            confidence = safe_int(token.split("*")[1].split("/")[0], 0)
+            break
+    level = "LOW"
+    if confidence >= 78:
+        level = "HIGH"
+    elif confidence >= 58:
+        level = "MODERATE"
+    return {"level": level, "confidence": confidence}
+
+
+def get_fake_pump_detection_payload(hours: int = 24) -> Dict[str, Any]:
+    text = get_fake_pump_detection_text(hours)
+    status = "HEALTHY MOMENTUM"
+    confidence = 0
+    for token in text.splitlines():
+        if token.startswith("Status:"):
+            status = token.split("*")[1]
+        if token.startswith("Confidence:"):
+            confidence = safe_int(token.split("*")[1].split("/")[0], 0)
+    return {"status": status, "confidence": confidence}
+
+
+def build_market_pulse(hours: int = 24) -> Dict[str, Any]:
+    trades = _recent_trades(hours)
+    buys = [x for x in trades if _entry_side(x) > 0]
+    sells = [x for x in trades if _entry_side(x) < 0]
+    buy_volume = sum(safe_float(x.get("usd")) for x in buys)
+    sell_volume = sum(safe_float(x.get("usd")) for x in sells)
+    score = max(35, min(92, int(55 + (buy_volume - sell_volume) / max(1.0, buy_volume + sell_volume) * 40)))
+    mood = "Defensive" if score < 48 else ("Balanced" if score < 60 else "Constructive")
+    total_usd = buy_volume + sell_volume
+    activity = "Low" if total_usd < BIG_ALERT_USD * 4 else ("Medium" if total_usd < WHALE_ALERT_USD * 8 else "High")
+    return {"score": score, "mood": mood, "activity": activity}
+
+
+def build_risk_radar(hours: int = 24) -> Dict[str, Any]:
+    trades = _recent_trades(hours)
+    buys = [x for x in trades if _entry_side(x) > 0]
+    sells = [x for x in trades if _entry_side(x) < 0]
+    buy_volume = sum(safe_float(x.get("usd")) for x in buys)
+    sell_volume = sum(safe_float(x.get("usd")) for x in sells)
+    score = 0
+    if sell_volume > buy_volume * 1.15 and (buy_volume + sell_volume) > 0:
+        score += 18
+    if max((safe_float(x.get("usd")) for x in sells), default=0.0) >= WHALE_ALERT_USD:
+        score += 20
+    if (not WS_CONNECTED) or API_FAIL_COUNT > API_OK_COUNT:
+        score += 16
+    recent_2h = _recent_trades(2)
+    if len(recent_2h) < 3 or sum(safe_float(x.get("usd")) for x in recent_2h) < BIG_ALERT_USD:
+        score += 10
+    if LAST_HOLDERS_COUNT is not None and PENDING_HOLDER_VALUE is not None and PENDING_HOLDER_VALUE < LAST_HOLDERS_COUNT:
+        score += 12
+    level = "LOW" if score < 28 else ("MEDIUM" if score < 55 else "HIGH")
+    return {"level": level, "score": min(100, score)}
+
+
+def build_dashboard_status_payload() -> Dict[str, Any]:
+    rec = build_ai_recommendation()
+    return {
+        "marketPulse": build_market_pulse(),
+        "riskRadar": build_risk_radar(),
+        "walletIntelligence": {
+            "signal": rec["recommendation"],
+            "confidence": rec["confidence"],
+            "risk": rec["risk"],
+            "reason": rec["reason"],
+        },
+        "accumulation": get_accumulation_detection_payload(),
+        "fakePump": get_fake_pump_detection_payload(),
+        "price": {"usd": rec["price_usd"]},
+        "liquidity": {"totalUsd": rec["total_liquidity_usd"]},
+        "updatedAt": int(time.time()),
+    }
+
+
+def write_dashboard_status_json() -> None:
+    payload = build_dashboard_status_payload()
+    os.makedirs(os.path.dirname(PUBLIC_STATUS_FILE) or ".", exist_ok=True)
+    with open(PUBLIC_STATUS_FILE, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    logger.info("WOODY DASHBOARD JSON UPDATED")
+
+
+async def status_json_handler(_: web.Request) -> web.Response:
+    payload = await asyncio.to_thread(build_dashboard_status_payload)
+    logger.info("PUBLIC STATUS ENDPOINT SERVED")
+    return web.json_response(payload, content_type="application/json")
+
+
+def start_public_status_server() -> None:
+    app = web.Application()
+    app.router.add_get("/status.json", status_json_handler)
+    logger.info("Starting public status endpoint on %s:%s", PUBLIC_STATUS_HOST, PUBLIC_STATUS_PORT)
+    web.run_app(app, host=PUBLIC_STATUS_HOST, port=PUBLIC_STATUS_PORT, handle_signals=False)
 
 def build_ai_recommendation() -> Dict[str, Any]:
     best = get_best_price()
@@ -3187,6 +3296,13 @@ async def greeting_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         ]
         await update.message.reply_text(random.choice(replies))
 
+
+async def dashboard_status_job(_: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        await asyncio.to_thread(write_dashboard_status_json)
+    except Exception as e:
+        logger.warning("Failed to update dashboard JSON: %s", e)
+
 # =========================================================
 # MAIN
 # =========================================================
@@ -3197,9 +3313,13 @@ def main() -> None:
     validate_runtime_config()
 
     async def post_init(application: Application) -> None:
-        global WS_STOP_EVENT, WS_TASK
+        global WS_STOP_EVENT, WS_TASK, PUBLIC_HTTP_THREAD
         WS_STOP_EVENT = asyncio.Event()
         WS_TASK = application.create_task(ws_connect_loop(WS_STOP_EVENT))
+        if PUBLIC_HTTP_THREAD is None or not PUBLIC_HTTP_THREAD.is_alive():
+            PUBLIC_HTTP_THREAD = threading.Thread(target=start_public_status_server, daemon=True)
+            PUBLIC_HTTP_THREAD.start()
+        await asyncio.to_thread(write_dashboard_status_json)
         logger.info("Startup complete, websocket task launched")
 
     async def post_shutdown(_: Application) -> None:
@@ -3241,6 +3361,7 @@ def main() -> None:
 
     app.job_queue.run_repeating(check_holders, interval=CHECK_HOLDERS_INTERVAL, first=20)
     app.job_queue.run_repeating(process_pending_roots, interval=3, first=5)
+    app.job_queue.run_repeating(dashboard_status_job, interval=PUBLIC_STATUS_INTERVAL, first=10)
 
     logger.info("WOODY Monitor V2 started...")
     app.run_polling(drop_pending_updates=True)
