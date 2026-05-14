@@ -1224,6 +1224,83 @@ def get_top_volume_text(limit: int = 10) -> str:
     return "🔥 *Top Volume (real wallets)*\n_Filtered: tech/aggregators/pools_\n\n" + "\n".join(lines)
 
 
+def get_wallet_intelligence_text(limit: int = 10) -> str:
+    wallets: List[Tuple[str, Dict[str, float]]] = []
+    for wallet, slot in TOP_VOLUME.items():
+        if not is_real_wallet(wallet):
+            continue
+        wallets.append((wallet, slot))
+
+    wallets = sorted(wallets, key=lambda x: safe_float(x[1].get("total_usd")), reverse=True)[:limit]
+    if not wallets:
+        return "🧠 *WOODY Wallet Intelligence*\n\nNot enough wallet activity data yet."
+
+    recent_24h = _recent_trades(24)
+    recent_wallet_stats: Dict[str, Dict[str, float]] = {}
+    for entry in recent_24h:
+        wallet = str(entry.get("wallet") or "")
+        if not wallet or not is_real_wallet(wallet):
+            continue
+        slot = recent_wallet_stats.setdefault(wallet, {"buy": 0.0, "sell": 0.0, "total": 0.0, "tx": 0.0})
+        usd = safe_float(entry.get("usd"))
+        side = _entry_side(entry)
+        if side > 0:
+            slot["buy"] += usd
+        elif side < 0:
+            slot["sell"] += usd
+        slot["total"] += usd
+        slot["tx"] += 1
+
+    last_buy_wallet = str(LAST_ALERTS.get("BUY", {}).get("wallet") or "")
+    last_sell_wallet = str(LAST_ALERTS.get("SELL", {}).get("wallet") or "")
+
+    lines: List[str] = ["🧠 *WOODY Wallet Intelligence*", "_Admin-only wallet behavior readout_", ""]
+    for idx, (wallet, totals) in enumerate(wallets, start=1):
+        buy_usd = safe_float(totals.get("buy_usd"))
+        sell_usd = safe_float(totals.get("sell_usd"))
+        total_usd = safe_float(totals.get("total_usd"))
+        tx_count = safe_float(totals.get("tx_count"))
+
+        recent = recent_wallet_stats.get(wallet, {"buy": 0.0, "sell": 0.0, "total": 0.0, "tx": 0.0})
+        recent_weight = min(15, int(safe_float(recent.get("tx")) * 2))
+
+        if total_usd < MIN_ALERT_USD and tx_count < 2:
+            behavior = "New/Low Data"
+            score = 45 + recent_weight
+            ai_read = "limited history; wait for more confirmations."
+        elif buy_usd > sell_usd * 1.35:
+            behavior = "Accumulator"
+            score = 72 + recent_weight
+            ai_read = "wallet shows accumulation behavior."
+        elif sell_usd > buy_usd * 1.35:
+            behavior = "Seller"
+            score = 38 + min(20, int((sell_usd / max(1.0, total_usd)) * 30))
+            ai_read = "wallet favors distribution and potential exit pressure."
+        else:
+            behavior = "Mixed Trader"
+            score = 55 + recent_weight
+            ai_read = "wallet is active but direction is unclear."
+
+        if wallet == last_buy_wallet:
+            score += 4
+        if wallet == last_sell_wallet:
+            score -= 4
+
+        score = max(0, min(100, int(score)))
+        lines.extend([
+            f"{idx}. `{short_wallet(wallet)}`",
+            f"Type: *{behavior}*",
+            f"Score: *{score}/100*",
+            f"Volume: *${total_usd:,.2f}*",
+            f"Buy/Sell: *${buy_usd:,.2f} / ${sell_usd:,.2f}*",
+            f"AI Read: _{ai_read}_",
+            "",
+        ])
+
+    logger.info("WALLET INTELLIGENCE GENERATED | wallets=%s", len(wallets))
+    return "\n".join(lines).strip()
+
+
 def get_pool_snapshot(pool_address: str, label: str) -> Dict[str, Any]:
     now = time.time()
     cached = POOL_SNAPSHOT_CACHE.get(pool_address)
@@ -1523,6 +1600,9 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🧠 AI Core", callback_data="ai_status"),
             InlineKeyboardButton("🧪 Diagnostics", callback_data="diagnostics"),
             InlineKeyboardButton("🧭 AI Signal", callback_data="ai_recommendation"),
+        ],
+        [
+            InlineKeyboardButton("🧠 Wallet Intel", callback_data="wallet_intelligence"),
         ],
         [
             InlineKeyboardButton("📈 Summary", callback_data="market_summary"),
@@ -2738,6 +2818,13 @@ async def risk_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text(await asyncio.to_thread(get_risk_radar_text), parse_mode=ParseMode.MARKDOWN)
 
 
+async def wallets_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if is_public_menu_context(update.effective_chat.type if update.effective_chat else None, update.effective_user.id if update.effective_user else None):
+        return
+    if update.message:
+        await update.message.reply_text(await asyncio.to_thread(get_wallet_intelligence_text), parse_mode=ParseMode.MARKDOWN)
+
+
 async def diagnostics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if is_public_menu_context(update.effective_chat.type if update.effective_chat else None, update.effective_user.id if update.effective_user else None):
         return
@@ -2806,6 +2893,10 @@ async def menu_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if is_public_menu_context(query.message.chat.type if query.message and query.message.chat else None, query.from_user.id if query.from_user else None):
             return
         await query.message.reply_text(await asyncio.to_thread(get_diagnostics_text), parse_mode=ParseMode.MARKDOWN)
+    elif query.data == "wallet_intelligence":
+        if is_public_menu_context(query.message.chat.type if query.message and query.message.chat else None, query.from_user.id if query.from_user else None):
+            return
+        await query.message.reply_text(await asyncio.to_thread(get_wallet_intelligence_text), parse_mode=ParseMode.MARKDOWN)
     elif query.data == "market_summary":
         await query.message.reply_text(await asyncio.to_thread(get_market_summary_text), parse_mode=ParseMode.MARKDOWN)
     elif query.data == "ai_analysis":
@@ -2879,6 +2970,7 @@ def main() -> None:
     app.add_handler(CommandHandler("analysis", analysis_command))
     app.add_handler(CommandHandler("pulse", pulse_command))
     app.add_handler(CommandHandler("risk", risk_command))
+    app.add_handler(CommandHandler("wallets", wallets_command))
     app.add_handler(CommandHandler("diag", diagnostics_command))
     app.add_handler(CommandHandler("id", id_command))
     app.add_handler(CommandHandler("testalert", testalert_command))
