@@ -1186,6 +1186,110 @@ def get_market_pulse_text(hours: int = 24) -> str:
     )
 
 
+
+
+def get_fake_pump_detection_text(hours: int = 24) -> str:
+    trades = _recent_trades(hours)
+    buys = [x for x in trades if _entry_side(x) > 0]
+    sells = [x for x in trades if _entry_side(x) < 0]
+
+    buy_volume = sum(safe_float(x.get("usd")) for x in buys)
+    sell_volume = sum(safe_float(x.get("usd")) for x in sells)
+    total_volume = buy_volume + sell_volume
+
+    recent_3h_volume = sum(safe_float(x.get("usd")) for x in _recent_trades(3))
+    previous_9h_trades = [x for x in _recent_trades(12) if safe_float(x.get("ts")) < (time.time() - 3 * 3600)]
+    previous_9h_volume = sum(safe_float(x.get("usd")) for x in previous_9h_trades)
+    volume_spike = recent_3h_volume > max(BIG_ALERT_USD * 1.5, previous_9h_volume * 0.8) and recent_3h_volume > 0
+
+    buy_pressure_ratio = buy_volume / max(1.0, sell_volume)
+    aggressive_buy_pressure = buy_pressure_ratio >= 1.8 and buy_volume >= BIG_ALERT_USD
+
+    pool_snapshots = [get_pool_snapshot(addr, label) for addr, label in WATCHED_POOLS.items()]
+    readable_pools = [snap for snap in pool_snapshots if snap.get("ok")]
+    weak_or_partial_liquidity = len(readable_pools) < len(pool_snapshots) or sum(safe_float(s.get("pool_value_usd")) for s in readable_pools) < BIG_ALERT_USD * 4
+
+    whale_buys = [safe_float(x.get("usd")) for x in buys if safe_float(x.get("usd")) >= WHALE_ALERT_USD]
+    whale_sells = [safe_float(x.get("usd")) for x in sells if safe_float(x.get("usd")) >= WHALE_ALERT_USD]
+    rapid_whale_rotation = bool(whale_buys and whale_sells and abs(sum(whale_buys) - sum(whale_sells)) <= max(1.0, (sum(whale_buys) + sum(whale_sells)) * 0.35))
+
+    wallet_trade_counts: Dict[str, int] = {}
+    for entry in trades:
+        wallet = str(entry.get("wallet") or "").strip()
+        if wallet and is_real_wallet(wallet):
+            wallet_trade_counts[wallet] = wallet_trade_counts.get(wallet, 0) + 1
+    repeated_wallet_activity = any(count >= 3 for count in wallet_trade_counts.values())
+
+    abnormal_volatility = False
+    if total_volume > 0 and len(trades) >= 6:
+        avg_trade = total_volume / max(1, len(trades))
+        max_trade = max((safe_float(x.get("usd")) for x in trades), default=0.0)
+        abnormal_volatility = max_trade >= avg_trade * 4
+
+    holder_growth = 0
+    if LAST_HOLDERS_COUNT is not None and PENDING_HOLDER_VALUE is not None:
+        holder_growth = PENDING_HOLDER_VALUE - LAST_HOLDERS_COUNT
+    low_holder_growth_high_volume = holder_growth <= 1 and total_volume >= BIG_ALERT_USD * 2
+
+    possible_dump_risk_after_hype = aggressive_buy_pressure and (rapid_whale_rotation or len(sells) >= max(2, len(buys) // 2))
+
+    score = 18
+    detected: List[str] = []
+
+    if volume_spike:
+        score += 14
+        detected.append("sudden volume spike")
+    if aggressive_buy_pressure:
+        score += 12
+        detected.append("aggressive short-term buy pressure")
+    if weak_or_partial_liquidity:
+        score += 15
+        detected.append("weak liquidity depth")
+    if rapid_whale_rotation:
+        score += 12
+        detected.append("rapid whale buy/sell rotation")
+    if repeated_wallet_activity:
+        score += 10
+        detected.append("repeated wallet activity")
+    if abnormal_volatility:
+        score += 10
+        detected.append("abnormal volatility")
+    if low_holder_growth_high_volume:
+        score += 11
+        detected.append("low holder expansion")
+    if possible_dump_risk_after_hype:
+        score += 16
+        detected.append("possible dump risk after hype")
+
+    confidence = max(0, min(100, int(score)))
+
+    if confidence >= 82:
+        status = "HIGH DUMP RISK"
+        interpretation = "Momentum looks unstable and vulnerable to sharp downside after hype-driven flows."
+    elif confidence >= 64:
+        status = "POSSIBLE FAKE PUMP"
+        interpretation = "Current structure suggests unstable momentum with elevated dump risk."
+    elif confidence >= 45:
+        status = "SPECULATIVE MOMENTUM"
+        interpretation = "Momentum is active but speculative. Confirmation from liquidity and holder growth is still weak."
+    else:
+        status = "HEALTHY MOMENTUM"
+        interpretation = "Momentum appears healthier, with fewer fake-pump characteristics right now."
+
+    if not detected:
+        detected = ["no strong fake pump markers detected"]
+
+    logger.info("FAKE PUMP DETECTION GENERATED")
+    return (
+        "⚠️ *WOODY Fake Pump Detection*\n\n"
+        f"Status: *{status}*\n"
+        f"Confidence: *{confidence}/100*\n\n"
+        "Detected:\n"
+        + "\n".join(f"• {item}" for item in detected[:6])
+        + "\n\nAI Interpretation:\n"
+        + interpretation
+    )
+
 def build_ai_recommendation() -> Dict[str, Any]:
     best = get_best_price()
     last_buy = LAST_ALERTS.get("BUY", {})
@@ -1735,6 +1839,9 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton("⚠️ Risk Radar", callback_data="risk_radar"),
             InlineKeyboardButton("🧠 Market Pulse", callback_data="market_pulse"),
+        ],
+        [
+            InlineKeyboardButton("⚠️ Fake Pump", callback_data="fake_pump_detection"),
         ],
         [
             InlineKeyboardButton("𝕏 Twitter", url=TWITTER_URL),
@@ -2956,6 +3063,13 @@ async def accumulation_command(update: Update, context: ContextTypes.DEFAULT_TYP
     if update.message:
         await update.message.reply_text(await asyncio.to_thread(get_accumulation_detection_text), parse_mode=ParseMode.MARKDOWN)
 
+async def fakepump_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if is_public_menu_context(update.effective_chat.type if update.effective_chat else None, update.effective_user.id if update.effective_user else None):
+        return
+    if update.message:
+        await update.message.reply_text(await asyncio.to_thread(get_fake_pump_detection_text), parse_mode=ParseMode.MARKDOWN)
+
+
 async def diagnostics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if is_public_menu_context(update.effective_chat.type if update.effective_chat else None, update.effective_user.id if update.effective_user else None):
         return
@@ -3045,6 +3159,10 @@ async def menu_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.message.reply_text(await asyncio.to_thread(get_risk_radar_text), parse_mode=ParseMode.MARKDOWN)
     elif query.data == "market_pulse":
         await query.message.reply_text(await asyncio.to_thread(get_market_pulse_text), parse_mode=ParseMode.MARKDOWN)
+    elif query.data == "fake_pump_detection":
+        if is_public_menu_context(query.message.chat.type if query.message and query.message.chat else None, query.from_user.id if query.from_user else None):
+            return
+        await query.message.reply_text(await asyncio.to_thread(get_fake_pump_detection_text), parse_mode=ParseMode.MARKDOWN)
     else:
         logger.warning("Unhandled callback_data=%s", query.data)
 
@@ -3107,6 +3225,7 @@ def main() -> None:
     app.add_handler(CommandHandler("risk", risk_command))
     app.add_handler(CommandHandler("wallets", wallets_command))
     app.add_handler(CommandHandler("accumulation", accumulation_command))
+    app.add_handler(CommandHandler("fakepump", fakepump_command))
     app.add_handler(CommandHandler("diag", diagnostics_command))
     app.add_handler(CommandHandler("id", id_command))
     app.add_handler(CommandHandler("testalert", testalert_command))
