@@ -1226,10 +1226,14 @@ def get_fake_pump_detection_text(hours: int = 24) -> str:
         max_trade = max((safe_float(x.get("usd")) for x in trades), default=0.0)
         abnormal_volatility = max_trade >= avg_trade * 4
 
-    holder_growth = 0
+    holder_growth: Optional[int] = None
     if LAST_HOLDERS_COUNT is not None and PENDING_HOLDER_VALUE is not None:
         holder_growth = PENDING_HOLDER_VALUE - LAST_HOLDERS_COUNT
-    low_holder_growth_high_volume = holder_growth <= 1 and total_volume >= BIG_ALERT_USD * 2
+    low_holder_growth_high_volume = (
+        holder_growth is not None
+        and holder_growth <= 1
+        and total_volume >= BIG_ALERT_USD * 2
+    )
 
     possible_dump_risk_after_hype = aggressive_buy_pressure and (rapid_whale_rotation or len(sells) >= max(2, len(buys) // 2))
 
