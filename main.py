@@ -33,7 +33,7 @@ GROUP_CHAT_ID = os.getenv("TELEGRAM_GROUP_CHAT_ID", "").strip()
 
 ENABLE_PRIVATE_ALERTS = os.getenv("ENABLE_PRIVATE_ALERTS", "true").strip().lower() == "true"
 ENABLE_GROUP_ALERTS = os.getenv("ENABLE_GROUP_ALERTS", "false").strip().lower() == "true"
-ADMIN_TELEGRAM_ID = os.getenv("5279028327", "").strip()
+ADMIN_TELEGRAM_ID = os.getenv("ADMIN_TELEGRAM_ID", "5279028327").strip()
 
 MVX_API = os.getenv("MVX_API", "https://api.multiversx.com").strip()
 WS_URL = os.getenv("WS_URL", "https://socket-api-ovh.multiversx.com").strip()
