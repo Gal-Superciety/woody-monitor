@@ -924,6 +924,144 @@ def get_ai_analysis_text(hours: int = 24) -> str:
     return "🧠 *WOODY AI Analysis*\n\n" + "\n".join(bullets) + f"\n\nAI Confidence: *{confidence}/100*\nShort-term outlook: *{outlook}*"
 
 
+def get_risk_radar_text(hours: int = 24) -> str:
+    trades = _recent_trades(hours)
+    buys = [x for x in trades if _entry_side(x) > 0]
+    sells = [x for x in trades if _entry_side(x) < 0]
+    buy_volume = sum(safe_float(x.get("usd")) for x in buys)
+    sell_volume = sum(safe_float(x.get("usd")) for x in sells)
+    total_volume = buy_volume + sell_volume
+
+    whale_sell = max((safe_float(x.get("usd")) for x in sells), default=0.0) >= WHALE_ALERT_USD
+    pool_snapshots = [get_pool_snapshot(addr, label) for addr, label in WATCHED_POOLS.items()]
+    readable_pools = sum(1 for snap in pool_snapshots if snap.get("ok"))
+    missing_readable_pools = readable_pools == 0
+    partial_liquidity = 0 < readable_pools < len(pool_snapshots)
+
+    warnings = get_diagnostic_warnings()
+    ws_or_api_instability = (not WS_CONNECTED) or any("API" in warning or "timeout" in warning for warning in warnings)
+
+    recent_2h = _recent_trades(2)
+    low_recent_activity = len(recent_2h) < 3 or sum(safe_float(x.get("usd")) for x in recent_2h) < BIG_ALERT_USD
+
+    holder_decline = False
+    if LAST_HOLDERS_COUNT is not None and PENDING_HOLDER_VALUE is not None:
+        holder_decline = PENDING_HOLDER_VALUE < LAST_HOLDERS_COUNT
+
+    detected: List[str] = []
+    score = 0
+
+    if sell_volume > buy_volume * 1.15 and total_volume > 0:
+        detected.append("increased sell pressure")
+        score += 18
+    if whale_sell:
+        detected.append("whale sell activity detected")
+        score += 20
+    if partial_liquidity:
+        detected.append("partial liquidity visibility")
+        score += 14
+    if missing_readable_pools:
+        detected.append("missing readable pools")
+        score += 22
+    if ws_or_api_instability:
+        detected.append("websocket/API instability")
+        score += 16
+    if low_recent_activity:
+        detected.append("low recent activity")
+        score += 10
+    if holder_decline:
+        detected.append("holder decline signal")
+        score += 12
+
+    if score >= 55:
+        risk_level = "HIGH"
+        suggestion = "Reduce exposure to noise and wait for stronger confirmation."
+    elif score >= 28:
+        risk_level = "MEDIUM"
+        suggestion = "Monitor next market moves carefully."
+    else:
+        risk_level = "LOW"
+        suggestion = "Risk structure is controlled; continue disciplined monitoring."
+
+    detected_lines = "\n".join(f"• {item}" for item in detected) if detected else "• no major risk anomalies detected"
+    logger.info("RISK RADAR GENERATED | level=%s score=%s detected=%s", risk_level, score, len(detected))
+    return (
+        "⚠️ *WOODY AI Risk Radar*\n\n"
+        f"Risk Level: *{risk_level}*\n"
+        f"Risk Score: *{min(100, score)}/100*\n\n"
+        "Detected:\n"
+        f"{detected_lines}\n\n"
+        "AI Suggestion:\n"
+        f"{suggestion}"
+    )
+
+
+def get_market_pulse_text(hours: int = 24) -> str:
+    trades = _recent_trades(hours)
+    buys = [x for x in trades if _entry_side(x) > 0]
+    sells = [x for x in trades if _entry_side(x) < 0]
+    buy_volume = sum(safe_float(x.get("usd")) for x in buys)
+    sell_volume = sum(safe_float(x.get("usd")) for x in sells)
+    total_volume = buy_volume + sell_volume
+
+    pool_snapshots = [get_pool_snapshot(addr, label) for addr, label in WATCHED_POOLS.items()]
+    readable_pools = sum(1 for snap in pool_snapshots if snap.get("ok"))
+    whales_buy = max((safe_float(x.get("usd")) for x in buys), default=0.0) >= WHALE_ALERT_USD
+
+    recent_6h = sum(safe_float(x.get("usd")) for x in _recent_trades(6))
+    previous_6h = max(0.0, sum(safe_float(x.get("usd")) for x in _recent_trades(12)) - recent_6h)
+
+    score = 50
+    reasons: List[str] = []
+
+    if buy_volume > sell_volume * 1.12 and total_volume > 0:
+        score += 16
+        reasons.append("buy volume exceeds sell volume")
+    elif sell_volume > buy_volume * 1.12 and total_volume > 0:
+        score -= 16
+        reasons.append("sell volume dominates recent flow")
+    else:
+        reasons.append("buy/sell flow is relatively balanced")
+
+    if readable_pools == len(pool_snapshots) and pool_snapshots:
+        score += 10
+        reasons.append("liquidity stable across tracked pools")
+    elif readable_pools > 0:
+        score += 2
+        reasons.append("liquidity partially visible")
+    else:
+        score -= 14
+        reasons.append("liquidity visibility is weak")
+
+    if whales_buy:
+        score += 8
+        reasons.append("whale accumulation detected")
+
+    if recent_6h > previous_6h and recent_6h > 0:
+        score += 8
+        activity = "Rising"
+        reasons.append("recent activity is accelerating")
+    elif recent_6h > 0:
+        activity = "Stable"
+    else:
+        score -= 10
+        activity = "Low"
+        reasons.append("activity is currently low")
+
+    score = max(0, min(100, int(score)))
+    mood = "Bullish" if score >= 68 else ("Balanced" if score >= 45 else "Defensive")
+    trend_strength = "Strong" if score >= 78 else ("Moderate" if score >= 55 else "Weak")
+
+    logger.info("MARKET PULSE GENERATED | score=%s mood=%s", score, mood)
+    return (
+        "🧠 *WOODY Market Pulse*\n\n"
+        f"Pulse Score: *{score}/100*\n"
+        f"Mood: *{mood}*\n"
+        f"Trend Strength: *{trend_strength}*\n"
+        f"Activity: *{activity}*\n\n"
+        "Reasons:\n"
+        + "\n".join(f"• {reason}" for reason in reasons[:4])
+    )
 
 
 def build_ai_recommendation() -> Dict[str, Any]:
@@ -1348,6 +1486,10 @@ def public_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("📈 Summary", callback_data="market_summary"),
             InlineKeyboardButton("🌍 Context", callback_data="market_context"),
         ],
+        [
+            InlineKeyboardButton("⚠️ Risk Radar", callback_data="risk_radar"),
+            InlineKeyboardButton("🧠 Market Pulse", callback_data="market_pulse"),
+        ],
     ])
 
 
@@ -1386,6 +1528,10 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("📈 Summary", callback_data="market_summary"),
             InlineKeyboardButton("🧠 AI Analysis", callback_data="ai_analysis"),
             InlineKeyboardButton("🌍 Context", callback_data="market_context"),
+        ],
+        [
+            InlineKeyboardButton("⚠️ Risk Radar", callback_data="risk_radar"),
+            InlineKeyboardButton("🧠 Market Pulse", callback_data="market_pulse"),
         ],
         [
             InlineKeyboardButton("𝕏 Twitter", url=TWITTER_URL),
@@ -2582,6 +2728,16 @@ async def analysis_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text(await asyncio.to_thread(get_ai_analysis_text), parse_mode=ParseMode.MARKDOWN)
 
 
+async def pulse_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message:
+        await update.message.reply_text(await asyncio.to_thread(get_market_pulse_text), parse_mode=ParseMode.MARKDOWN)
+
+
+async def risk_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message:
+        await update.message.reply_text(await asyncio.to_thread(get_risk_radar_text), parse_mode=ParseMode.MARKDOWN)
+
+
 async def diagnostics_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if is_public_menu_context(update.effective_chat.type if update.effective_chat else None, update.effective_user.id if update.effective_user else None):
         return
@@ -2659,6 +2815,10 @@ async def menu_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif query.data == "ai_recommendation":
         is_public = is_public_menu_context(query.message.chat.type if query.message and query.message.chat else None, query.from_user.id if query.from_user else None)
         await query.message.reply_text(await asyncio.to_thread(get_ai_recommendation_text, is_public), parse_mode=ParseMode.MARKDOWN)
+    elif query.data == "risk_radar":
+        await query.message.reply_text(await asyncio.to_thread(get_risk_radar_text), parse_mode=ParseMode.MARKDOWN)
+    elif query.data == "market_pulse":
+        await query.message.reply_text(await asyncio.to_thread(get_market_pulse_text), parse_mode=ParseMode.MARKDOWN)
     else:
         logger.warning("Unhandled callback_data=%s", query.data)
 
@@ -2717,6 +2877,8 @@ def main() -> None:
     app.add_handler(CommandHandler("buy", buy_command))
     app.add_handler(CommandHandler("summary", summary_command))
     app.add_handler(CommandHandler("analysis", analysis_command))
+    app.add_handler(CommandHandler("pulse", pulse_command))
+    app.add_handler(CommandHandler("risk", risk_command))
     app.add_handler(CommandHandler("diag", diagnostics_command))
     app.add_handler(CommandHandler("id", id_command))
     app.add_handler(CommandHandler("testalert", testalert_command))
