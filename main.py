@@ -176,7 +176,11 @@ ROOT_CACHE_FILE = os.getenv("ROOT_CACHE_FILE", "data/root_cache.json").strip()
 PUBLIC_STATUS_FILE = os.getenv("PUBLIC_STATUS_FILE", "public/woody-monitor-status.json").strip()
 PUBLIC_STATUS_INTERVAL = int(os.getenv("PUBLIC_STATUS_INTERVAL", "30"))
 PUBLIC_STATUS_HOST = os.getenv("PUBLIC_STATUS_HOST", "0.0.0.0").strip()
-PUBLIC_STATUS_PORT = int(os.getenv("PORT", os.getenv("PUBLIC_STATUS_PORT", "8080")))
+PUBLIC_STATUS_PORT = int(
+    os.getenv("PUBLIC_STATUS_PORT")
+    or os.getenv("PORT")
+    or "8080"
+)
 
 TOP_VOLUME: Dict[str, Dict[str, float]] = {}
 VOLUME_HISTORY: List[Dict[str, float]] = []
