@@ -2056,7 +2056,9 @@ def operation_token(op: dict) -> str:
 
 
 def operation_amount(op: dict) -> float:
-    return amount_from_raw(op.get("value", "0"), op.get("decimals", 18))
+    raw = op.get("value", op.get("amount", "0"))
+    decimals = op.get("decimals", 18)
+    return amount_from_raw(raw, decimals)
 
 
 def detect_pool_dex(tx: dict) -> str:
@@ -2152,10 +2154,38 @@ def get_wallet_flows(tx: dict, wallet: str) -> Tuple[Dict[str, float], Dict[str,
     sent: Dict[str, float] = {}
     received: Dict[str, float] = {}
 
-    def add(token: str, amount: float, from_addr: str, to_addr: str) -> None:
-        if not token or amount <= 0:
-            return
-        if from_addr == wallet:
+    def iter_transfer_like_nodes(node: Any) -> List[dict]:
+        found: List[dict] = []
+        if isinstance(node, dict):
+            has_tokenish = any(node.get(k) for k in ("identifier", "tokenIdentifier", "collection", "ticker"))
+            has_addr = bool(node.get("sender") or node.get("receiver"))
+            has_amountish = any(node.get(k) is not None for k in ("value", "amount"))
+            if has_tokenish and has_addr and has_amountish:
+                found.append(node)
+            for value in node.values():
+                found.extend(iter_transfer_like_nodes(value))
+        elif isinstance(node, list):
+            for item in node:
+                found.extend(iter_transfer_like_nodes(item))
+        return found
+
+    sources = [tx.get("operations") or [], tx.get("transfers") or [], tx.get("results") or []]
+    entries: List[dict] = []
+    for source in sources:
+        entries.extend(iter_transfer_like_nodes(source))
+
+    for op in entries:
+        token = operation_token(op) or str(op.get("collection") or op.get("ticker") or "")
+        if not token:
+            continue
+        amount = operation_amount(op)
+        if amount <= 0:
+            continue
+
+        sender = str(op.get("sender") or "")
+        receiver = str(op.get("receiver") or "")
+
+        if sender == wallet:
             sent[token] = sent.get(token, 0.0) + amount
         if to_addr == wallet:
             received[token] = received.get(token, 0.0) + amount
@@ -2715,8 +2745,7 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
         root_hash, wallet, woody_sent, woody_received, quote_sent_total, quote_received_total,
         net_woody, net_quote, dex,
         detected.get("type") if detected else "NONE",
-        "" if detected else "UNMATCHED_FLOW",
-        sent, received
+        "" if detected else ("QUOTE_TOKEN_NOT_FOUND" if (woody_sent > 0 or woody_received > 0) and (quote_sent_total <= 0 and quote_received_total <= 0) else "UNMATCHED_FLOW")
     )
     return detected
 
