@@ -1,6 +1,7 @@
 """Basic smoke tests to keep CI pytest step green."""
 
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
@@ -365,3 +366,35 @@ def test_get_scr_flows_extracts_sent() -> None:
     assert main.WOODY in scr_sent
     assert abs(scr_sent[main.WOODY] - 500.0) < 1e-9
     assert main.WOODY not in scr_received
+
+def test_lp_snapshot_days_include_1_15_and_last_day() -> None:
+    assert main.is_lp_snapshot_day(datetime(2026, 6, 1, tzinfo=timezone.utc))
+    assert main.is_lp_snapshot_day(datetime(2026, 6, 15, tzinfo=timezone.utc))
+    assert main.is_lp_snapshot_day(datetime(2026, 6, 30, tzinfo=timezone.utc))
+    assert not main.is_lp_snapshot_day(datetime(2026, 6, 14, tzinfo=timezone.utc))
+
+
+def test_lp_rewards_are_proportional_to_monthly_average(monkeypatch) -> None:
+    snapshots = [
+        {
+            "date": "2026-06-01",
+            "holders": [
+                {"wallet": "erd1alice", "lp_amount": 10, "estimated_egld": 1},
+                {"wallet": "erd1bob", "lp_amount": 30, "estimated_egld": 3},
+            ],
+        },
+        {
+            "date": "2026-06-15",
+            "holders": [
+                {"wallet": "erd1alice", "lp_amount": 30, "estimated_egld": 3},
+                {"wallet": "erd1bob", "lp_amount": 30, "estimated_egld": 3},
+            ],
+        },
+    ]
+    monkeypatch.setattr(main, "get_month_lp_snapshots", lambda month_key=None: snapshots)
+
+    result = main.calculate_lp_rewards(5, "2026-06")
+    rewards = {row["wallet"]: row["reward_egld"] for row in result["rows"]}
+
+    assert rewards["erd1alice"] == 2.0
+    assert rewards["erd1bob"] == 3.0
