@@ -5,6 +5,11 @@ import logging
 import asyncio
 import json
 import threading
+import calendar
+import csv
+import base64
+from datetime import datetime, timezone
+from io import BytesIO, StringIO
 from typing import Dict, Optional, Tuple, List, Any, Set
 
 import requests
@@ -65,6 +70,13 @@ XEXCHANGE_POOL_ADDRESS = os.getenv(
     "XEXCHANGE_POOL_ADDRESS",
     "erd1qqqqqqqqqqqqqpgqvmgnk26tfvz6sj5yasw7p6yfvqpv628d2jpsnvmeaz",
 ).strip()
+XEXCHANGE_LP_TOKEN_ID = os.getenv("XEXCHANGE_LP_TOKEN_ID", "").strip()
+LP_HOLDERS_PAGE_SIZE = max(1, int(os.getenv("LP_HOLDERS_PAGE_SIZE", "100")))
+LP_HOLDERS_MAX_PAGES = max(1, int(os.getenv("LP_HOLDERS_MAX_PAGES", "20")))
+LP_SNAPSHOT_CHECK_INTERVAL = int(os.getenv("LP_SNAPSHOT_CHECK_INTERVAL", "3600"))
+LP_SNAPSHOT_FILE = os.getenv("LP_SNAPSHOT_FILE", "data/lp_snapshots.json").strip()
+LP_REWARDS_FILE = os.getenv("LP_REWARDS_FILE", "data/lp_rewards.json").strip()
+LP_EXPORT_REWARD_POOL_EGLD = float(os.getenv("LP_EXPORT_REWARD_POOL_EGLD", "0"))
 ONEDEX_POOL_ADDRESS = os.getenv(
     "ONEDEX_POOL_ADDRESS",
     "erd1qqqqqqqqqqqqqpgqqz6vp9y50ep867vnr296mqf3dduh6guvmvlsu3sujc",
@@ -162,6 +174,7 @@ LAST_ROOT_PROCESSED_AT = 0
 LAST_WOODY_TX_AT = 0
 LAST_EGLD_USD_SOURCE = "N/A"
 TX_DETAILS_CACHE: Dict[str, Tuple[Optional[dict], float]] = {}
+LP_TOKEN_CACHE: Optional[Tuple[str, float]] = None
 TX_DETAILS_CACHE_TTL_SECONDS = int(os.getenv("TX_DETAILS_CACHE_TTL_SECONDS", "45"))
 ROOT_PROCESSING_CONCURRENCY = max(1, int(os.getenv("ROOT_PROCESSING_CONCURRENCY", "4")))
 
@@ -370,6 +383,20 @@ def get_json(url: str, params: Optional[dict] = None) -> Optional[Any]:
         API_FAIL_COUNT += 1
         LAST_API_ERROR = f"{type(exc).__name__}: {exc}"
         logger.warning("GET JSON failed for %s -> %s", url, exc)
+        return None
+
+
+def post_json(url: str, payload: dict) -> Optional[Any]:
+    global API_OK_COUNT, API_FAIL_COUNT, LAST_API_ERROR
+    try:
+        r = requests.post(url, json=payload, headers=UA, timeout=API_TIMEOUT_SECONDS)
+        r.raise_for_status()
+        API_OK_COUNT += 1
+        return r.json()
+    except Exception as exc:
+        API_FAIL_COUNT += 1
+        LAST_API_ERROR = f"{type(exc).__name__}: {exc}"
+        logger.warning("POST JSON failed for %s -> %s", url, exc)
         return None
 
 
@@ -1722,6 +1749,339 @@ def get_pool_snapshot(pool_address: str, label: str) -> Dict[str, Any]:
     }
     POOL_SNAPSHOT_CACHE[pool_address] = (result, now)
     return result
+
+
+
+def _extract_vm_return_data(payload: Any) -> List[str]:
+    if not isinstance(payload, dict):
+        return []
+    data = payload.get("data", payload)
+    if isinstance(data, dict):
+        nested = data.get("data", data)
+        if isinstance(nested, dict):
+            ret = nested.get("returnData") or nested.get("return_data") or []
+            return ret if isinstance(ret, list) else []
+        if isinstance(nested, list):
+            return nested
+    return []
+
+
+def _decode_vm_value(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    for decoder in (
+        lambda x: base64.b64decode(x).decode("utf-8", errors="ignore"),
+        lambda x: bytes.fromhex(x).decode("utf-8", errors="ignore"),
+    ):
+        try:
+            decoded = decoder(raw).strip("\x00\n\r\t ")
+            if decoded:
+                return decoded
+        except Exception:
+            continue
+    return raw
+
+
+def discover_xexchange_lp_token_id(force_refresh: bool = False) -> str:
+    global LP_TOKEN_CACHE
+    if XEXCHANGE_LP_TOKEN_ID:
+        return XEXCHANGE_LP_TOKEN_ID
+    now = time.time()
+    if LP_TOKEN_CACHE and not force_refresh and now - LP_TOKEN_CACHE[1] < 3600:
+        return LP_TOKEN_CACHE[0]
+
+    for function_name in ("getLpTokenIdentifier", "getLpTokenId", "getLpTokenID"):
+        payload = {"scAddress": XEXCHANGE_POOL_ADDRESS, "funcName": function_name, "args": []}
+        data = post_json(f"{MVX_API}/vm-values/query", payload)
+        for item in _extract_vm_return_data(data):
+            decoded = _decode_vm_value(item)
+            if "-" in decoded and len(decoded) >= 5:
+                LP_TOKEN_CACHE = (decoded, now)
+                logger.info("LP token discovered from %s: %s", function_name, decoded)
+                return decoded
+
+    LP_TOKEN_CACHE = ("", now)
+    return ""
+
+
+def get_token_metadata(token_id: str) -> Dict[str, Any]:
+    if not token_id:
+        return {}
+    data = get_json(f"{MVX_API}/tokens/{token_id}")
+    return data if isinstance(data, dict) else {}
+
+
+def get_lp_total_supply_and_decimals(lp_token_id: str) -> Tuple[float, int]:
+    data = get_token_metadata(lp_token_id)
+    decimals = safe_int(data.get("decimals", 18), 18)
+    supply_raw = data.get("supply") or data.get("totalSupply") or data.get("circulatingSupply") or "0"
+    return amount_from_raw(supply_raw, decimals), decimals
+
+
+def get_xexchange_pool_value_egld() -> float:
+    snap = get_pool_snapshot(XEXCHANGE_POOL_ADDRESS, "xExchange WOODY/EGLD")
+    if not snap.get("ok"):
+        return 0.0
+    pair_token = str(snap.get("pair_token") or "")
+    pair_amount = safe_float(snap.get("pair_amount"))
+    if pair_amount <= 0:
+        return 0.0
+    if pair_token == WEGLD or symbol(pair_token).upper() in {"EGLD", "WEGLD"}:
+        return pair_amount * 2
+    egld_usd = get_egld_usd()
+    pool_usd = safe_float(snap.get("pool_value_usd"))
+    return (pool_usd / egld_usd) if egld_usd > 0 and pool_usd > 0 else 0.0
+
+
+def fetch_lp_holders(limit_pages: int = LP_HOLDERS_MAX_PAGES) -> Dict[str, Any]:
+    lp_token_id = discover_xexchange_lp_token_id()
+    if not lp_token_id:
+        return {"ok": False, "reason": "LP token id unavailable. Set XEXCHANGE_LP_TOKEN_ID or check VM query access."}
+
+    total_supply, lp_decimals = get_lp_total_supply_and_decimals(lp_token_id)
+    pool_value_egld = get_xexchange_pool_value_egld()
+    holders: List[Dict[str, Any]] = []
+
+    for page in range(max(1, limit_pages)):
+        params = {"from": page * LP_HOLDERS_PAGE_SIZE, "size": LP_HOLDERS_PAGE_SIZE}
+        data = get_json(f"{MVX_API}/tokens/{lp_token_id}/accounts", params=params)
+        if not isinstance(data, list):
+            if page == 0:
+                return {"ok": False, "reason": "LP holders API unavailable / unexpected response", "lp_token_id": lp_token_id}
+            break
+        if not data:
+            break
+        for item in data:
+            address = str(item.get("address") or item.get("owner") or "")
+            if not address or is_technical_address(address):
+                continue
+            decimals = safe_int(item.get("decimals", lp_decimals), lp_decimals)
+            lp_amount = amount_from_raw(item.get("balance", "0"), decimals)
+            if lp_amount <= 0:
+                continue
+            estimated_egld = (lp_amount / total_supply * pool_value_egld) if total_supply > 0 and pool_value_egld > 0 else 0.0
+            holders.append({
+                "wallet": address,
+                "lp_amount": lp_amount,
+                "estimated_egld": estimated_egld,
+            })
+        if len(data) < LP_HOLDERS_PAGE_SIZE:
+            break
+
+    holders.sort(key=lambda x: safe_float(x.get("lp_amount")), reverse=True)
+    return {
+        "ok": True,
+        "lp_token_id": lp_token_id,
+        "total_supply": total_supply,
+        "pool_value_egld": pool_value_egld,
+        "holders": holders,
+    }
+
+
+def current_month_key(now: Optional[datetime] = None) -> str:
+    dt = now or datetime.now(timezone.utc)
+    return dt.strftime("%Y-%m")
+
+
+def is_lp_snapshot_day(dt: Optional[datetime] = None) -> bool:
+    current = dt or datetime.now(timezone.utc)
+    last_day = calendar.monthrange(current.year, current.month)[1]
+    return current.day in {1, 15, last_day}
+
+
+def load_lp_snapshots() -> Dict[str, Any]:
+    data = read_json_file(LP_SNAPSHOT_FILE, {"snapshots": []})
+    if not isinstance(data, dict):
+        return {"snapshots": []}
+    snapshots = data.get("snapshots")
+    if not isinstance(snapshots, list):
+        data["snapshots"] = []
+    return data
+
+
+def save_lp_snapshot(force: bool = False, snapshot_time: Optional[datetime] = None) -> Dict[str, Any]:
+    dt = snapshot_time or datetime.now(timezone.utc)
+    date_key = dt.strftime("%Y-%m-%d")
+    if not force and not is_lp_snapshot_day(dt):
+        return {"ok": False, "reason": "not a configured LP snapshot day", "date": date_key}
+
+    store = load_lp_snapshots()
+    if any(str(s.get("date")) == date_key for s in store.get("snapshots", [])):
+        return {"ok": True, "skipped": True, "reason": "snapshot already exists", "date": date_key}
+
+    live = fetch_lp_holders()
+    if not live.get("ok"):
+        return live
+
+    entry = {
+        "date": date_key,
+        "created_at": dt.isoformat(),
+        "pool_address": XEXCHANGE_POOL_ADDRESS,
+        "lp_token_id": live.get("lp_token_id"),
+        "pool_value_egld": safe_float(live.get("pool_value_egld")),
+        "total_lp_supply": safe_float(live.get("total_supply")),
+        "holders": [
+            {
+                "wallet": h.get("wallet"),
+                "lp_amount": safe_float(h.get("lp_amount")),
+                "estimated_egld": safe_float(h.get("estimated_egld")),
+            }
+            for h in live.get("holders", [])
+        ],
+    }
+    store["snapshots"].append(entry)
+    store["snapshots"] = sorted(store["snapshots"], key=lambda x: str(x.get("date", "")))[-120:]
+    write_json_file(LP_SNAPSHOT_FILE, store)
+    logger.info("LP SNAPSHOT SAVED | date=%s holders=%s", date_key, len(entry["holders"]))
+    return {"ok": True, "snapshot": entry}
+
+
+def get_month_lp_snapshots(month_key: Optional[str] = None) -> List[Dict[str, Any]]:
+    key = month_key or current_month_key()
+    store = load_lp_snapshots()
+    snapshots = [s for s in store.get("snapshots", []) if str(s.get("date", "")).startswith(key)]
+    return sorted(snapshots, key=lambda x: str(x.get("date", "")))
+
+
+def calculate_monthly_lp_averages(month_key: Optional[str] = None) -> Dict[str, Any]:
+    snapshots = get_month_lp_snapshots(month_key)
+    sums: Dict[str, Dict[str, float]] = {}
+    for snap in snapshots:
+        for holder in snap.get("holders", []):
+            wallet = str(holder.get("wallet") or "")
+            if not wallet:
+                continue
+            bucket = sums.setdefault(wallet, {"lp": 0.0, "egld": 0.0})
+            bucket["lp"] += safe_float(holder.get("lp_amount"))
+            bucket["egld"] += safe_float(holder.get("estimated_egld"))
+
+    sample_count = len(snapshots)
+    rows: List[Dict[str, Any]] = []
+    for wallet, values in sums.items():
+        rows.append({
+            "wallet": wallet,
+            "average_lp": values["lp"] / sample_count if sample_count else 0.0,
+            "average_egld": values["egld"] / sample_count if sample_count else 0.0,
+        })
+    rows.sort(key=lambda x: safe_float(x.get("average_lp")), reverse=True)
+    total_average_lp = sum(safe_float(r.get("average_lp")) for r in rows)
+    for row in rows:
+        row["share_pct"] = (safe_float(row.get("average_lp")) / total_average_lp * 100) if total_average_lp > 0 else 0.0
+    return {"snapshots": snapshots, "rows": rows, "total_average_lp": total_average_lp}
+
+
+def calculate_lp_rewards(reward_pool_egld: float, month_key: Optional[str] = None) -> Dict[str, Any]:
+    averages = calculate_monthly_lp_averages(month_key)
+    total = safe_float(averages.get("total_average_lp"))
+    rows: List[Dict[str, Any]] = []
+    for row in averages.get("rows", []):
+        share = (safe_float(row.get("average_lp")) / total) if total > 0 else 0.0
+        reward = share * max(0.0, reward_pool_egld)
+        rows.append({**row, "reward_egld": reward})
+    return {**averages, "rows": rows, "reward_pool_egld": reward_pool_egld}
+
+
+def save_last_lp_reward_pool(reward_pool_egld: float, month_key: Optional[str] = None) -> None:
+    payload = read_json_file(LP_REWARDS_FILE, {})
+    if not isinstance(payload, dict):
+        payload = {}
+    payload[current_month_key() if month_key is None else month_key] = {"reward_pool_egld": reward_pool_egld, "updated_at": datetime.now(timezone.utc).isoformat()}
+    write_json_file(LP_REWARDS_FILE, payload)
+
+
+def get_last_lp_reward_pool(month_key: Optional[str] = None) -> float:
+    key = month_key or current_month_key()
+    payload = read_json_file(LP_REWARDS_FILE, {})
+    if isinstance(payload, dict) and isinstance(payload.get(key), dict):
+        return safe_float(payload[key].get("reward_pool_egld"))
+    return LP_EXPORT_REWARD_POOL_EGLD
+
+
+def get_lp_holders_text(limit: Optional[int] = None) -> str:
+    live = fetch_lp_holders()
+    if not live.get("ok"):
+        return f"💧 *WOODY/EGLD LP Holders*\n\nCould not load LP holders: {live.get('reason', 'unknown error')}"
+    all_holders = live.get("holders", [])
+    holders = all_holders[:limit] if limit else all_holders
+    lines = [
+        "💧 *WOODY/EGLD LP Holders*",
+        "_xExchange LP token monitor_",
+        "",
+        f"Pool: `{XEXCHANGE_POOL_ADDRESS}`",
+        f"LP token: `{live.get('lp_token_id')}`",
+        f"Estimated pool value: *{safe_float(live.get('pool_value_egld')):,.6f} EGLD*",
+        "",
+    ]
+    if not holders:
+        lines.append("No real-wallet LP holders found.")
+    for idx, holder in enumerate(holders, start=1):
+        lines.append(
+            f"{idx}. `{str(holder.get('wallet'))}`\n"
+            f"   LP: *{safe_float(holder.get('lp_amount')):,.8f}*\n"
+            f"   Est. value: *{safe_float(holder.get('estimated_egld')):,.6f} EGLD*"
+        )
+    return "\n".join(lines)
+
+
+def get_lp_leaderboard_text() -> str:
+    data = calculate_monthly_lp_averages()
+    snapshots = data.get("snapshots", [])
+    if not snapshots:
+        return "🏆 *Monthly LP Leaderboard*\n\nNo LP snapshots for the current month yet. Snapshots are saved on day 1, day 15 and the final day of each month."
+    lines = [
+        "🏆 *Monthly LP Leaderboard*",
+        f"Month: *{current_month_key()}*",
+        f"Snapshots used: *{len(snapshots)}* ({', '.join(str(s.get('date')) for s in snapshots)})",
+        "",
+    ]
+    for idx, row in enumerate(data.get("rows", []), start=1):
+        lines.append(
+            f"{idx}. `{str(row.get('wallet'))}`\n"
+            f"   Avg LP: *{safe_float(row.get('average_lp')):,.8f}*\n"
+            f"   Avg value: *{safe_float(row.get('average_egld')):,.6f} EGLD*\n"
+            f"   Share: *{safe_float(row.get('share_pct')):.4f}%*"
+        )
+    return "\n".join(lines)
+
+
+def get_lp_rewards_text(reward_pool_egld: float) -> str:
+    data = calculate_lp_rewards(reward_pool_egld)
+    if not data.get("snapshots"):
+        return "🎁 *LP Rewards*\n\nNo LP snapshots for the current month yet. I can calculate rewards after at least one monthly LP snapshot exists."
+    save_last_lp_reward_pool(reward_pool_egld)
+    lines = [
+        "🎁 *LP Rewards Calculation*",
+        f"Month: *{current_month_key()}*",
+        f"Reward pool: *{reward_pool_egld:,.6f} EGLD*",
+        f"Snapshots used: *{len(data.get('snapshots', []))}*",
+        "_No EGLD is sent automatically; this is only a manual distribution report._",
+        "",
+    ]
+    for idx, row in enumerate(data.get("rows", []), start=1):
+        lines.append(
+            f"{idx}. `{str(row.get('wallet'))}`\n"
+            f"   Share: *{safe_float(row.get('share_pct')):.4f}%*\n"
+            f"   Reward: *{safe_float(row.get('reward_egld')):,.8f} EGLD*"
+        )
+    return "\n".join(lines)
+
+
+def build_lp_export_csv(reward_pool_egld: Optional[float] = None) -> Tuple[bytes, str]:
+    pool = get_last_lp_reward_pool() if reward_pool_egld is None else safe_float(reward_pool_egld)
+    data = calculate_lp_rewards(pool)
+    output = StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["wallet_address", "average_lp", "percent_of_total", "reward_egld"])
+    for row in data.get("rows", []):
+        writer.writerow([
+            row.get("wallet"),
+            f"{safe_float(row.get('average_lp')):.18f}",
+            f"{safe_float(row.get('share_pct')):.8f}",
+            f"{safe_float(row.get('reward_egld')):.18f}",
+        ])
+    filename = f"woody_lp_rewards_{current_month_key()}.csv"
+    return output.getvalue().encode("utf-8"), filename
 
 
 def get_pools_text(title: str = "📦 *WOODY Pools*") -> str:
@@ -3091,6 +3451,23 @@ async def check_holders(context: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         PENDING_HOLDER_VALUE = None
 
+async def reply_markdown_chunks(update: Update, text: str, max_chars: int = 3800) -> None:
+    if not update.message:
+        return
+    chunk_lines: List[str] = []
+    chunk_len = 0
+    for line in text.splitlines():
+        projected = chunk_len + len(line) + 1
+        if chunk_lines and projected > max_chars:
+            await update.message.reply_text("\n".join(chunk_lines), parse_mode=ParseMode.MARKDOWN)
+            chunk_lines = []
+            chunk_len = 0
+        chunk_lines.append(line)
+        chunk_len += len(line) + 1
+    if chunk_lines:
+        await update.message.reply_text("\n".join(chunk_lines), parse_mode=ParseMode.MARKDOWN)
+
+
 # =========================================================
 # COMMANDS
 # =========================================================
@@ -3131,6 +3508,39 @@ async def holders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"👥 *WOODY Holders*\n\nCurrent holders: *{holders or 'N/A'}*",
             parse_mode=ParseMode.MARKDOWN,
         )
+
+
+async def lp_holders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await reply_markdown_chunks(update, await asyncio.to_thread(get_lp_holders_text))
+
+
+async def lp_leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await reply_markdown_chunks(update, await asyncio.to_thread(get_lp_leaderboard_text))
+
+
+async def lp_rewards_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /lp_rewards 5")
+        return
+    reward_pool = safe_float(str(context.args[0]).replace(",", "."))
+    if reward_pool <= 0:
+        await update.message.reply_text("Please provide a positive EGLD amount, for example: /lp_rewards 5")
+        return
+    await reply_markdown_chunks(update, await asyncio.to_thread(get_lp_rewards_text, reward_pool))
+
+
+async def lp_export_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    content, filename = await asyncio.to_thread(build_lp_export_csv)
+    bio = BytesIO(content)
+    bio.name = filename
+    await update.message.reply_document(
+        document=InputFile(bio, filename=filename),
+        caption="WOODY/EGLD LP monthly reward CSV. No EGLD was sent automatically.",
+    )
 
 
 async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3307,6 +3717,16 @@ async def dashboard_status_job(_: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as e:
         logger.warning("Failed to update dashboard JSON: %s", e)
 
+
+async def lp_snapshot_job(_: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        result = await asyncio.to_thread(save_lp_snapshot)
+        if result.get("ok") and not result.get("skipped"):
+            snapshot = result.get("snapshot", {})
+            logger.info("LP snapshot job saved %s holders=%s", snapshot.get("date"), len(snapshot.get("holders", [])))
+    except Exception as e:
+        logger.warning("Failed to save LP snapshot: %s", e)
+
 # =========================================================
 # MAIN
 # =========================================================
@@ -3345,6 +3765,10 @@ def main() -> None:
     app.add_handler(CommandHandler("pret", price_command))
     app.add_handler(CommandHandler("liquidity", liquidity_command))
     app.add_handler(CommandHandler("holders", holders_command))
+    app.add_handler(CommandHandler("lp_holders", lp_holders_command))
+    app.add_handler(CommandHandler("lp_leaderboard", lp_leaderboard_command))
+    app.add_handler(CommandHandler("lp_rewards", lp_rewards_command))
+    app.add_handler(CommandHandler("lp_export", lp_export_command))
     app.add_handler(CommandHandler("chart", chart_command))
     app.add_handler(CommandHandler("buy", buy_command))
     app.add_handler(CommandHandler("summary", summary_command))
@@ -3366,6 +3790,7 @@ def main() -> None:
     app.job_queue.run_repeating(check_holders, interval=CHECK_HOLDERS_INTERVAL, first=20)
     app.job_queue.run_repeating(process_pending_roots, interval=3, first=5)
     app.job_queue.run_repeating(dashboard_status_job, interval=PUBLIC_STATUS_INTERVAL, first=10)
+    app.job_queue.run_repeating(lp_snapshot_job, interval=LP_SNAPSHOT_CHECK_INTERVAL, first=30)
 
     logger.info("WOODY Monitor V2 started...")
     app.run_polling(drop_pending_updates=True)
