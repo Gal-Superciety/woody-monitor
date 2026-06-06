@@ -398,3 +398,82 @@ def test_lp_rewards_are_proportional_to_monthly_average(monkeypatch) -> None:
 
     assert rewards["erd1alice"] == 2.0
     assert rewards["erd1bob"] == 3.0
+
+
+def _keyboard_labels(markup):
+    return [button.text for row in markup.inline_keyboard for button in row]
+
+
+def test_main_menu_contains_lp_rewards_section_buttons() -> None:
+    labels = _keyboard_labels(main.main_menu_keyboard())
+
+    assert "🪙 LP Holders" in labels
+    assert "🏆 LP Leaderboard" in labels
+    assert "📸 LP Snapshots" in labels
+    assert "🎁 LP Rewards" in labels
+    assert "📄 LP Export" in labels
+
+
+def test_public_menu_contains_lp_rewards_section_buttons() -> None:
+    labels = _keyboard_labels(main.public_menu_keyboard())
+
+    assert "🪙 LP Holders" in labels
+    assert "🏆 LP Leaderboard" in labels
+    assert "📸 LP Snapshots" in labels
+    assert "🎁 LP Rewards" in labels
+    assert "📄 LP Export" in labels
+
+
+def test_lp_snapshots_text_lists_current_month_snapshots(monkeypatch) -> None:
+    monkeypatch.setattr(main, "current_month_key", lambda now=None: "2026-06")
+    monkeypatch.setattr(
+        main,
+        "get_month_lp_snapshots",
+        lambda month_key=None: [
+            {
+                "date": "2026-06-01",
+                "lp_token_id": "LP-WOODYEGLD",
+                "pool_value_egld": 42,
+                "holders": [{"wallet": "erd1alice", "lp_amount": 10}],
+            }
+        ],
+    )
+
+    text = main.get_lp_snapshots_text()
+
+    assert "📸 *LP Snapshots*" in text
+    assert "day 1, day 15 and the final day" in text
+    assert "2026-06-01" in text
+    assert "LP-WOODYEGLD" in text
+
+
+def test_lp_export_csv_contains_manual_reward_distribution(monkeypatch) -> None:
+    monkeypatch.setattr(main, "current_month_key", lambda now=None: "2026-06")
+    monkeypatch.setattr(
+        main,
+        "calculate_lp_rewards",
+        lambda reward_pool_egld: {
+            "rows": [
+                {
+                    "wallet": "erd1alice",
+                    "average_lp": 20,
+                    "share_pct": 40,
+                    "reward_egld": 2,
+                },
+                {
+                    "wallet": "erd1bob",
+                    "average_lp": 30,
+                    "share_pct": 60,
+                    "reward_egld": 3,
+                },
+            ]
+        },
+    )
+
+    content, filename = main.build_lp_export_csv(5)
+    csv_text = content.decode("utf-8")
+
+    assert filename == "woody_lp_rewards_2026-06.csv"
+    assert "wallet_address,average_lp,percent_of_total,reward_egld" in csv_text
+    assert "erd1alice,20.000000000000000000,40.00000000,2.000000000000000000" in csv_text
+    assert "erd1bob,30.000000000000000000,60.00000000,3.000000000000000000" in csv_text

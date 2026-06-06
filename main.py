@@ -2045,6 +2045,53 @@ def get_lp_leaderboard_text() -> str:
     return "\n".join(lines)
 
 
+def get_lp_snapshots_text() -> str:
+    snapshots = get_month_lp_snapshots()
+    schedule_line = "Automatic snapshots: day 1, day 15 and the final day of each month."
+    lines = [
+        "📸 *LP Snapshots*",
+        f"Month: *{current_month_key()}*",
+        f"Pool: `{XEXCHANGE_POOL_ADDRESS}`",
+        schedule_line,
+        "",
+    ]
+    if not snapshots:
+        lines.append("No LP snapshots saved for the current month yet.")
+        return "\n".join(lines)
+
+    for idx, snapshot in enumerate(snapshots, start=1):
+        holders = snapshot.get("holders", []) if isinstance(snapshot.get("holders"), list) else []
+        lines.append(
+            f"{idx}. *{snapshot.get('date')}*\n"
+            f"   Holders: *{len(holders)}*\n"
+            f"   LP token: `{snapshot.get('lp_token_id', 'N/A')}`\n"
+            f"   Pool value: *{safe_float(snapshot.get('pool_value_egld')):,.6f} EGLD*"
+        )
+    return "\n".join(lines)
+
+
+def get_lp_rewards_help_text() -> str:
+    saved_pool = get_last_lp_reward_pool()
+    lines = [
+        "🎁 *LP Rewards*",
+        "Monthly EGLD rewards are calculated proportionally by average LP held.",
+        "",
+        "Formula:",
+        "`Reward = User average LP / Total average LP * Monthly EGLD reward pool`",
+        "",
+        "Use command:",
+        "`/lp_rewards X`",
+        "",
+        "Example:",
+        "`/lp_rewards 5`",
+        "",
+        "_The bot never sends EGLD automatically; it only prepares the manual distribution report._",
+    ]
+    if saved_pool > 0:
+        lines.extend(["", f"Last saved reward pool for export: *{saved_pool:,.6f} EGLD*"])
+    return "\n".join(lines)
+
+
 def get_lp_rewards_text(reward_pool_egld: float) -> str:
     data = calculate_lp_rewards(reward_pool_egld)
     if not data.get("snapshots"):
@@ -2247,6 +2294,15 @@ def public_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("💧 Liquidity", callback_data="liquidity"),
         ],
         [
+            InlineKeyboardButton("🪙 LP Holders", callback_data="lp_holders"),
+            InlineKeyboardButton("🏆 LP Leaderboard", callback_data="lp_leaderboard"),
+        ],
+        [
+            InlineKeyboardButton("📸 LP Snapshots", callback_data="lp_snapshots"),
+            InlineKeyboardButton("🎁 LP Rewards", callback_data="lp_rewards"),
+            InlineKeyboardButton("📄 LP Export", callback_data="lp_export"),
+        ],
+        [
             InlineKeyboardButton("👥 Holders", callback_data="holders"),
             InlineKeyboardButton("📊 Chart", url=CHART_URL),
         ],
@@ -2296,6 +2352,15 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("📦 Pools", callback_data="pools"),
         ],
         [
+            InlineKeyboardButton("🪙 LP Holders", callback_data="lp_holders"),
+            InlineKeyboardButton("🏆 LP Leaderboard", callback_data="lp_leaderboard"),
+        ],
+        [
+            InlineKeyboardButton("📸 LP Snapshots", callback_data="lp_snapshots"),
+            InlineKeyboardButton("🎁 LP Rewards", callback_data="lp_rewards"),
+            InlineKeyboardButton("📄 LP Export", callback_data="lp_export"),
+        ],
+        [
             InlineKeyboardButton("🟢 Buy xExchange", url=BUY_XEXCHANGE_URL),
             InlineKeyboardButton("🟢 Buy XOXNO", url=BUY_XOXNO_URL),
         ],
@@ -2333,6 +2398,7 @@ def start_caption(is_public: bool) -> str:
             "Live monitoring for WOODY:\n"
             "• Price\n"
             "• Liquidity\n"
+            "• LP Rewards reports\n"
             "• Holders\n"
             "• Chart & Buy\n\n"
             "Choose an option 👇"
@@ -2343,7 +2409,8 @@ def start_caption(is_public: bool) -> str:
         "• BUY/SELL alerts\n"
         "• Price & Liquidity\n"
         "• Holders & Volume analytics\n"
-        "• Pool insights & bot health\n\n"
+        "• Pool insights & LP Rewards\n"
+        "• Bot health\n\n"
         "Choose an option 👇"
     )
 
@@ -3451,21 +3518,25 @@ async def check_holders(context: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         PENDING_HOLDER_VALUE = None
 
-async def reply_markdown_chunks(update: Update, text: str, max_chars: int = 3800) -> None:
-    if not update.message:
+async def reply_markdown_chunks_to_message(message: Any, text: str, max_chars: int = 3800) -> None:
+    if not message:
         return
     chunk_lines: List[str] = []
     chunk_len = 0
     for line in text.splitlines():
         projected = chunk_len + len(line) + 1
         if chunk_lines and projected > max_chars:
-            await update.message.reply_text("\n".join(chunk_lines), parse_mode=ParseMode.MARKDOWN)
+            await message.reply_text("\n".join(chunk_lines), parse_mode=ParseMode.MARKDOWN)
             chunk_lines = []
             chunk_len = 0
         chunk_lines.append(line)
         chunk_len += len(line) + 1
     if chunk_lines:
-        await update.message.reply_text("\n".join(chunk_lines), parse_mode=ParseMode.MARKDOWN)
+        await message.reply_text("\n".join(chunk_lines), parse_mode=ParseMode.MARKDOWN)
+
+
+async def reply_markdown_chunks(update: Update, text: str, max_chars: int = 3800) -> None:
+    await reply_markdown_chunks_to_message(update.message, text, max_chars)
 
 
 # =========================================================
@@ -3516,6 +3587,10 @@ async def lp_holders_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def lp_leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await reply_markdown_chunks(update, await asyncio.to_thread(get_lp_leaderboard_text))
+
+
+async def lp_snapshots_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await reply_markdown_chunks(update, await asyncio.to_thread(get_lp_snapshots_text))
 
 
 async def lp_rewards_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3657,6 +3732,22 @@ async def menu_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if is_public_menu_context(query.message.chat.type if query.message and query.message.chat else None, query.from_user.id if query.from_user else None):
             return
         await query.message.reply_text(await asyncio.to_thread(get_pools_text), parse_mode=ParseMode.MARKDOWN)
+    elif query.data == "lp_holders":
+        await reply_markdown_chunks_to_message(query.message, await asyncio.to_thread(get_lp_holders_text))
+    elif query.data == "lp_leaderboard":
+        await reply_markdown_chunks_to_message(query.message, await asyncio.to_thread(get_lp_leaderboard_text))
+    elif query.data == "lp_snapshots":
+        await reply_markdown_chunks_to_message(query.message, await asyncio.to_thread(get_lp_snapshots_text))
+    elif query.data == "lp_rewards":
+        await query.message.reply_text(await asyncio.to_thread(get_lp_rewards_help_text), parse_mode=ParseMode.MARKDOWN)
+    elif query.data == "lp_export":
+        content, filename = await asyncio.to_thread(build_lp_export_csv)
+        bio = BytesIO(content)
+        bio.name = filename
+        await query.message.reply_document(
+            document=InputFile(bio, filename=filename),
+            caption="WOODY/EGLD LP monthly reward CSV. No EGLD was sent automatically.",
+        )
     elif query.data in {"bot_status", "ai_status"}:
         is_public = is_public_menu_context(query.message.chat.type if query.message and query.message.chat else None, query.from_user.id if query.from_user else None)
         logger.info("AI_STATUS_BUTTON_USED | user=%s chat=%s public=%s", query.from_user.id if query.from_user else "?", query.message.chat_id if query.message else "?", is_public)
@@ -3767,6 +3858,7 @@ def main() -> None:
     app.add_handler(CommandHandler("holders", holders_command))
     app.add_handler(CommandHandler("lp_holders", lp_holders_command))
     app.add_handler(CommandHandler("lp_leaderboard", lp_leaderboard_command))
+    app.add_handler(CommandHandler("lp_snapshots", lp_snapshots_command))
     app.add_handler(CommandHandler("lp_rewards", lp_rewards_command))
     app.add_handler(CommandHandler("lp_export", lp_export_command))
     app.add_handler(CommandHandler("chart", chart_command))
