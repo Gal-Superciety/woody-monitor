@@ -44,6 +44,11 @@ Dacă `Group alerts` e `OFF`, verifică:
 Meniul afișează doar:
 - 💰 Price
 - 💧 Liquidity
+- 🪙 LP Holders
+- 🏆 LP Leaderboard
+- 📸 LP Snapshots
+- 🎁 LP Rewards
+- 📄 LP Export
 - 👥 Holders
 - 📊 Chart
 - 🛒 Buy
@@ -68,7 +73,8 @@ erd1qqqqqqqqqqqqqpgqvmgnk26tfvz6sj5yasw7p6yfvqpv628d2jpsnvmeaz
 ### Comenzi Telegram
 - `/lp_holders` — afișează holderii LP, cantitatea de LP deținută și valoarea estimată în EGLD.
 - `/lp_leaderboard` — afișează clasamentul lunar după media LP din snapshot-urile lunii curente.
-- `/lp_rewards X` — calculează distribuția proporțională pentru un fond lunar de `X` EGLD, fără să trimită EGLD automat.
+- `/lp_snapshots` — listează snapshot-urile salvate pentru luna curentă și programul automat de snapshot.
+- `/lp_rewards X` — calculează distribuția proporțională pentru un fond lunar de `X` EGLD, fără să trimită EGLD automat. Exemplu: `/lp_rewards 5`.
 - `/lp_export` — generează CSV cu wallet address, LP mediu lunar, procent din total și recompensa calculată în EGLD.
 
 ### Snapshot-uri automate
