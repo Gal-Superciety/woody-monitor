@@ -400,6 +400,64 @@ def test_lp_rewards_are_proportional_to_monthly_average(monkeypatch) -> None:
     assert rewards["erd1bob"] == 3.0
 
 
+def test_lp_holder_values_use_lp_token_decimals_and_raw_share(monkeypatch) -> None:
+    monkeypatch.setattr(main, "discover_xexchange_lp_token_id", lambda: "LP-WOODYEGLD")
+    monkeypatch.setattr(main, "get_lp_total_supply_raw_and_decimals", lambda token: (10_000 * (10 ** 18), 18))
+    monkeypatch.setattr(main, "get_xexchange_pool_value_egld", lambda: 21.64)
+
+    def fake_get_json(url, params=None):
+        if url.endswith("/tokens/LP-WOODYEGLD/accounts"):
+            return [
+                {
+                    "address": "erd1alice",
+                    "balance": str(250 * (10 ** 18)),
+                    "decimals": 0,  # account-level value must not override LP token decimals
+                }
+            ]
+        return {}
+
+    monkeypatch.setattr(main, "get_json", fake_get_json)
+
+    result = main.fetch_lp_holders()
+
+    assert result["ok"] is True
+    holder = result["holders"][0]
+    assert holder["lp_amount"] == 250.0
+    assert abs(holder["estimated_egld"] - 0.541) < 1e-12
+
+
+def test_monthly_average_uses_all_available_snapshots(monkeypatch) -> None:
+    snapshots = [
+        {"date": "2026-06-01", "holders": [{"wallet": "erd1alice", "lp_amount": 10}, {"wallet": "erd1bob", "lp_amount": 30}]},
+        {"date": "2026-06-15", "holders": [{"wallet": "erd1alice", "lp_amount": 20}, {"wallet": "erd1bob", "lp_amount": 20}]},
+        {"date": "2026-06-30", "holders": [{"wallet": "erd1alice", "lp_amount": 30}, {"wallet": "erd1bob", "lp_amount": 10}]},
+    ]
+    monkeypatch.setattr(main, "get_month_lp_snapshots", lambda month_key=None: snapshots)
+
+    result = main.calculate_lp_rewards(8, "2026-06")
+    rewards = {row["wallet"]: row["reward_egld"] for row in result["rows"]}
+
+    assert len(result["snapshots"]) == 3
+    assert result["total_average_lp"] == 40.0
+    assert rewards["erd1alice"] == 4.0
+    assert rewards["erd1bob"] == 4.0
+
+
+def test_snapshot_average_egld_is_recomputed_from_pool_value(monkeypatch) -> None:
+    snapshots = [
+        {
+            "date": "2026-06-01",
+            "pool_value_egld": 21.64,
+            "total_lp_supply": 10_000,
+            "holders": [{"wallet": "erd1alice", "lp_amount": 250, "estimated_egld": 999_999_999}],
+        }
+    ]
+    monkeypatch.setattr(main, "get_month_lp_snapshots", lambda month_key=None: snapshots)
+
+    result = main.calculate_monthly_lp_averages("2026-06")
+
+    assert abs(result["rows"][0]["average_egld"] - 0.541) < 1e-12
+
 def _keyboard_labels(markup):
     return [button.text for row in markup.inline_keyboard for button in row]
 

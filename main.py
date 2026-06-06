@@ -1812,10 +1812,43 @@ def get_token_metadata(token_id: str) -> Dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def get_lp_total_supply_and_decimals(lp_token_id: str) -> Tuple[float, int]:
+def _raw_int_from_token_amount(value: Any) -> int:
+    """Return an integer raw token amount from MultiversX API values.
+
+    LP endpoints are expected to return raw integer balances.  Some API
+    variants can expose numeric/decimal-looking values, so this helper keeps
+    integer strings exact while still handling floats defensively.
+    """
+    raw = str(value or "0").strip()
+    if not raw:
+        return 0
+    try:
+        return int(raw)
+    except Exception:
+        try:
+            return int(float(raw))
+        except Exception:
+            return 0
+
+
+def _lp_account_balance_raw(account: Dict[str, Any]) -> int:
+    for key in ("rawBalance", "balance", "value"):
+        if key in account:
+            amount = _raw_int_from_token_amount(account.get(key))
+            if amount > 0:
+                return amount
+    return 0
+
+
+def get_lp_total_supply_raw_and_decimals(lp_token_id: str) -> Tuple[int, int]:
     data = get_token_metadata(lp_token_id)
     decimals = safe_int(data.get("decimals", 18), 18)
     supply_raw = data.get("supply") or data.get("totalSupply") or data.get("circulatingSupply") or "0"
+    return _raw_int_from_token_amount(supply_raw), decimals
+
+
+def get_lp_total_supply_and_decimals(lp_token_id: str) -> Tuple[float, int]:
+    supply_raw, decimals = get_lp_total_supply_raw_and_decimals(lp_token_id)
     return amount_from_raw(supply_raw, decimals), decimals
 
 
@@ -1839,7 +1872,8 @@ def fetch_lp_holders(limit_pages: int = LP_HOLDERS_MAX_PAGES) -> Dict[str, Any]:
     if not lp_token_id:
         return {"ok": False, "reason": "LP token id unavailable. Set XEXCHANGE_LP_TOKEN_ID or check VM query access."}
 
-    total_supply, lp_decimals = get_lp_total_supply_and_decimals(lp_token_id)
+    total_supply_raw, lp_decimals = get_lp_total_supply_raw_and_decimals(lp_token_id)
+    total_supply = amount_from_raw(total_supply_raw, lp_decimals)
     pool_value_egld = get_xexchange_pool_value_egld()
     holders: List[Dict[str, Any]] = []
 
@@ -1856,11 +1890,11 @@ def fetch_lp_holders(limit_pages: int = LP_HOLDERS_MAX_PAGES) -> Dict[str, Any]:
             address = str(item.get("address") or item.get("owner") or "")
             if not address or is_technical_address(address):
                 continue
-            decimals = safe_int(item.get("decimals", lp_decimals), lp_decimals)
-            lp_amount = amount_from_raw(item.get("balance", "0"), decimals)
+            balance_raw = _lp_account_balance_raw(item)
+            lp_amount = amount_from_raw(balance_raw, lp_decimals)
             if lp_amount <= 0:
                 continue
-            estimated_egld = (lp_amount / total_supply * pool_value_egld) if total_supply > 0 and pool_value_egld > 0 else 0.0
+            estimated_egld = (balance_raw / total_supply_raw * pool_value_egld) if total_supply_raw > 0 and pool_value_egld > 0 else 0.0
             holders.append({
                 "wallet": address,
                 "lp_amount": lp_amount,
@@ -1874,6 +1908,8 @@ def fetch_lp_holders(limit_pages: int = LP_HOLDERS_MAX_PAGES) -> Dict[str, Any]:
         "ok": True,
         "lp_token_id": lp_token_id,
         "total_supply": total_supply,
+        "total_supply_raw": str(total_supply_raw),
+        "lp_decimals": lp_decimals,
         "pool_value_egld": pool_value_egld,
         "holders": holders,
     }
@@ -1922,6 +1958,8 @@ def save_lp_snapshot(force: bool = False, snapshot_time: Optional[datetime] = No
         "lp_token_id": live.get("lp_token_id"),
         "pool_value_egld": safe_float(live.get("pool_value_egld")),
         "total_lp_supply": total_lp_supply,
+        "total_lp_supply_raw": str(live.get("total_supply_raw") or "0"),
+        "lp_decimals": safe_int(live.get("lp_decimals", 18), 18),
         "holders": [
             {
                 "wallet": h.get("wallet"),
@@ -1946,17 +1984,37 @@ def get_month_lp_snapshots(month_key: Optional[str] = None) -> List[Dict[str, An
     return sorted(snapshots, key=lambda x: str(x.get("date", "")))
 
 
+def _snapshot_total_lp(snap: Dict[str, Any]) -> float:
+    holders = snap.get("holders", []) if isinstance(snap.get("holders"), list) else []
+    holder_total = sum(safe_float(h.get("lp_amount")) for h in holders)
+    # Rewards are distributed only to real-wallet LP holders present in the
+    # snapshots.  If an older snapshot does not have a holder list, fall back to
+    # the stored total supply so the denominator remains available.
+    return holder_total if holder_total > 0 else safe_float(snap.get("total_lp_supply"))
+
+
+def _snapshot_holder_estimated_egld(holder: Dict[str, Any], snap: Dict[str, Any]) -> float:
+    lp_amount = safe_float(holder.get("lp_amount"))
+    pool_value_egld = safe_float(snap.get("pool_value_egld"))
+    total_lp = safe_float(snap.get("total_lp_supply")) or _snapshot_total_lp(snap)
+    if lp_amount > 0 and pool_value_egld > 0 and total_lp > 0:
+        return lp_amount / total_lp * pool_value_egld
+    return safe_float(holder.get("estimated_egld"))
+
+
 def calculate_monthly_lp_averages(month_key: Optional[str] = None) -> Dict[str, Any]:
     snapshots = get_month_lp_snapshots(month_key)
     sums: Dict[str, Dict[str, float]] = {}
+    snapshot_total_lp_sum = 0.0
     for snap in snapshots:
+        snapshot_total_lp_sum += _snapshot_total_lp(snap)
         for holder in snap.get("holders", []):
             wallet = str(holder.get("wallet") or "")
             if not wallet:
                 continue
             bucket = sums.setdefault(wallet, {"lp": 0.0, "egld": 0.0})
             bucket["lp"] += safe_float(holder.get("lp_amount"))
-            bucket["egld"] += safe_float(holder.get("estimated_egld"))
+            bucket["egld"] += _snapshot_holder_estimated_egld(holder, snap)
 
     sample_count = len(snapshots)
     rows: List[Dict[str, Any]] = []
@@ -1967,7 +2025,9 @@ def calculate_monthly_lp_averages(month_key: Optional[str] = None) -> Dict[str, 
             "average_egld": values["egld"] / sample_count if sample_count else 0.0,
         })
     rows.sort(key=lambda x: safe_float(x.get("average_lp")), reverse=True)
-    total_average_lp = sum(safe_float(r.get("average_lp")) for r in rows)
+    total_average_lp = snapshot_total_lp_sum / sample_count if sample_count else 0.0
+    if total_average_lp <= 0:
+        total_average_lp = sum(safe_float(r.get("average_lp")) for r in rows)
     for row in rows:
         row["share_pct"] = (safe_float(row.get("average_lp")) / total_average_lp * 100) if total_average_lp > 0 else 0.0
     return {"snapshots": snapshots, "rows": rows, "total_average_lp": total_average_lp}
@@ -2122,7 +2182,8 @@ def get_lp_rewards_text(reward_pool_egld: float) -> str:
         "🎁 *LP Rewards Calculation*",
         f"Month: *{current_month_key()}*",
         f"Reward pool: *{reward_pool_egld:,.6f} EGLD*",
-        f"Snapshots used: *{len(data.get('snapshots', []))}*",
+        f"Snapshots used: *{len(data.get('snapshots', []))}* ({', '.join(str(s.get('date')) for s in data.get('snapshots', []))})",
+        f"Average LP total: *{safe_float(data.get('total_average_lp')):,.8f}*",
         "_No EGLD is sent automatically; this is only a manual distribution report._",
         "",
     ]
