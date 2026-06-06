@@ -1907,31 +1907,33 @@ def save_lp_snapshot(force: bool = False, snapshot_time: Optional[datetime] = No
         return {"ok": False, "reason": "not a configured LP snapshot day", "date": date_key}
 
     store = load_lp_snapshots()
-    if any(str(s.get("date")) == date_key for s in store.get("snapshots", [])):
+    if not force and any(str(s.get("date")) == date_key for s in store.get("snapshots", [])):
         return {"ok": True, "skipped": True, "reason": "snapshot already exists", "date": date_key}
 
     live = fetch_lp_holders()
     if not live.get("ok"):
         return live
 
+    total_lp_supply = safe_float(live.get("total_supply"))
     entry = {
         "date": date_key,
         "created_at": dt.isoformat(),
         "pool_address": XEXCHANGE_POOL_ADDRESS,
         "lp_token_id": live.get("lp_token_id"),
         "pool_value_egld": safe_float(live.get("pool_value_egld")),
-        "total_lp_supply": safe_float(live.get("total_supply")),
+        "total_lp_supply": total_lp_supply,
         "holders": [
             {
                 "wallet": h.get("wallet"),
                 "lp_amount": safe_float(h.get("lp_amount")),
                 "estimated_egld": safe_float(h.get("estimated_egld")),
+                "percent_of_total_lp": (safe_float(h.get("lp_amount")) / total_lp_supply * 100) if total_lp_supply > 0 else 0.0,
             }
             for h in live.get("holders", [])
         ],
     }
     store["snapshots"].append(entry)
-    store["snapshots"] = sorted(store["snapshots"], key=lambda x: str(x.get("date", "")))[-120:]
+    store["snapshots"] = sorted(store["snapshots"], key=lambda x: str(x.get("created_at") or x.get("date", "")))[-120:]
     write_json_file(LP_SNAPSHOT_FILE, store)
     logger.info("LP SNAPSHOT SAVED | date=%s holders=%s", date_key, len(entry["holders"]))
     return {"ok": True, "snapshot": entry}
@@ -2043,6 +2045,25 @@ def get_lp_leaderboard_text() -> str:
             f"   Share: *{safe_float(row.get('share_pct')):.4f}%*"
         )
     return "\n".join(lines)
+
+
+def format_lp_snapshot_confirmation(snapshot: Dict[str, Any]) -> str:
+    created_at = str(snapshot.get("created_at") or "")
+    try:
+        dt = datetime.fromisoformat(created_at.replace("Z", "+00:00")) if created_at else datetime.now(timezone.utc)
+    except ValueError:
+        dt = datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    dt = dt.astimezone(timezone.utc)
+    holders = snapshot.get("holders", []) if isinstance(snapshot.get("holders"), list) else []
+    return (
+        "📸 LP Snapshot saved successfully\n\n"
+        "Pool: WOODY/EGLD xExchange\n"
+        f"LP holders: {len(holders)}\n"
+        f"Total LP value: {safe_float(snapshot.get('pool_value_egld')):,.6f} EGLD\n"
+        f"Date: {dt.strftime('%d.%m.%Y %H:%M')}"
+    )
 
 
 def get_lp_snapshots_text() -> str:
@@ -3593,6 +3614,23 @@ async def lp_snapshots_command(update: Update, context: ContextTypes.DEFAULT_TYP
     await reply_markdown_chunks(update, await asyncio.to_thread(get_lp_snapshots_text))
 
 
+async def lp_snapshot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    user_id = update.effective_user.id if update.effective_user else None
+    if not is_admin_user(user_id):
+        await update.message.reply_text("🔒 This command is available only for admin.")
+        logger.info("LP_SNAPSHOT_DENIED | user=%s chat=%s", user_id or "?", update.effective_chat.id if update.effective_chat else "?")
+        return
+
+    result = await asyncio.to_thread(save_lp_snapshot, True)
+    if not result.get("ok"):
+        await update.message.reply_text(f"⚠️ LP snapshot could not be saved: {result.get('reason', 'unknown error')}")
+        return
+
+    await update.message.reply_text(format_lp_snapshot_confirmation(result.get("snapshot", {})))
+
+
 async def lp_rewards_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
@@ -3859,6 +3897,7 @@ def main() -> None:
     app.add_handler(CommandHandler("lp_holders", lp_holders_command))
     app.add_handler(CommandHandler("lp_leaderboard", lp_leaderboard_command))
     app.add_handler(CommandHandler("lp_snapshots", lp_snapshots_command))
+    app.add_handler(CommandHandler("lp_snapshot", lp_snapshot_command))
     app.add_handler(CommandHandler("lp_rewards", lp_rewards_command))
     app.add_handler(CommandHandler("lp_export", lp_export_command))
     app.add_handler(CommandHandler("chart", chart_command))

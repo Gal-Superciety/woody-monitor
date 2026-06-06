@@ -477,3 +477,49 @@ def test_lp_export_csv_contains_manual_reward_distribution(monkeypatch) -> None:
     assert "wallet_address,average_lp,percent_of_total,reward_egld" in csv_text
     assert "erd1alice,20.000000000000000000,40.00000000,2.000000000000000000" in csv_text
     assert "erd1bob,30.000000000000000000,60.00000000,3.000000000000000000" in csv_text
+
+
+def test_manual_lp_snapshot_can_save_same_day_and_includes_holder_percent(monkeypatch, tmp_path) -> None:
+    snapshot_file = tmp_path / "lp_snapshots.json"
+    monkeypatch.setattr(main, "LP_SNAPSHOT_FILE", str(snapshot_file))
+    monkeypatch.setattr(
+        main,
+        "fetch_lp_holders",
+        lambda: {
+            "ok": True,
+            "lp_token_id": "LP-WOODYEGLD",
+            "total_supply": 100,
+            "pool_value_egld": 50,
+            "holders": [
+                {"wallet": "erd1alice", "lp_amount": 25, "estimated_egld": 12.5},
+                {"wallet": "erd1bob", "lp_amount": 75, "estimated_egld": 37.5},
+            ],
+        },
+    )
+    dt = datetime(2026, 6, 6, 12, 34, tzinfo=timezone.utc)
+
+    first = main.save_lp_snapshot(force=True, snapshot_time=dt)
+    second = main.save_lp_snapshot(force=True, snapshot_time=dt)
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert first["snapshot"]["created_at"] == "2026-06-06T12:34:00+00:00"
+    assert first["snapshot"]["holders"][0]["percent_of_total_lp"] == 25.0
+    assert first["snapshot"]["holders"][1]["percent_of_total_lp"] == 75.0
+    assert len(main.load_lp_snapshots()["snapshots"]) == 2
+
+
+def test_lp_snapshot_confirmation_uses_requested_summary_format() -> None:
+    text = main.format_lp_snapshot_confirmation(
+        {
+            "created_at": "2026-06-06T12:34:00+00:00",
+            "pool_value_egld": 42,
+            "holders": [{"wallet": "erd1alice"}, {"wallet": "erd1bob"}],
+        }
+    )
+
+    assert "📸 LP Snapshot saved successfully" in text
+    assert "Pool: WOODY/EGLD xExchange" in text
+    assert "LP holders: 2" in text
+    assert "Total LP value: 42.000000 EGLD" in text
+    assert "Date: 06.06.2026 12:34" in text
