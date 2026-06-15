@@ -140,6 +140,28 @@ EXTRA_TECHNICAL_ADDRESSES = {
     if x.strip()
 }
 
+
+# =========================================================
+# WOODY GLOBAL LP SNAPSHOT CONFIG
+# =========================================================
+WOODY_OLV_POOL_ADDRESS = os.getenv(
+    "WOODY_OLV_POOL_ADDRESS",
+    "erd1qqqqqqqqqqqqqpgqysf23hg6d5sazz46alfhtveate5na4fz6avs650hc9",
+).strip()
+GLOBAL_LP_DUST_EGLD = float(os.getenv("GLOBAL_LP_DUST_EGLD", "0.000001"))
+
+LP_POOLS: List[Dict[str, Any]] = [
+    {"dex": "xExchange", "name": "WOODY/EGLD", "pair_address": XEXCHANGE_POOL_ADDRESS, "lp_token": "WOODYWEGLD-5c3558", "status": "active"},
+    {"dex": "xExchange", "name": "WOODY/MEX", "pair_address": WOODY_MEX_POOL_ADDRESS, "lp_token": "WOODYMEX-12e1aa", "status": "active"},
+    {"dex": "xExchange", "name": "WOODY/USDC", "pair_address": WOODY_USDC_POOL_ADDRESS, "lp_token": "", "status": "active"},
+    {"dex": "OneDex", "name": "WOODY/EGLD", "pair_address": ONEDEX_POOL_ADDRESS, "lp_token": "WOODYWEGLD-9832b2", "status": "active"},
+    {"dex": "OneDex", "name": "WOODY/ONE", "pair_address": "", "lp_token": "WOODYONE-826f23", "status": "active"},
+    {"dex": "JEX", "name": "WOODY/BOBER", "pair_address": WOODY_BOBER_POOL_ADDRESS, "lp_token": "", "status": "active"},
+    {"dex": "JEX", "name": "WOODY/JEX", "pair_address": WOODY_JEX_POOL_ADDRESS, "lp_token": "", "status": "active"},
+    {"dex": "JEX", "name": "WOODY/OLV", "pair_address": WOODY_OLV_POOL_ADDRESS, "lp_token": "", "status": "active"},
+    {"dex": "OneDex", "name": "WOODY/BOBER", "pair_address": "", "lp_token": "WOODYBOBER-1a1703", "status": "excluded", "reason": "broken pool"},
+]
+
 # =========================================================
 # LOGGING
 # =========================================================
@@ -235,6 +257,7 @@ DEFAULT_TECH_ADDRESSES = {
     WOODY_BOBER_POOL_ADDRESS,
     WOODY_JEX_POOL_ADDRESS,
     WOODY_MEX_POOL_ADDRESS,
+    WOODY_OLV_POOL_ADDRESS,
     ONEDEX_BURN_ADDRESS,
     ROUTER_ADDRESS,
     "erd1qqqqqqqqqqqqqpgq5rf2sppxk2xu4m0pkmugw2es4gak3rgjah0sxvajva",
@@ -244,6 +267,7 @@ DEFAULT_TECH_ADDRESSES = {
     "erd1qqqqqqqqqqqqqpgqjsnxqprks7qxfwkcg2m2v9hxkrchgm9akp2segrswt",
 }
 KNOWN_TECH_ADDRESSES = {x for x in DEFAULT_TECH_ADDRESSES | EXTRA_TECHNICAL_ADDRESSES if x}
+KNOWN_TECH_ADDRESSES.update({p.get("pair_address") for p in LP_POOLS if p.get("pair_address")})
 
 # =========================================================
 # HELPERS
@@ -294,7 +318,7 @@ def is_technical_address(addr: str) -> bool:
 
 
 def is_real_wallet(addr: str) -> bool:
-    return bool(addr) and not is_technical_address(addr)
+    return bool(addr) and not addr.startswith("erd1dead") and not is_technical_address(addr)
 
 
 def file_exists(path: str) -> bool:
@@ -1915,6 +1939,187 @@ def fetch_lp_holders(limit_pages: int = LP_HOLDERS_MAX_PAGES) -> Dict[str, Any]:
     }
 
 
+
+def _pool_label(pool: Dict[str, Any]) -> str:
+    return f"{pool.get('dex', '?')} {pool.get('name', '?')}"
+
+
+def discover_pool_lp_token(pool: Dict[str, Any], force_refresh: bool = False) -> str:
+    configured = str(pool.get("lp_token") or "").strip()
+    if configured:
+        return configured
+    pair_address = str(pool.get("pair_address") or "").strip()
+    if not pair_address:
+        return ""
+    cache_key = f"lp_token:{pair_address}"
+    now = time.time()
+    cached = PRICE_CACHE.get(cache_key)
+    if cached and not force_refresh and now - cached[1] < 3600:
+        return str(cached[0] or "")
+
+    for function_name in ("getLpTokenIdentifier", "getLpTokenId", "getLpTokenID", "getLpTokenIdentifierView"):
+        payload = {"scAddress": pair_address, "funcName": function_name, "args": []}
+        data = post_json(f"{MVX_API}/vm-values/query", payload)
+        for item in _extract_vm_return_data(data):
+            decoded = _decode_vm_value(item)
+            if "-" in decoded and decoded != WOODY:
+                PRICE_CACHE[cache_key] = (decoded, now)
+                return decoded
+
+    data = get_json(f"{MVX_API}/accounts/{pair_address}/tokens")
+    if isinstance(data, list):
+        reserve_ids = {str(x.get("identifier") or "") for x in data}
+        candidates = [t for t in reserve_ids if t and t != WOODY and "WOODY" in t.upper()]
+        if candidates:
+            token = sorted(candidates, key=len)[0]
+            PRICE_CACHE[cache_key] = (token, now)
+            return token
+    PRICE_CACHE[cache_key] = ("", now)
+    return ""
+
+
+def get_pool_tvl_egld(pool: Dict[str, Any]) -> Dict[str, Any]:
+    pair_address = str(pool.get("pair_address") or "").strip()
+    if not pair_address:
+        return {"ok": False, "pool_value_egld": 0.0, "reason": "pair address missing"}
+    snap = get_pool_snapshot(pair_address, _pool_label(pool))
+    if not snap.get("ok"):
+        return {"ok": False, "pool_value_egld": 0.0, "reason": snap.get("reason", "Pool unavailable / error")}
+    pair_token = str(snap.get("pair_token") or "")
+    pair_amount = safe_float(snap.get("pair_amount"))
+    if pair_amount > 0 and (pair_token == WEGLD or symbol(pair_token).upper() in {"EGLD", "WEGLD"}):
+        return {**snap, "pool_value_egld": pair_amount * 2}
+    egld_usd = get_egld_usd()
+    pool_usd = safe_float(snap.get("pool_value_usd"))
+    return {**snap, "pool_value_egld": (pool_usd / egld_usd) if egld_usd > 0 and pool_usd > 0 else 0.0}
+
+
+def get_lp_holders(pool: Dict[str, Any], limit_pages: int = LP_HOLDERS_MAX_PAGES) -> Dict[str, Any]:
+    if str(pool.get("status")) == "excluded":
+        return {"ok": False, "excluded": True, "reason": pool.get("reason", "excluded")}
+    lp_token_id = discover_pool_lp_token(pool)
+    if not lp_token_id:
+        return {"ok": False, "reason": "LP token missing"}
+    total_supply_raw, lp_decimals = get_lp_total_supply_raw_and_decimals(lp_token_id)
+    tvl = get_pool_tvl_egld(pool)
+    holders: List[Dict[str, Any]] = []
+    for page in range(max(1, limit_pages)):
+        params = {"from": page * LP_HOLDERS_PAGE_SIZE, "size": LP_HOLDERS_PAGE_SIZE}
+        data = get_json(f"{MVX_API}/tokens/{lp_token_id}/accounts", params=params)
+        if not isinstance(data, list):
+            return {"ok": False, "lp_token_id": lp_token_id, "reason": "LP holders API unavailable / unexpected response"}
+        if not data:
+            break
+        for item in data:
+            address = str(item.get("address") or item.get("owner") or "")
+            if not is_real_wallet(address):
+                continue
+            balance_raw = _lp_account_balance_raw(item)
+            if balance_raw <= 0:
+                continue
+            estimated_egld = (balance_raw / total_supply_raw * safe_float(tvl.get("pool_value_egld"))) if total_supply_raw > 0 else 0.0
+            if estimated_egld <= GLOBAL_LP_DUST_EGLD:
+                continue
+            holders.append({"wallet": address, "lp_amount": amount_from_raw(balance_raw, lp_decimals), "estimated_egld": estimated_egld})
+        if len(data) < LP_HOLDERS_PAGE_SIZE:
+            break
+    return {"ok": True, "lp_token_id": lp_token_id, "total_supply_raw": str(total_supply_raw), "lp_decimals": lp_decimals, "pool_value_egld": safe_float(tvl.get("pool_value_egld")), "holders": holders, "pool_ok": bool(tvl.get("ok")), "pool_reason": tvl.get("reason", "")}
+
+
+def build_global_snapshot() -> Dict[str, Any]:
+    wallets: Dict[str, Dict[str, Any]] = {}
+    pools: List[Dict[str, Any]] = []
+    for pool in LP_POOLS:
+        label = _pool_label(pool)
+        if str(pool.get("status")) == "excluded":
+            pools.append({**pool, "label": label, "status_text": "excluded", "ok": False})
+            continue
+        result = get_lp_holders(pool)
+        status_text = "LP token found" if result.get("lp_token_id") else "LP token missing"
+        if not result.get("ok"):
+            pools.append({**pool, "label": label, "status_text": status_text, "ok": False, "reason": result.get("reason", "Pool unavailable / error")})
+            continue
+        pools.append({**pool, "label": label, "lp_token": result.get("lp_token_id"), "status_text": status_text, "ok": True, "pool_value_egld": result.get("pool_value_egld"), "holder_count": len(result.get("holders", [])), "reason": result.get("pool_reason", "")})
+        for holder in result.get("holders", []):
+            wallet = str(holder.get("wallet") or "")
+            bucket = wallets.setdefault(wallet, {"wallet": wallet, "total_egld": 0.0, "pools": []})
+            bucket["total_egld"] += safe_float(holder.get("estimated_egld"))
+            bucket["pools"].append(label)
+    rows = sorted(wallets.values(), key=lambda x: safe_float(x.get("total_egld")), reverse=True)
+    total = sum(safe_float(r.get("total_egld")) for r in rows)
+    for row in rows:
+        row["share_pct"] = safe_float(row.get("total_egld")) / total * 100 if total > 0 else 0.0
+    return {"pools": pools, "rows": rows, "total_eligible_egld": total, "eligible_wallets": len(rows)}
+
+
+def format_snapshot_report(snapshot: Optional[Dict[str, Any]] = None, limit: int = 20) -> str:
+    data = snapshot or build_global_snapshot()
+    active_count = sum(1 for p in data.get("pools", []) if p.get("status_text") != "excluded")
+    lines = [
+        "📸 *WOODY Global LP Snapshot*",
+        f"Pools monitored: *{active_count}*",
+        f"Total eligible liquidity: *{safe_float(data.get('total_eligible_egld')):,.6f} EGLD*",
+        f"Total eligible wallets: *{safe_int(data.get('eligible_wallets'))}*",
+        "",
+        "🏆 *Top LP Providers:*",
+        "",
+    ]
+    rows = data.get("rows", [])[:limit]
+    if not rows:
+        lines.append("No eligible LP wallets found.")
+    for idx, row in enumerate(rows, start=1):
+        lines.append(f"{idx}. `{short_wallet(str(row.get('wallet')))} ` — *{safe_float(row.get('total_egld')):,.6f} EGLD* ({safe_float(row.get('share_pct')):.4f}%)")
+    errors = [p for p in data.get("pools", []) if not p.get("ok") and p.get("status_text") != "excluded"]
+    if errors:
+        lines.extend(["", "⚠️ *Pool unavailable / error:*"])
+        for p in errors:
+            lines.append(f"• {p.get('label')}: {p.get('reason', 'Pool unavailable / error')}")
+    return "\n".join(lines)
+
+
+def calculate_lp_rewards(reward_pool_egld: float, snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if isinstance(snapshot, str):
+        return calculate_monthly_lp_rewards(reward_pool_egld, snapshot)
+    data = snapshot or build_global_snapshot()
+    rows = []
+    total = safe_float(data.get("total_eligible_egld"))
+    for row in data.get("rows", []):
+        share = safe_float(row.get("total_egld")) / total if total > 0 else 0.0
+        rows.append({**row, "share_pct": share * 100, "reward_egld": share * max(0.0, reward_pool_egld)})
+    return {**data, "rows": rows, "reward_pool_egld": reward_pool_egld}
+
+
+def format_rewards_report(reward_pool_egld: float) -> str:
+    data = calculate_lp_rewards(reward_pool_egld)
+    if safe_float(data.get("total_eligible_egld")) <= 0:
+        return "🎁 *WOODY Global LP Rewards*\n\nNo eligible global LP liquidity found right now."
+    save_last_lp_reward_pool(reward_pool_egld)
+    lines = [
+        "🎁 *WOODY Global LP Rewards*",
+        f"Reward pool: *{reward_pool_egld:,.6f} EGLD*",
+        f"Total eligible liquidity: *{safe_float(data.get('total_eligible_egld')):,.6f} EGLD*",
+        "",
+    ]
+    for idx, row in enumerate(data.get("rows", []), start=1):
+        lines.append(f"{idx}. `{row.get('wallet')}`\n   LP value: *{safe_float(row.get('total_egld')):,.6f} EGLD*\n   Share: *{safe_float(row.get('share_pct')):.4f}%*\n   Reward: *{safe_float(row.get('reward_egld')):,.8f} EGLD*")
+    return "\n".join(lines)
+
+
+def format_pools_report() -> str:
+    data = build_global_snapshot()
+    lines = ["📦 *WOODY LP Pools Monitored*", ""]
+    for idx, pool in enumerate(data.get("pools", []), start=1):
+        if pool.get("status_text") == "excluded":
+            status = "excluded"
+        elif pool.get("ok"):
+            status = "active / LP token found"
+        else:
+            status = "active / " + str(pool.get("status_text") or "LP token missing")
+        lines.append(f"{idx}. *{pool.get('label')}*\n   Status: *{status}*\n   Pair: `{pool.get('pair_address') or 'N/A'}`\n   LP token: `{pool.get('lp_token') or 'missing'}`")
+        if pool.get("reason"):
+            lines.append(f"   Note: _{pool.get('reason')}_")
+    return "\n".join(lines)
+
 def current_month_key(now: Optional[datetime] = None) -> str:
     dt = now or datetime.now(timezone.utc)
     return dt.strftime("%Y-%m")
@@ -2033,7 +2238,7 @@ def calculate_monthly_lp_averages(month_key: Optional[str] = None) -> Dict[str, 
     return {"snapshots": snapshots, "rows": rows, "total_average_lp": total_average_lp}
 
 
-def calculate_lp_rewards(reward_pool_egld: float, month_key: Optional[str] = None) -> Dict[str, Any]:
+def calculate_monthly_lp_rewards(reward_pool_egld: float, month_key: Optional[str] = None) -> Dict[str, Any]:
     averages = calculate_monthly_lp_averages(month_key)
     total = safe_float(averages.get("total_average_lp"))
     rows: List[Dict[str, Any]] = []
@@ -2174,26 +2379,7 @@ def get_lp_rewards_help_text() -> str:
 
 
 def get_lp_rewards_text(reward_pool_egld: float) -> str:
-    data = calculate_lp_rewards(reward_pool_egld)
-    if not data.get("snapshots"):
-        return "🎁 *LP Rewards*\n\nNo LP snapshots for the current month yet. I can calculate rewards after at least one monthly LP snapshot exists."
-    save_last_lp_reward_pool(reward_pool_egld)
-    lines = [
-        "🎁 *LP Rewards Calculation*",
-        f"Month: *{current_month_key()}*",
-        f"Reward pool: *{reward_pool_egld:,.6f} EGLD*",
-        f"Snapshots used: *{len(data.get('snapshots', []))}* ({', '.join(str(s.get('date')) for s in data.get('snapshots', []))})",
-        f"Average LP total: *{safe_float(data.get('total_average_lp')):,.8f}*",
-        "_No EGLD is sent automatically; this is only a manual distribution report._",
-        "",
-    ]
-    for idx, row in enumerate(data.get("rows", []), start=1):
-        lines.append(
-            f"{idx}. `{str(row.get('wallet'))}`\n"
-            f"   Share: *{safe_float(row.get('share_pct')):.4f}%*\n"
-            f"   Reward: *{safe_float(row.get('reward_egld')):,.8f} EGLD*"
-        )
-    return "\n".join(lines)
+    return format_rewards_report(reward_pool_egld)
 
 
 def build_lp_export_csv(reward_pool_egld: Optional[float] = None) -> Tuple[bytes, str]:
@@ -2205,7 +2391,7 @@ def build_lp_export_csv(reward_pool_egld: Optional[float] = None) -> Tuple[bytes
     for row in data.get("rows", []):
         writer.writerow([
             row.get("wallet"),
-            f"{safe_float(row.get('average_lp')):.18f}",
+            f"{safe_float(row.get('total_egld') if row.get('total_egld') is not None else row.get('average_lp')):.18f}",
             f"{safe_float(row.get('share_pct')):.8f}",
             f"{safe_float(row.get('reward_egld')):.18f}",
         ])
@@ -3663,6 +3849,16 @@ async def holders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
 
 
+async def snapshot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message:
+        await reply_markdown_chunks(update, await asyncio.to_thread(format_snapshot_report))
+
+
+async def pools_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message:
+        await reply_markdown_chunks(update, await asyncio.to_thread(format_pools_report))
+
+
 async def lp_holders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await reply_markdown_chunks(update, await asyncio.to_thread(get_lp_holders_text))
 
@@ -3955,6 +4151,8 @@ def main() -> None:
     app.add_handler(CommandHandler("pret", price_command))
     app.add_handler(CommandHandler("liquidity", liquidity_command))
     app.add_handler(CommandHandler("holders", holders_command))
+    app.add_handler(CommandHandler("snapshot", snapshot_command))
+    app.add_handler(CommandHandler("pools", pools_command))
     app.add_handler(CommandHandler("lp_holders", lp_holders_command))
     app.add_handler(CommandHandler("lp_leaderboard", lp_leaderboard_command))
     app.add_handler(CommandHandler("lp_snapshots", lp_snapshots_command))
