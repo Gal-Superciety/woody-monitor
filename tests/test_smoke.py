@@ -581,3 +581,18 @@ def test_lp_snapshot_confirmation_uses_requested_summary_format() -> None:
     assert "LP holders: 2" in text
     assert "Total LP value: 42.000000 EGLD" in text
     assert "Date: 06.06.2026 12:34" in text
+
+
+def test_woody_app_dashboard_contains_required_sections() -> None:
+    html = main.woody_app_html()
+    required_sections = [
+        "Connect MultiversX Wallet",
+        "Premium Access",
+        "Holder Levels",
+        "Daily Missions",
+        "AI Assistant",
+        "WOODY Monitor",
+        "WOODY-5f9d9c",
+    ]
+    for section in required_sections:
+        assert section in html

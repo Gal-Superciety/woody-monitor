@@ -1446,6 +1446,82 @@ def write_dashboard_status_json() -> None:
     logger.info("WOODY DASHBOARD JSON UPDATED")
 
 
+
+
+def woody_app_html() -> str:
+    """Render the WOODY App dashboard shell while preserving monitor status data."""
+    return f"""<!doctype html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"utf-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <title>WOODY App</title>
+  <style>
+    :root {{ color-scheme: dark; --bg: #07130c; --panel: rgba(14, 33, 21, .86); --panel-strong: rgba(22, 54, 34, .94); --line: rgba(132, 255, 159, .18); --accent: #8cff9f; --accent-2: #f8d66d; --muted: #b7c8b9; --text: #f4fff5; }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; min-height: 100vh; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; background: radial-gradient(circle at top left, rgba(140, 255, 159, .18), transparent 32rem), radial-gradient(circle at 85% 15%, rgba(248, 214, 109, .14), transparent 28rem), var(--bg); color: var(--text); }}
+    a {{ color: inherit; }}
+    .shell {{ width: min(1180px, calc(100% - 32px)); margin: 0 auto; padding: 28px 0 48px; }}
+    .topbar {{ display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 30px; }}
+    .brand {{ display: flex; align-items: center; gap: 14px; }}
+    .logo {{ width: 48px; height: 48px; display: grid; place-items: center; border-radius: 16px; background: linear-gradient(135deg, #8cff9f, #f8d66d); color: #061109; font-size: 28px; box-shadow: 0 16px 44px rgba(140, 255, 159, .22); }}
+    .brand h1 {{ margin: 0; font-size: clamp(1.45rem, 3vw, 2rem); letter-spacing: -.04em; }}
+    .brand span {{ display: block; color: var(--muted); font-size: .92rem; margin-top: 3px; }}
+    .wallet-btn {{ border: 1px solid rgba(140, 255, 159, .38); background: linear-gradient(135deg, rgba(140, 255, 159, .22), rgba(248, 214, 109, .18)); color: var(--text); padding: 13px 18px; border-radius: 999px; font-weight: 800; cursor: pointer; box-shadow: 0 12px 34px rgba(0, 0, 0, .24); }}
+    .wallet-btn:hover {{ transform: translateY(-1px); border-color: rgba(140, 255, 159, .72); }}
+    .hero {{ padding: clamp(24px, 5vw, 46px); border: 1px solid var(--line); border-radius: 32px; background: linear-gradient(145deg, rgba(14, 33, 21, .92), rgba(7, 19, 12, .72)); box-shadow: 0 24px 80px rgba(0, 0, 0, .32); margin-bottom: 22px; }}
+    .hero h2 {{ margin: 0 0 12px; font-size: clamp(2rem, 6vw, 4.5rem); line-height: .95; letter-spacing: -.075em; }}
+    .hero p {{ max-width: 720px; color: var(--muted); font-size: 1.08rem; line-height: 1.65; margin: 0; }}
+    .token {{ display: inline-flex; align-items: center; gap: 9px; margin-top: 22px; padding: 10px 14px; border-radius: 999px; background: rgba(140, 255, 159, .10); border: 1px solid var(--line); color: var(--accent); font-weight: 800; }}
+    .grid {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }}
+    .card {{ min-height: 210px; padding: 22px; border-radius: 26px; border: 1px solid var(--line); background: var(--panel); position: relative; overflow: hidden; }}
+    .card::after {{ content: \"\"; position: absolute; inset: auto -30px -55px auto; width: 150px; height: 150px; border-radius: 999px; background: rgba(140, 255, 159, .08); }}
+    .card h3 {{ margin: 12px 0 10px; font-size: 1.22rem; }}
+    .card p {{ color: var(--muted); line-height: 1.55; margin: 0; }}
+    .icon {{ width: 42px; height: 42px; display: grid; place-items: center; border-radius: 14px; background: rgba(140, 255, 159, .13); font-size: 23px; }}
+    .metric {{ margin-top: 18px; color: var(--accent-2); font-weight: 800; }}
+    .monitor {{ grid-column: span 2; background: var(--panel-strong); }}
+    .status-row {{ display: flex; gap: 12px; flex-wrap: wrap; margin-top: 18px; }}
+    .pill {{ padding: 8px 10px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: .9rem; }}
+    .pill strong {{ color: var(--text); }}
+    @media (max-width: 860px) {{ .topbar {{ align-items: flex-start; flex-direction: column; }} .grid {{ grid-template-columns: 1fr; }} .monitor {{ grid-column: span 1; }} .wallet-btn {{ width: 100%; }} }}
+  </style>
+</head>
+<body>
+  <main class=\"shell\">
+    <nav class=\"topbar\" aria-label=\"WOODY App navigation\">
+      <div class=\"brand\"><div class=\"logo\" aria-hidden=\"true\">🌲</div><div><h1>WOODY App</h1><span>Main dashboard powered by WOODY Monitor</span></div></div>
+      <button class=\"wallet-btn\" id=\"walletButton\" type=\"button\">Connect MultiversX Wallet</button>
+    </nav>
+    <section class=\"hero\">
+      <h2>The main WOODY command center.</h2>
+      <p>Track the WOODY ecosystem, connect your MultiversX wallet, review holder perks, complete missions, and keep the original monitor signals close at hand.</p>
+      <div class=\"token\">Token ID: {WOODY}</div>
+    </section>
+    <section id=\"app\" class=\"grid\" aria-label=\"WOODY App dashboard cards\">
+      <article class=\"card\"><div class=\"icon\">💎</div><h3>Premium Access</h3><p>Unlock premium dashboards, boosted intelligence, private alerts, and early WOODY ecosystem features.</p><div class=\"metric\">Wallet-gated for WOODY holders</div></article>
+      <article class=\"card\"><div class=\"icon\">🏆</div><h3>Holder Levels</h3><p>Level up through WOODY holder tiers based on wallet balance, loyalty, and ecosystem participation.</p><div class=\"metric\">Bronze · Silver · Gold · Whale</div></article>
+      <article class=\"card\"><div class=\"icon\">✅</div><h3>Daily Missions</h3><p>Complete daily community, trading, liquidity, and learning missions to build your WOODY profile.</p><div class=\"metric\">Fresh missions every day</div></article>
+      <article class=\"card\"><div class=\"icon\">🤖</div><h3>AI Assistant</h3><p>Ask for market summaries, risk signals, wallet intelligence, and public-safe WOODY ecosystem context.</p><div class=\"metric\">AI readouts connected to monitor data</div></article>
+      <article class=\"card monitor\"><div class=\"icon\">📡</div><h3>WOODY Monitor</h3><p>The original monitor remains active: live trade classification, holder checks, LP snapshots, liquidity views, alerts, and the public status endpoint.</p><div class=\"status-row\"><span class=\"pill\">Status JSON: <strong>/status.json</strong></span><span class=\"pill\">Token: <strong>{WOODY}</strong></span><span class=\"pill\">Monitor: <strong>preserved</strong></span></div></article>
+    </section>
+  </main>
+  <script>
+    const btn = document.getElementById('walletButton');
+    btn.addEventListener('click', async () => {{
+      btn.textContent = 'Wallet connect coming soon';
+      btn.setAttribute('aria-live', 'polite');
+    }});
+  </script>
+</body>
+</html>"""
+
+
+async def woody_app_handler(_: web.Request) -> web.Response:
+    logger.info("WOODY APP DASHBOARD SERVED")
+    return web.Response(text=woody_app_html(), content_type="text/html")
+
+
 async def status_json_handler(_: web.Request) -> web.Response:
     payload = await asyncio.to_thread(build_dashboard_status_payload)
     logger.info("PUBLIC STATUS ENDPOINT SERVED")
@@ -1455,6 +1531,8 @@ async def status_json_handler(_: web.Request) -> web.Response:
 def start_public_status_server() -> None:
     app = web.Application()
     app.router.add_get("/status.json", status_json_handler)
+    app.router.add_get("/", woody_app_handler)
+    app.router.add_get("/app", woody_app_handler)
     logger.info("Starting public status endpoint on %s:%s", PUBLIC_STATUS_HOST, PUBLIC_STATUS_PORT)
     web.run_app(app, host=PUBLIC_STATUS_HOST, port=PUBLIC_STATUS_PORT, handle_signals=False)
 
