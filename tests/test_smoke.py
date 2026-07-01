@@ -596,3 +596,51 @@ def test_woody_app_dashboard_contains_required_sections() -> None:
     ]
     for section in required_sections:
         assert section in html
+
+
+def test_lp_supply_decoded_integer_is_corrected_against_holder_balances(monkeypatch) -> None:
+    monkeypatch.setattr(main, "discover_xexchange_lp_token_id", lambda: "LP-WOODYEGLD")
+    monkeypatch.setattr(main, "get_lp_total_supply_raw_and_decimals", lambda token: (10_000, 18))
+    monkeypatch.setattr(main, "get_xexchange_pool_value_egld", lambda: 21.64)
+
+    def fake_get_json(url, params=None):
+        if url.endswith("/tokens/LP-WOODYEGLD/accounts"):
+            return [
+                {"address": "erd1alice", "balance": str(250 * (10 ** 18))},
+                {"address": "erd1bob", "balance": str(9_750 * (10 ** 18))},
+            ]
+        return {}
+
+    monkeypatch.setattr(main, "get_json", fake_get_json)
+
+    result = main.fetch_lp_holders()
+
+    assert result["ok"] is True
+    values = {h["wallet"]: h["estimated_egld"] for h in result["holders"]}
+    assert abs(values["erd1alice"] - 0.541) < 1e-12
+    assert abs(sum(values.values()) - 21.64) < 1e-12
+
+
+def test_lp_reports_use_short_wallets_and_fixed_decimals(monkeypatch) -> None:
+    monkeypatch.setattr(main, "get_egld_usd", lambda: 3.01)
+    text = main.format_snapshot_report(
+        {
+            "pools": [{"ok": True, "status_text": "LP token found"}],
+            "total_eligible_egld": 21.64,
+            "eligible_wallets": 1,
+            "rows": [
+                {
+                    "wallet": "erd15zjkqzf54xhl5sd5dvshjwh43fe5ztvnapsjuvvsm3xuvqvtzlvqcph7yz",
+                    "total_lp": 5.4986123,
+                    "total_egld": 21.66123,
+                    "share_pct": 97.191,
+                }
+            ],
+        }
+    )
+
+    assert "erd15zjk...ph7yz" in text
+    assert "5.4986" in text
+    assert "21.6612 EGLD" in text
+    assert "$65.20" in text
+    assert "97.19%" in text

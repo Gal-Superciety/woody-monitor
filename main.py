@@ -8,6 +8,7 @@ import threading
 import calendar
 import csv
 import base64
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 from io import BytesIO, StringIO
 from typing import Dict, Optional, Tuple, List, Any, Set
@@ -302,9 +303,29 @@ def symbol(token_id: str) -> str:
 def short_wallet(addr: str) -> str:
     if not addr:
         return "unknown"
-    if len(addr) < 18:
+    if len(addr) <= 16:
         return addr
-    return f"{addr[:10]}...{addr[-8:]}"
+    return f"{addr[:8]}...{addr[-5:]}"
+
+
+def fmt_lp(value: Any) -> str:
+    return f"{safe_float(value):,.4f}"
+
+
+def fmt_egld(value: Any) -> str:
+    return f"{safe_float(value):,.4f} EGLD"
+
+
+def fmt_usd(value: Any) -> str:
+    return f"${safe_float(value):,.2f}"
+
+
+def fmt_pct(value: Any) -> str:
+    return f"{safe_float(value):,.2f}%"
+
+
+def rank_emoji(idx: int) -> str:
+    return {1: "🥇", 2: "🥈", 3: "🥉"}.get(idx, f"{idx}.")
 
 
 def is_technical_address(addr: str) -> bool:
@@ -1915,12 +1936,7 @@ def get_token_metadata(token_id: str) -> Dict[str, Any]:
 
 
 def _raw_int_from_token_amount(value: Any) -> int:
-    """Return an integer raw token amount from MultiversX API values.
-
-    LP endpoints are expected to return raw integer balances.  Some API
-    variants can expose numeric/decimal-looking values, so this helper keeps
-    integer strings exact while still handling floats defensively.
-    """
+    """Return an integer raw token amount from raw MultiversX API values."""
     raw = str(value or "0").strip()
     if not raw:
         return 0
@@ -1928,9 +1944,22 @@ def _raw_int_from_token_amount(value: Any) -> int:
         return int(raw)
     except Exception:
         try:
-            return int(float(raw))
+            return int(Decimal(raw))
         except Exception:
             return 0
+
+
+def _token_amount_to_raw(value: Any, decimals: int) -> int:
+    """Convert either raw integer or already-decoded token amounts to raw units."""
+    raw = str(value or "0").strip().replace(",", "")
+    if not raw:
+        return 0
+    if "." not in raw and "e" not in raw.lower():
+        return _raw_int_from_token_amount(raw)
+    try:
+        return int((Decimal(raw) * (Decimal(10) ** int(decimals))).to_integral_value())
+    except (InvalidOperation, ValueError, TypeError):
+        return 0
 
 
 def _lp_account_balance_raw(account: Dict[str, Any]) -> int:
@@ -1946,8 +1975,37 @@ def get_lp_total_supply_raw_and_decimals(lp_token_id: str) -> Tuple[int, int]:
     data = get_token_metadata(lp_token_id)
     decimals = safe_int(data.get("decimals", 18), 18)
     supply_raw = data.get("supply") or data.get("totalSupply") or data.get("circulatingSupply") or "0"
-    return _raw_int_from_token_amount(supply_raw), decimals
+    return _token_amount_to_raw(supply_raw, decimals), decimals
 
+
+
+def _correct_lp_supply_raw(total_supply_raw: int, lp_decimals: int, balances_raw: List[int], lp_token_id: str) -> int:
+    max_balance = max(balances_raw, default=0)
+    if total_supply_raw > 0 and max_balance > total_supply_raw:
+        corrected = total_supply_raw * (10 ** int(lp_decimals))
+        if corrected >= max_balance:
+            logger.warning("LP supply looked decoded; converted to raw units | token=%s supply=%s corrected=%s decimals=%s", lp_token_id, total_supply_raw, corrected, lp_decimals)
+            return corrected
+    return total_supply_raw
+
+
+def _lp_sanity_ok(holders: List[Dict[str, Any]], expected_total_egld: float, label: str, tolerance_pct: float = 0.5) -> bool:
+    expected = safe_float(expected_total_egld)
+    if expected <= 0:
+        return True
+    actual = sum(safe_float(h.get("estimated_egld")) for h in holders)
+    # Paginated API calls can be intentionally limited in tests or by config.
+    # Only fail closed when the collected holders overvalue the pool or when
+    # they are close enough to complete that a meaningful reconciliation is possible.
+    if actual < expected * 0.95:
+        logger.warning("LP valuation sanity check skipped for partial holder coverage | %s holder_sum=%.12f pool_value=%.12f", label, actual, expected)
+        return True
+    diff = abs(actual - expected)
+    tolerance = max(0.0001, expected * tolerance_pct / 100)
+    if diff > tolerance:
+        logger.error("LP valuation sanity check failed | %s holder_sum=%.12f pool_value=%.12f diff=%.12f tolerance=%.12f", label, actual, expected, diff, tolerance)
+        return False
+    return True
 
 def get_lp_total_supply_and_decimals(lp_token_id: str) -> Tuple[float, int]:
     supply_raw, decimals = get_lp_total_supply_raw_and_decimals(lp_token_id)
@@ -1975,9 +2033,8 @@ def fetch_lp_holders(limit_pages: int = LP_HOLDERS_MAX_PAGES) -> Dict[str, Any]:
         return {"ok": False, "reason": "LP token id unavailable. Set XEXCHANGE_LP_TOKEN_ID or check VM query access."}
 
     total_supply_raw, lp_decimals = get_lp_total_supply_raw_and_decimals(lp_token_id)
-    total_supply = amount_from_raw(total_supply_raw, lp_decimals)
     pool_value_egld = get_xexchange_pool_value_egld()
-    holders: List[Dict[str, Any]] = []
+    accounts: List[Dict[str, Any]] = []
 
     for page in range(max(1, limit_pages)):
         params = {"from": page * LP_HOLDERS_PAGE_SIZE, "size": LP_HOLDERS_PAGE_SIZE}
@@ -1990,20 +2047,28 @@ def fetch_lp_holders(limit_pages: int = LP_HOLDERS_MAX_PAGES) -> Dict[str, Any]:
             break
         for item in data:
             address = str(item.get("address") or item.get("owner") or "")
-            if not address or is_technical_address(address):
-                continue
             balance_raw = _lp_account_balance_raw(item)
-            lp_amount = amount_from_raw(balance_raw, lp_decimals)
-            if lp_amount <= 0:
+            if not address or balance_raw <= 0:
                 continue
-            estimated_egld = (balance_raw / total_supply_raw * pool_value_egld) if total_supply_raw > 0 and pool_value_egld > 0 else 0.0
-            holders.append({
-                "wallet": address,
-                "lp_amount": lp_amount,
-                "estimated_egld": estimated_egld,
-            })
+            accounts.append({"wallet": address, "balance_raw": balance_raw})
         if len(data) < LP_HOLDERS_PAGE_SIZE:
             break
+
+    total_supply_raw = _correct_lp_supply_raw(total_supply_raw, lp_decimals, [safe_int(a.get("balance_raw")) for a in accounts], lp_token_id)
+    total_supply = amount_from_raw(total_supply_raw, lp_decimals)
+    holders: List[Dict[str, Any]] = []
+    all_estimated: List[Dict[str, Any]] = []
+    for account in accounts:
+        balance_raw = safe_int(account.get("balance_raw"))
+        lp_amount = amount_from_raw(balance_raw, lp_decimals)
+        estimated_egld = (balance_raw / total_supply_raw * pool_value_egld) if total_supply_raw > 0 and pool_value_egld > 0 else 0.0
+        row = {"wallet": account.get("wallet"), "lp_amount": lp_amount, "estimated_egld": estimated_egld}
+        all_estimated.append(row)
+        if not is_technical_address(str(account.get("wallet"))) and lp_amount > 0:
+            holders.append(row)
+
+    if not _lp_sanity_ok(all_estimated, pool_value_egld, f"xExchange {lp_token_id}"):
+        return {"ok": False, "reason": "LP valuation sanity check failed; refusing to publish incorrect values", "lp_token_id": lp_token_id}
 
     holders.sort(key=lambda x: safe_float(x.get("lp_amount")), reverse=True)
     return {
@@ -2080,7 +2145,8 @@ def get_lp_holders(pool: Dict[str, Any], limit_pages: int = LP_HOLDERS_MAX_PAGES
         return {"ok": False, "reason": "LP token missing"}
     total_supply_raw, lp_decimals = get_lp_total_supply_raw_and_decimals(lp_token_id)
     tvl = get_pool_tvl_egld(pool)
-    holders: List[Dict[str, Any]] = []
+    pool_value_egld = safe_float(tvl.get("pool_value_egld"))
+    accounts: List[Dict[str, Any]] = []
     for page in range(max(1, limit_pages)):
         params = {"from": page * LP_HOLDERS_PAGE_SIZE, "size": LP_HOLDERS_PAGE_SIZE}
         data = get_json(f"{MVX_API}/tokens/{lp_token_id}/accounts", params=params)
@@ -2090,18 +2156,31 @@ def get_lp_holders(pool: Dict[str, Any], limit_pages: int = LP_HOLDERS_MAX_PAGES
             break
         for item in data:
             address = str(item.get("address") or item.get("owner") or "")
-            if not is_real_wallet(address):
-                continue
             balance_raw = _lp_account_balance_raw(item)
-            if balance_raw <= 0:
+            if not address or balance_raw <= 0:
                 continue
-            estimated_egld = (balance_raw / total_supply_raw * safe_float(tvl.get("pool_value_egld"))) if total_supply_raw > 0 else 0.0
-            if estimated_egld <= GLOBAL_LP_DUST_EGLD:
-                continue
-            holders.append({"wallet": address, "lp_amount": amount_from_raw(balance_raw, lp_decimals), "estimated_egld": estimated_egld})
+            accounts.append({"wallet": address, "balance_raw": balance_raw})
         if len(data) < LP_HOLDERS_PAGE_SIZE:
             break
-    return {"ok": True, "lp_token_id": lp_token_id, "total_supply_raw": str(total_supply_raw), "lp_decimals": lp_decimals, "pool_value_egld": safe_float(tvl.get("pool_value_egld")), "holders": holders, "pool_ok": bool(tvl.get("ok")), "pool_reason": tvl.get("reason", "")}
+
+    total_supply_raw = _correct_lp_supply_raw(total_supply_raw, lp_decimals, [safe_int(a.get("balance_raw")) for a in accounts], lp_token_id)
+    holders: List[Dict[str, Any]] = []
+    all_estimated: List[Dict[str, Any]] = []
+    for account in accounts:
+        address = str(account.get("wallet") or "")
+        balance_raw = safe_int(account.get("balance_raw"))
+        lp_amount = amount_from_raw(balance_raw, lp_decimals)
+        estimated_egld = (balance_raw / total_supply_raw * pool_value_egld) if total_supply_raw > 0 and pool_value_egld > 0 else 0.0
+        row = {"wallet": address, "lp_amount": lp_amount, "estimated_egld": estimated_egld}
+        all_estimated.append(row)
+        if not is_real_wallet(address) or estimated_egld <= GLOBAL_LP_DUST_EGLD:
+            continue
+        holders.append(row)
+
+    if not _lp_sanity_ok(all_estimated, pool_value_egld, _pool_label(pool)):
+        return {"ok": False, "lp_token_id": lp_token_id, "reason": "LP valuation sanity check failed; refusing to publish incorrect values"}
+
+    return {"ok": True, "lp_token_id": lp_token_id, "total_supply_raw": str(total_supply_raw), "lp_decimals": lp_decimals, "pool_value_egld": pool_value_egld, "holders": holders, "pool_ok": bool(tvl.get("ok")), "pool_reason": tvl.get("reason", "")}
 
 
 def build_global_snapshot() -> Dict[str, Any]:
@@ -2120,8 +2199,9 @@ def build_global_snapshot() -> Dict[str, Any]:
         pools.append({**pool, "label": label, "lp_token": result.get("lp_token_id"), "status_text": status_text, "ok": True, "pool_value_egld": result.get("pool_value_egld"), "holder_count": len(result.get("holders", [])), "reason": result.get("pool_reason", "")})
         for holder in result.get("holders", []):
             wallet = str(holder.get("wallet") or "")
-            bucket = wallets.setdefault(wallet, {"wallet": wallet, "total_egld": 0.0, "pools": []})
+            bucket = wallets.setdefault(wallet, {"wallet": wallet, "total_egld": 0.0, "total_lp": 0.0, "pools": []})
             bucket["total_egld"] += safe_float(holder.get("estimated_egld"))
+            bucket["total_lp"] += safe_float(holder.get("lp_amount"))
             bucket["pools"].append(label)
     rows = sorted(wallets.values(), key=lambda x: safe_float(x.get("total_egld")), reverse=True)
     total = sum(safe_float(r.get("total_egld")) for r in rows)
@@ -2133,11 +2213,20 @@ def build_global_snapshot() -> Dict[str, Any]:
 def format_snapshot_report(snapshot: Optional[Dict[str, Any]] = None, limit: int = 20) -> str:
     data = snapshot or build_global_snapshot()
     active_count = sum(1 for p in data.get("pools", []) if p.get("status_text") != "excluded")
+    egld_usd = get_egld_usd()
+    total_egld = safe_float(data.get("total_eligible_egld"))
     lines = [
         "📸 *WOODY Global LP Snapshot*",
-        f"Pools monitored: *{active_count}*",
-        f"Total eligible liquidity: *{safe_float(data.get('total_eligible_egld')):,.6f} EGLD*",
-        f"Total eligible wallets: *{safe_int(data.get('eligible_wallets'))}*",
+        "",
+        "*Total Eligible Liquidity:*",
+        fmt_egld(total_egld),
+        f"≈ {fmt_usd(total_egld * egld_usd)}",
+        "",
+        "*Eligible Wallets:*",
+        str(safe_int(data.get("eligible_wallets"))),
+        "",
+        "*Pools Included:*",
+        str(active_count),
         "",
         "🏆 *Top LP Providers:*",
         "",
@@ -2146,7 +2235,22 @@ def format_snapshot_report(snapshot: Optional[Dict[str, Any]] = None, limit: int
     if not rows:
         lines.append("No eligible LP wallets found.")
     for idx, row in enumerate(rows, start=1):
-        lines.append(f"{idx}. `{short_wallet(str(row.get('wallet')))} ` — *{safe_float(row.get('total_egld')):,.6f} EGLD* ({safe_float(row.get('share_pct')):.4f}%)")
+        value_egld = safe_float(row.get("total_egld"))
+        lines.extend([
+            f"{rank_emoji(idx)} *Wallet*",
+            f"`{short_wallet(str(row.get('wallet')))}`",
+            "",
+            "LP Tokens:",
+            f"*{fmt_lp(row.get('total_lp'))}*",
+            "",
+            "Pool Share:",
+            f"*{fmt_pct(row.get('share_pct'))}*",
+            "",
+            "Estimated Value:",
+            f"*{fmt_egld(value_egld)}*",
+            f"≈ *{fmt_usd(value_egld * egld_usd)}*",
+            "",
+        ])
     errors = [p for p in data.get("pools", []) if not p.get("ok") and p.get("status_text") != "excluded"]
     if errors:
         lines.extend(["", "⚠️ *Pool unavailable / error:*"])
@@ -2349,23 +2453,38 @@ def get_lp_holders_text(limit: Optional[int] = None) -> str:
         return f"💧 *WOODY/EGLD LP Holders*\n\nCould not load LP holders: {live.get('reason', 'unknown error')}"
     all_holders = live.get("holders", [])
     holders = all_holders[:limit] if limit else all_holders
+    pool_value = safe_float(live.get("pool_value_egld"))
+    egld_usd = get_egld_usd()
     lines = [
         "💧 *WOODY/EGLD LP Holders*",
         "_xExchange LP token monitor_",
         "",
         f"Pool: `{XEXCHANGE_POOL_ADDRESS}`",
         f"LP token: `{live.get('lp_token_id')}`",
-        f"Estimated pool value: *{safe_float(live.get('pool_value_egld')):,.6f} EGLD*",
+        f"Estimated pool value: *{fmt_egld(pool_value)}*",
+        f"≈ *{fmt_usd(pool_value * egld_usd)}*",
         "",
     ]
     if not holders:
         lines.append("No real-wallet LP holders found.")
     for idx, holder in enumerate(holders, start=1):
-        lines.append(
-            f"{idx}. `{str(holder.get('wallet'))}`\n"
-            f"   LP: *{safe_float(holder.get('lp_amount')):,.8f}*\n"
-            f"   Est. value: *{safe_float(holder.get('estimated_egld')):,.6f} EGLD*"
-        )
+        value_egld = safe_float(holder.get("estimated_egld"))
+        share_pct = (value_egld / pool_value * 100) if pool_value > 0 else 0.0
+        lines.extend([
+            f"{rank_emoji(idx)} *Wallet*",
+            f"`{short_wallet(str(holder.get('wallet')))}`",
+            "",
+            "LP Tokens:",
+            f"*{fmt_lp(holder.get('lp_amount'))}*",
+            "",
+            "Pool Share:",
+            f"*{fmt_pct(share_pct)}*",
+            "",
+            "Estimated Value:",
+            f"*{fmt_egld(value_egld)}*",
+            f"≈ *{fmt_usd(value_egld * egld_usd)}*",
+            "",
+        ])
     return "\n".join(lines)
 
 
@@ -2374,6 +2493,10 @@ def get_lp_leaderboard_text() -> str:
     snapshots = data.get("snapshots", [])
     if not snapshots:
         return "🏆 *Monthly LP Leaderboard*\n\nNo LP snapshots for the current month yet. Snapshots are saved on day 1, day 15 and the final day of each month."
+    reward_pool = get_last_lp_reward_pool()
+    reward_data = calculate_monthly_lp_rewards(reward_pool) if reward_pool > 0 else {"rows": data.get("rows", [])}
+    rewards = {str(r.get("wallet")): safe_float(r.get("reward_egld")) for r in reward_data.get("rows", [])}
+    egld_usd = get_egld_usd()
     lines = [
         "🏆 *Monthly LP Leaderboard*",
         f"Month: *{current_month_key()}*",
@@ -2381,12 +2504,24 @@ def get_lp_leaderboard_text() -> str:
         "",
     ]
     for idx, row in enumerate(data.get("rows", []), start=1):
-        lines.append(
-            f"{idx}. `{str(row.get('wallet'))}`\n"
-            f"   Avg LP: *{safe_float(row.get('average_lp')):,.8f}*\n"
-            f"   Avg value: *{safe_float(row.get('average_egld')):,.6f} EGLD*\n"
-            f"   Share: *{safe_float(row.get('share_pct')):.4f}%*"
-        )
+        avg_value = safe_float(row.get("average_egld"))
+        lines.extend([
+            f"{rank_emoji(idx)} *Wallet*",
+            f"`{short_wallet(str(row.get('wallet')))}`",
+            "",
+            "Average LP:",
+            f"*{fmt_lp(row.get('average_lp'))}*",
+            "",
+            "Average LP Value:",
+            f"*{fmt_egld(avg_value)}*",
+            f"≈ *{fmt_usd(avg_value * egld_usd)}*",
+            "",
+            "Average Share:",
+            f"*{fmt_pct(row.get('share_pct'))}*",
+        ])
+        if reward_pool > 0:
+            lines.extend(["", "Estimated Monthly Reward:", f"*{fmt_egld(rewards.get(str(row.get('wallet')), 0.0))}*"])
+        lines.append("")
     return "\n".join(lines)
 
 
