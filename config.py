@@ -157,6 +157,11 @@ PUBLIC_STATUS_PORT = int(os.getenv("PUBLIC_STATUS_PORT") or os.getenv("PORT") or
 TX_DETAILS_CACHE_TTL_SECONDS = int(os.getenv("TX_DETAILS_CACHE_TTL_SECONDS", "45"))
 ROOT_PROCESSING_CONCURRENCY = max(1, int(os.getenv("ROOT_PROCESSING_CONCURRENCY", "4")))
 
+USE_WEBHOOKS = os.getenv("USE_WEBHOOKS", "false").strip().lower() == "true"
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
+WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook").strip()
+WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "8443"))
+
 
 @dataclass(frozen=True)
 class Config:
@@ -170,12 +175,25 @@ class Config:
     group_chat_id: str = GROUP_CHAT_ID
     enable_private_alerts: bool = ENABLE_PRIVATE_ALERTS
     enable_group_alerts: bool = ENABLE_GROUP_ALERTS
+    use_webhooks: bool = USE_WEBHOOKS
+    webhook_url: str = WEBHOOK_URL
+    webhook_path: str = WEBHOOK_PATH
+    webhook_port: int = WEBHOOK_PORT
 
     def validate(self) -> None:
         if not self.telegram_bot_token:
             raise ValueError("TELEGRAM_BOT_TOKEN is missing")
         if not self.admin_telegram_id:
             raise ValueError("ADMIN_TELEGRAM_ID is missing")
+        if self.use_webhooks:
+            if not self.webhook_url:
+                raise ValueError("WEBHOOK_URL is required when USE_WEBHOOKS=true")
+            if not self.webhook_url.startswith(("https://", "http://")):
+                raise ValueError("WEBHOOK_URL must start with http:// or https:// when USE_WEBHOOKS=true")
+            if not self.webhook_path or not self.webhook_path.startswith("/"):
+                raise ValueError("WEBHOOK_PATH must start with / when USE_WEBHOOKS=true")
+            if not 1 <= self.webhook_port <= 65535:
+                raise ValueError("WEBHOOK_PORT must be between 1 and 65535 when USE_WEBHOOKS=true")
 
 
 CONFIG = Config()
@@ -190,6 +208,10 @@ SETTINGS: Dict[str, Any] = {
     "GROUP_CHAT_ID": GROUP_CHAT_ID,
     "ENABLE_PRIVATE_ALERTS": ENABLE_PRIVATE_ALERTS,
     "ENABLE_GROUP_ALERTS": ENABLE_GROUP_ALERTS,
+    "USE_WEBHOOKS": USE_WEBHOOKS,
+    "WEBHOOK_URL": WEBHOOK_URL,
+    "WEBHOOK_PATH": WEBHOOK_PATH,
+    "WEBHOOK_PORT": WEBHOOK_PORT,
 }
 
 
