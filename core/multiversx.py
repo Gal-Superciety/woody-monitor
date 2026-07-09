@@ -32,10 +32,37 @@ from config import *
 # =========================================================
 # LOGGING
 # =========================================================
-logging.basicConfig(
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    level=logging.INFO,
-)
+class JsonFormatter(logging.Formatter):
+    """Small structured logging formatter without external dependencies."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "ts": datetime.fromtimestamp(record.created, timezone.utc).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        reserved = set(logging.LogRecord("", 0, "", 0, "", (), None).__dict__)
+        extras = {key: value for key, value in record.__dict__.items() if key not in reserved and not key.startswith("_")}
+        if extras:
+            payload["extra"] = extras
+        if record.exc_info:
+            payload["exc_info"] = self.formatException(record.exc_info)
+        return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+def configure_logging() -> None:
+    root_logger = logging.getLogger()
+    if not any(getattr(handler.formatter, "_woody_json", False) for handler in root_logger.handlers):
+        handler = logging.StreamHandler()
+        formatter = JsonFormatter()
+        formatter._woody_json = True  # type: ignore[attr-defined]
+        handler.setFormatter(formatter)
+        root_logger.handlers = [handler]
+    root_logger.setLevel(logging.INFO)
+
+
+configure_logging()
 logger = logging.getLogger("WOODY_MONITOR_V2")
 
 # =========================================================
@@ -69,6 +96,9 @@ ROOT_PROCESSING_CONCURRENCY = max(1, int(os.getenv("ROOT_PROCESSING_CONCURRENCY"
 
 LAST_HOLDERS_COUNT: Optional[int] = None
 PENDING_HOLDER_VALUE: Optional[int] = None
+MVX_RATE_LIMIT_LOCK = threading.Lock()
+MVX_RATE_LIMIT_TOKENS = float(MVX_API_RATE_LIMIT_BURST)
+MVX_RATE_LIMIT_UPDATED_AT = time.monotonic()
 
 DATA_DIR = os.getenv("DATA_DIR", "data").strip()
 LAST_ALERTS_FILE = os.getenv("LAST_ALERTS_FILE", "data/last_alerts.json").strip()
@@ -280,6 +310,15 @@ def load_runtime_state() -> None:
 
 
 def validate_runtime_config() -> None:
+    validate_config()
+    if BIG_ALERT_USD < MIN_ALERT_USD:
+        raise ValueError("BIG_ALERT_USD must be greater than or equal to MIN_ALERT_USD")
+    if WHALE_ALERT_USD < BIG_ALERT_USD:
+        raise ValueError("WHALE_ALERT_USD must be greater than or equal to BIG_ALERT_USD")
+    if SUPER_WHALE_ALERT_USD < WHALE_ALERT_USD:
+        raise ValueError("SUPER_WHALE_ALERT_USD must be greater than or equal to WHALE_ALERT_USD")
+    if ROOT_MAX_AGE_SECONDS < ROOT_SETTLE_SECONDS:
+        raise ValueError("ROOT_MAX_AGE_SECONDS must be greater than or equal to ROOT_SETTLE_SECONDS")
     if not ROUTER_ADDRESS:
         logger.warning("CONFIG WARNING | ROUTER_ADDRESS is empty; routed swap SELL detection may misidentify real wallet and miss quote recovery")
     if USE_WEBHOOKS:
@@ -292,9 +331,35 @@ def validate_runtime_config() -> None:
         if not 1 <= WEBHOOK_PORT <= 65535:
             raise ValueError("WEBHOOK_PORT must be between 1 and 65535 when USE_WEBHOOKS=true")
 
+def _is_mvx_api_url(url: str) -> bool:
+    return bool(url and MVX_API and url.startswith(MVX_API.rstrip("/") + "/"))
+
+
+def _wait_for_mvx_rate_limit() -> None:
+    global MVX_RATE_LIMIT_TOKENS, MVX_RATE_LIMIT_UPDATED_AT
+    while True:
+        with MVX_RATE_LIMIT_LOCK:
+            now = time.monotonic()
+            elapsed = max(0.0, now - MVX_RATE_LIMIT_UPDATED_AT)
+            MVX_RATE_LIMIT_TOKENS = min(
+                float(MVX_API_RATE_LIMIT_BURST),
+                MVX_RATE_LIMIT_TOKENS + (elapsed * float(MVX_API_RATE_LIMIT_PER_SECOND)),
+            )
+            MVX_RATE_LIMIT_UPDATED_AT = now
+            if MVX_RATE_LIMIT_TOKENS >= 1.0:
+                MVX_RATE_LIMIT_TOKENS -= 1.0
+                return
+            wait_seconds = (1.0 - MVX_RATE_LIMIT_TOKENS) / float(MVX_API_RATE_LIMIT_PER_SECOND)
+        logger.debug("MVX API rate limit wait", extra={"wait_seconds": wait_seconds})
+        time.sleep(min(max(wait_seconds, 0.01), 1.0))
+
+
 def get_json(url: str, params: Optional[dict] = None) -> Optional[Any]:
     global API_OK_COUNT, API_FAIL_COUNT, LAST_API_ERROR
     try:
+        if _is_mvx_api_url(url):
+            _wait_for_mvx_rate_limit()
+        logger.debug("HTTP GET", extra={"url": url, "params": params})
         r = requests.get(url, params=params, headers=UA, timeout=API_TIMEOUT_SECONDS)
         r.raise_for_status()
         API_OK_COUNT += 1
@@ -309,6 +374,9 @@ def get_json(url: str, params: Optional[dict] = None) -> Optional[Any]:
 def post_json(url: str, payload: dict) -> Optional[Any]:
     global API_OK_COUNT, API_FAIL_COUNT, LAST_API_ERROR
     try:
+        if _is_mvx_api_url(url):
+            _wait_for_mvx_rate_limit()
+        logger.debug("HTTP POST", extra={"url": url})
         r = requests.post(url, json=payload, headers=UA, timeout=API_TIMEOUT_SECONDS)
         r.raise_for_status()
         API_OK_COUNT += 1
@@ -4201,14 +4269,39 @@ async def lp_snapshot_job(_: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as e:
         logger.warning("Failed to save LP snapshot: %s", e)
 
+def log_startup_settings() -> None:
+    safe_settings = {
+        "mvx_api": MVX_API,
+        "ws_url": WS_URL,
+        "woody_token_id": WOODY,
+        "wegld_token_id": WEGLD,
+        "enable_private_alerts": ENABLE_PRIVATE_ALERTS,
+        "enable_group_alerts": ENABLE_GROUP_ALERTS,
+        "use_webhooks": USE_WEBHOOKS,
+        "webhook_path": WEBHOOK_PATH if USE_WEBHOOKS else "disabled",
+        "webhook_port": WEBHOOK_PORT if USE_WEBHOOKS else "disabled",
+        "api_timeout_seconds": API_TIMEOUT_SECONDS,
+        "mvx_api_rate_limit_per_second": MVX_API_RATE_LIMIT_PER_SECOND,
+        "mvx_api_rate_limit_burst": MVX_API_RATE_LIMIT_BURST,
+        "check_holders_interval": CHECK_HOLDERS_INTERVAL,
+        "public_status_host": PUBLIC_STATUS_HOST,
+        "public_status_port": PUBLIC_STATUS_PORT,
+        "public_status_interval": PUBLIC_STATUS_INTERVAL,
+        "root_processing_concurrency": ROOT_PROCESSING_CONCURRENCY,
+        "watched_pools": len(WATCHED_POOLS),
+    }
+    logger.info("Startup settings loaded | %s", json.dumps(safe_settings, sort_keys=True))
+
+
 # =========================================================
 # MAIN
 # =========================================================
 def main() -> None:
     if not TOKEN:
         raise ValueError("TELEGRAM_BOT_TOKEN is missing")
-    load_runtime_state()
     validate_runtime_config()
+    log_startup_settings()
+    load_runtime_state()
 
     async def post_init(application: Application) -> None:
         global WS_STOP_EVENT, WS_TASK, PUBLIC_HTTP_THREAD
