@@ -644,3 +644,41 @@ def test_lp_reports_use_short_wallets_and_fixed_decimals(monkeypatch) -> None:
     assert "21.6612 EGLD" in text
     assert "$65.20" in text
     assert "97.19%" in text
+
+
+def test_known_woody_lp_tokens_are_detected_as_lp_tokens() -> None:
+    expected = {
+        "WOODYWEGLD-9832b2",
+        "WOODYBOBER-1a1703",
+        "WOODYONE-826f23",
+        "WOODYUSDC-56b519",
+        "WOODYWEGLD-5c3558",
+        "WOODYMEX-12e1aa",
+    }
+    assert expected.issubset(main.LP_TOKEN_IDS)
+    for token in expected:
+        assert main.is_lp_token(token)
+
+
+def test_liquidity_detection_uses_known_lp_token_without_lp_symbol() -> None:
+    wallet = "erd1userwallet0000000000000000000000000000000000000000000000000"
+    pool = main.ONEDEX_POOL_ADDRESS
+    tx = {
+        "txHash": "lp-add-onedex",
+        "sender": wallet,
+        "receiver": pool,
+        "function": "addLiquidity",
+        "operations": [
+            {"identifier": main.WOODY, "value": str(100 * 10**18), "decimals": 18, "sender": wallet, "receiver": pool},
+            {"identifier": "WOODYWEGLD-9832b2", "value": str(10 * 10**18), "decimals": 18, "sender": pool, "receiver": wallet},
+            {"identifier": main.WEGLD, "value": str(1 * 10**18), "decimals": 18, "sender": wallet, "receiver": pool},
+        ],
+    }
+
+    parsed = main.classify_tx(tx)
+
+    assert parsed is not None
+    assert parsed["type"] == "LIQUIDITY_ADDED"
+    assert parsed["dex"] == "OneDex"
+    assert parsed["quote_token"] == main.WEGLD
+    assert parsed["quote_amount"] == 1

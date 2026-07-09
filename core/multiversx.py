@@ -128,6 +128,8 @@ WATCHED_POOLS = {
     WOODY_MEX_POOL_ADDRESS: "WOODY/MEX",
 }
 WATCHED_POOLS = {k: v for k, v in WATCHED_POOLS.items() if k}
+LP_TOKEN_IDS: Set[str] = {str(pool.get("lp_token") or "").strip() for pool in LP_POOLS if str(pool.get("lp_token") or "").strip()}
+LP_TOKEN_LABELS: Dict[str, str] = {str(pool.get("lp_token") or "").strip(): f"{pool.get('dex', '?')} {pool.get('name', '?')}" for pool in LP_POOLS if str(pool.get("lp_token") or "").strip()}
 POOL_PAIR_HINTS = {
     XEXCHANGE_POOL_ADDRESS: WEGLD,
     ONEDEX_POOL_ADDRESS: WEGLD,
@@ -136,6 +138,11 @@ POOL_PAIR_HINTS = {
     WOODY_JEX_POOL_ADDRESS: JEX,
     WOODY_MEX_POOL_ADDRESS: MEX,
 }
+for _pool in LP_POOLS:
+    _addr = str(_pool.get("pair_address") or "").strip()
+    _quote = str(_pool.get("quote_token") or "").strip()
+    if _addr and _quote:
+        POOL_PAIR_HINTS.setdefault(_addr, _quote)
 
 MARKET_CONTEXT_TOKENS: List[Tuple[str, str]] = [
     ("EGLD", WEGLD),
@@ -2925,7 +2932,17 @@ def detect_pool_dex(tx: dict) -> str:
         if pool_addr in addresses:
             return label
 
+    for lp_token, label in LP_TOKEN_LABELS.items():
+        if tx_contains_token(tx, lp_token):
+            return label
+
     return "Unknown"
+
+
+def is_lp_token(token: str) -> bool:
+    token_id = str(token or "").strip()
+    token_symbol = symbol(token_id).upper()
+    return token_id in LP_TOKEN_IDS or "LP" in token_symbol or any(token_id.upper() == lp.upper() for lp in LP_TOKEN_IDS)
 
 
 def pick_real_wallet_candidates(tx: dict) -> List[str]:
@@ -3258,6 +3275,8 @@ def is_quote_token(token: str) -> bool:
         JEX.upper(),
         MEX.upper(),
         BOBER.upper(),
+        ONE.upper(),
+        USDC_HINT.upper(),
         "ONE",
     }
     return (
@@ -3335,7 +3354,7 @@ def token_usd_estimate(token: str, amount: float) -> float:
 
 def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
     root_hash = tx.get("txHash") or tx.get("originalTxHash") or ""
-    woody_present = tx_contains_token(tx, WOODY)
+    woody_present = tx_contains_token(tx, WOODY) or any(tx_contains_token(tx, lp_token) for lp_token in LP_TOKEN_IDS)
     if not woody_present:
         logger.info(
             "TX DEBUG | root=%s WOODY_PRESENT=false CLASSIFIED_AS=NONE SKIP_REASON=SKIP_NON_WOODY_TX",
@@ -3444,25 +3463,31 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
         has_lp_burn = any(k in blob for k in ["lp burn", "burnlp", "burn-lp", "burn_lp", "esdtlocalburn"])
         egld_sent = sum(v for t, v in quote_sent.items() if symbol(t).upper() in {"WEGLD", "EGLD", "XEGLD"})
         egld_received = sum(v for t, v in quote_received.items() if symbol(t).upper() in {"WEGLD", "EGLD", "XEGLD"})
-        lp_sent = sum(v for t, v in sent.items() if "LP" in symbol(t).upper())
-        lp_received = sum(v for t, v in received.items() if "LP" in symbol(t).upper())
+        lp_sent = sum(v for t, v in sent.items() if is_lp_token(t))
+        lp_received = sum(v for t, v in received.items() if is_lp_token(t))
+        quote_sent_any = sum(quote_sent.values())
+        quote_received_any = sum(quote_received.values())
 
-        if has_add or has_lp_mint or (woody_sent > 0 and egld_sent > 0 and lp_received > 0):
+        if has_add or has_lp_mint or (woody_sent > 0 and quote_sent_any > 0 and lp_received > 0):
             return "LIQUIDITY_ADDED"
-        if has_remove or has_lp_burn or (lp_sent > 0 and woody_received > 0 and egld_received > 0):
+        if has_remove or has_lp_burn or (lp_sent > 0 and woody_received > 0 and quote_received_any > 0):
             return "LIQUIDITY_REMOVED"
         return None
 
     liquidity_type = liquidity_kind()
     if liquidity_type:
         if liquidity_type == "LIQUIDITY_ADDED":
-            egld_amount = sum(amount for token, amount in quote_sent.items() if symbol(token).upper() in {"WEGLD", "EGLD", "XEGLD"})
+            quote_flows = quote_sent
             woody_amount = woody_sent
         else:
-            egld_amount = sum(amount for token, amount in quote_received.items() if symbol(token).upper() in {"WEGLD", "EGLD", "XEGLD"})
+            quote_flows = quote_received
             woody_amount = woody_received
+        quote_token, quote_amount = ("", 0.0)
+        if quote_flows:
+            quote_token, quote_amount = sorted(quote_flows.items(), key=lambda x: x[1], reverse=True)[0]
+        egld_amount = sum(amount for token, amount in quote_flows.items() if symbol(token).upper() in {"WEGLD", "EGLD", "XEGLD"})
 
-        if woody_amount <= 0 or egld_amount <= 0:
+        if woody_amount <= 0 or quote_amount <= 0:
             logger.info(
                 "TX DEBUG | root=%s WOODY_PRESENT=true REAL_WALLET=%s WOODY_SENT=%s WOODY_RECEIVED=%s QUOTE_SENT=%s QUOTE_RECEIVED=%s CLASSIFIED_AS=NONE SKIP_REASON=INVALID_LIQUIDITY_SIDES",
                 root_hash, wallet, woody_sent, woody_received, sum(quote_sent.values()), sum(quote_received.values())
@@ -3474,6 +3499,8 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
             "wallet": wallet,
             "woody_amount": woody_amount,
             "egld_amount": egld_amount,
+            "quote_token": quote_token,
+            "quote_amount": quote_amount,
             "dex": dex,
             "root_hash": root_hash,
         }
@@ -3610,7 +3637,7 @@ def build_message(parsed: Dict[str, Any]) -> str:
         return (
             "🪶 *WOODY Monitor V2*\n"
             f"{choose_title(parsed)}\n\n"
-            f"🪙 *EGLD:* `{safe_float(parsed.get('egld_amount', 0.0)):,.6f}`\n"
+            f"💱 *Quote:* `{safe_float(parsed.get('quote_amount', parsed.get('egld_amount', 0.0))):,.6f} {symbol(parsed.get('quote_token') or 'EGLD')}`\n"
             f"🪶 *WOODY:* `{safe_float(parsed.get('woody_amount', 0.0)):,.4f}`\n"
             f"🏦 *Pool:* `{parsed.get('dex', 'Unknown')}`\n"
             f"👤 *Wallet:* `{short_wallet(parsed.get('wallet', ''))}`\n"
@@ -3670,6 +3697,14 @@ async def _send_subscriptions(sio: socketio.AsyncClient) -> None:
             logger.info("WS SUBSCRIBE | Address subscription sent for pool %s", pool)
         except Exception as exc:
             logger.warning("WS SUBSCRIBE | Address subscription failed for pool %s -> %s", pool, exc)
+
+    for lp_token in LP_TOKEN_IDS:
+        logger.info("WS SUBSCRIBE | Sending LP token subscription for %s", lp_token)
+        try:
+            await sio.emit("subscribeCustomTransfers", {"token": lp_token})
+            logger.info("WS SUBSCRIBE | LP token subscription sent for %s", lp_token)
+        except Exception as exc:
+            logger.warning("WS SUBSCRIBE | LP token subscription failed for %s -> %s", lp_token, exc)
 
 
 def _extract_root_hashes(data: Any) -> List[str]:
