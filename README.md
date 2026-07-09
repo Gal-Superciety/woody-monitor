@@ -1,7 +1,100 @@
 # woody-monitor
+
 WOODY Monitor Bot – Telegram bot that tracks WOODY token swaps, big buys, big sells, liquidity changes and new holders on the MultiversX blockchain.
 
+## Installation & Setup
+
+1. **Clonează repository-ul și intră în proiect.**
+   ```bash
+   git clone <repo-url>
+   cd woody-monitor
+   ```
+2. **Creează un mediu Python izolat.**
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   ```
+3. **Instalează dependențele.**
+   ```bash
+   pip install -r requirements.txt
+   ```
+4. **Creează configurația locală.**
+   ```bash
+   cp .env.example .env
+   ```
+5. **Editează `.env`.** Setează obligatoriu `TELEGRAM_BOT_TOKEN` și, pentru meniul privat complet, `ADMIN_TELEGRAM_ID`. Completează `TELEGRAM_PRIVATE_CHAT_ID` și/sau `TELEGRAM_GROUP_CHAT_ID` în funcție de unde vrei alertele.
+6. **Pornește botul.**
+   ```bash
+   python main.py
+   ```
+7. **Verifică runtime-ul în Telegram.** Rulează `/status` ca admin ca să confirmi conexiunea, destinațiile de alerte și eventualele avertizări.
+
+## Docker
+
+Repository-ul nu include încă un `Dockerfile`, dar aplicația este pregătită pentru rulare containerizată prin variabile de mediu.
+
+### Variantă recomandată după adăugarea unui Dockerfile
+
+1. Creează `.env` din `.env.example` și completează secretele.
+2. Construiește imaginea:
+   ```bash
+   docker build -t woody-monitor .
+   ```
+3. Rulează containerul:
+   ```bash
+   docker run --rm --env-file .env -p 8080:8080 -v "$(pwd)/data:/app/data" woody-monitor
+   ```
+
+### Exemplu minimal de Dockerfile viitor
+
+```dockerfile
+FROM python:3.12-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
+CMD ["python", "main.py"]
+```
+
+### Notă pentru Docker Compose
+
+Când se adaugă `docker-compose.yml`, montează `./data` ca volum persistent și pasează `.env` prin `env_file`. Expune portul `PUBLIC_STATUS_PORT` dacă folosești endpoint-ul public de status.
+
+## Environment variables
+
+Toate variabilele cunoscute sunt listate în `.env.example`. Cele mai importante sunt:
+
+| Variabilă | Descriere |
+| --- | --- |
+| `TELEGRAM_BOT_TOKEN` | Tokenul botului Telegram primit de la BotFather. Obligatoriu. |
+| `ADMIN_TELEGRAM_ID` | User ID Telegram care primește meniul privat complet de administrare. |
+| `TELEGRAM_PRIVATE_CHAT_ID` | Chat ID pentru alerte private. Necesită `ENABLE_PRIVATE_ALERTS=true`. |
+| `TELEGRAM_GROUP_CHAT_ID` | Chat ID pentru grup/supergroup. De obicei începe cu `-100`. Necesită `ENABLE_GROUP_ALERTS=true`. |
+| `ENABLE_PRIVATE_ALERTS` | Activează/dezactivează trimiterea alertelor în privat (`true`/`false`). |
+| `ENABLE_GROUP_ALERTS` | Activează/dezactivează trimiterea alertelor în grup (`true`/`false`). |
+| `MVX_API` | Endpoint REST MultiversX folosit pentru tranzacții, tokenuri, conturi și VM queries. |
+| `WS_URL` | Endpoint WebSocket MultiversX pentru evenimente live. |
+| `COINGECKO_EGLD_API`, `BINANCE_EGLD_PRICE_API`, `COINBASE_EGLD_SPOT_API` | Surse pentru prețul EGLD/USD și fallback-uri. |
+| `WOODY_TOKEN_ID`, `WEGLD_TOKEN_ID`, `USDC_TOKEN_HINT`, `JEX_TOKEN_ID`, `MEX_TOKEN_ID`, `BOBER_TOKEN_ID`, `ONE_TOKEN_ID` | Identificatori de token folosiți pentru clasificare, prețuri și context de piață. |
+| `ROUTER_ADDRESS` | Adresa routerului DEX tratată ca adresă tehnică. |
+| `XEXCHANGE_POOL_ADDRESS`, `ONEDEX_POOL_ADDRESS`, `WOODY_USDC_POOL_ADDRESS`, `WOODY_BOBER_POOL_ADDRESS`, `WOODY_JEX_POOL_ADDRESS`, `WOODY_MEX_POOL_ADDRESS`, `WOODY_OLV_POOL_ADDRESS` | Adresele pool-urilor monitorizate pentru preț, lichiditate și LP snapshots. |
+| `XEXCHANGE_LP_TOKEN_ID` | LP token ID manual pentru WOODY/EGLD xExchange; util când autodetectarea prin VM query nu este disponibilă. |
+| `ONEDEX_BURN_ADDRESS` | Adresă tehnică/burn OneDex ignorată în clasificări. |
+| `EXTRA_TECHNICAL_ADDRESSES` | Listă separată prin virgule cu adrese tehnice suplimentare de exclus din detecția walleturilor reale. |
+| `PRICE_URL`, `CHART_URL`, `TWITTER_URL`, `BUY_XEXCHANGE_URL`, `BUY_XOXNO_URL` | Linkuri afișate în meniuri și mesaje Telegram. |
+| `BANNER_IMAGE`, `BUY_IMAGE`, `SELL_IMAGE`, `BIG_BUY_IMAGE`, `BIG_SELL_IMAGE`, `NEW_HOLDER_IMAGE` | Fișiere imagine folosite în alerte și meniuri. |
+| `MIN_ALERT_USD`, `BIG_ALERT_USD`, `WHALE_ALERT_USD`, `SUPER_WHALE_ALERT_USD` | Praguri USD pentru alerte normale, mari, whale și super-whale. |
+| `ROOT_SETTLE_SECONDS`, `ROOT_MAX_AGE_SECONDS`, `ROOT_PROCESSING_CONCURRENCY` | Controlează agregarea și procesarea tranzacțiilor root. |
+| `CHECK_HOLDERS_INTERVAL`, `WS_RECONNECT_DELAY`, `API_TIMEOUT_SECONDS` | Interval pentru verificarea holderilor, delay de reconectare WebSocket și timeout HTTP. |
+| `PRICE_TTL_SECONDS`, `POOL_SNAPSHOT_TTL_SECONDS`, `EGLD_PRICE_SOFT_TTL_SECONDS`, `EGLD_PRICE_HARD_TTL_SECONDS`, `TX_DETAILS_CACHE_TTL_SECONDS` | TTL-uri pentru cache-uri de preț, pool, EGLD și detalii tranzacții. |
+| `LP_HOLDERS_PAGE_SIZE`, `LP_HOLDERS_MAX_PAGES` | Paginarea citirii holderilor LP din API. |
+| `LP_SNAPSHOT_CHECK_INTERVAL`, `LP_SNAPSHOT_FILE`, `LP_REWARDS_FILE`, `LP_EXPORT_REWARD_POOL_EGLD` | Configurarea snapshot-urilor LP, fișierului de recompense și fondului implicit pentru export CSV. |
+| `GLOBAL_LP_DUST_EGLD` | Prag minim EGLD estimat sub care pozițiile LP globale sunt ignorate ca dust. |
+| `DATA_DIR`, `LAST_ALERTS_FILE`, `TOP_VOLUME_FILE`, `VOLUME_HISTORY_FILE`, `ROOT_CACHE_FILE` | Locații pentru date persistente locale. |
+| `PUBLIC_STATUS_FILE`, `PUBLIC_STATUS_INTERVAL`, `PUBLIC_STATUS_HOST`, `PUBLIC_STATUS_PORT`, `PORT` | Configurarea statusului public HTTP/JSON; `PORT` este util pe platforme PaaS, iar `PUBLIC_STATUS_PORT` are prioritate. |
+
 ## Alerte și în grupul de Telegram (nu doar privat)
+
 Botul suportă trimiterea alertelor în **două destinații în paralel**: chat privat și grup.
 
 Setează variabilele de mediu astfel:
@@ -17,18 +110,20 @@ ADMIN_TELEGRAM_ID=123456789
 TELEGRAM_PRIVATE_CHAT_ID=123456789
 ENABLE_PRIVATE_ALERTS=true
 
-# Grup (nou)
+# Grup
 TELEGRAM_GROUP_CHAT_ID=-1001234567890
 ENABLE_GROUP_ALERTS=true
 ```
 
 ### Pași rapizi
+
 1. Adaugă botul în grupul de Telegram.
 2. Dă-i dreptul de a trimite mesaje în grup.
 3. Ia `chat_id`-ul grupului (de regulă începe cu `-100...`).
 4. Pune valorile în `.env` și repornește botul.
 
 ### Verificare în runtime
+
 La pornire, comanda `/status` îți arată dacă sunt active:
 - `Private alerts: ON/OFF`
 - `Group alerts: ON/OFF`
