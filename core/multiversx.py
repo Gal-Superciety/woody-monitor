@@ -282,6 +282,15 @@ def load_runtime_state() -> None:
 def validate_runtime_config() -> None:
     if not ROUTER_ADDRESS:
         logger.warning("CONFIG WARNING | ROUTER_ADDRESS is empty; routed swap SELL detection may misidentify real wallet and miss quote recovery")
+    if USE_WEBHOOKS:
+        if not WEBHOOK_URL:
+            raise ValueError("WEBHOOK_URL is required when USE_WEBHOOKS=true")
+        if not WEBHOOK_URL.startswith(("https://", "http://")):
+            raise ValueError("WEBHOOK_URL must start with http:// or https:// when USE_WEBHOOKS=true")
+        if not WEBHOOK_PATH or not WEBHOOK_PATH.startswith("/"):
+            raise ValueError("WEBHOOK_PATH must start with / when USE_WEBHOOKS=true")
+        if not 1 <= WEBHOOK_PORT <= 65535:
+            raise ValueError("WEBHOOK_PORT must be between 1 and 65535 when USE_WEBHOOKS=true")
 
 def get_json(url: str, params: Optional[dict] = None) -> Optional[Any]:
     global API_OK_COUNT, API_FAIL_COUNT, LAST_API_ERROR
@@ -4261,8 +4270,24 @@ def main() -> None:
     app.job_queue.run_repeating(dashboard_status_job, interval=PUBLIC_STATUS_INTERVAL, first=10)
     app.job_queue.run_repeating(lp_snapshot_job, interval=LP_SNAPSHOT_CHECK_INTERVAL, first=30)
 
-    logger.info("WOODY Monitor V2 started...")
-    app.run_polling(drop_pending_updates=True)
+    if USE_WEBHOOKS:
+        webhook_url = f"{WEBHOOK_URL.rstrip('/')}{WEBHOOK_PATH}"
+        logger.info(
+            "WOODY Monitor V2 started in webhook mode | url=%s path=%s port=%s",
+            webhook_url,
+            WEBHOOK_PATH,
+            WEBHOOK_PORT,
+        )
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=WEBHOOK_PORT,
+            url_path=WEBHOOK_PATH.lstrip("/"),
+            webhook_url=webhook_url,
+            drop_pending_updates=True,
+        )
+    else:
+        logger.info("WOODY Monitor V2 started in polling mode...")
+        app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
