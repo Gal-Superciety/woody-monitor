@@ -31,9 +31,9 @@ WOODY Monitor Bot – Telegram bot that tracks WOODY token swaps, big buys, big 
 
 ## Docker
 
-Repository-ul nu include încă un `Dockerfile`, dar aplicația este pregătită pentru rulare containerizată prin variabile de mediu.
+Repository-ul include un `Dockerfile` multi-stage și un `.dockerignore` pentru rulare containerizată sigură prin variabile de mediu.
 
-### Variantă recomandată după adăugarea unui Dockerfile
+### Variantă recomandată
 
 1. Creează `.env` din `.env.example` și completează secretele.
 2. Construiește imaginea:
@@ -45,14 +45,57 @@ Repository-ul nu include încă un `Dockerfile`, dar aplicația este pregătită
    docker run --rm --env-file .env -p 8080:8080 -v "$(pwd)/data:/app/data" woody-monitor
    ```
 
-### Exemplu minimal de Dockerfile viitor
+### `.dockerignore`
+
+Build-ul Docker folosește `.dockerignore` pentru a exclude secretele locale, fișierele Git, cache-urile Python, documentația și directoarele de editor din contextul trimis către daemon. Verifică acest fișier înainte de build ca să nu incluzi accidental `.env` sau alte fișiere locale sensibile în imagine.
+
+### Dockerfile recomandat
+
+Repository-ul include un `Dockerfile` multi-stage care:
+- instalează dependențele într-un virtualenv separat în etapa `builder`;
+- copiază virtualenv-ul în imaginea finală `python:3.12-slim`;
+- rulează aplicația cu user non-root `app`;
+- creează `/app/data` pentru fișiere persistente, recomandat de montat ca volum.
 
 ```dockerfile
-FROM python:3.12-slim
+# syntax=docker/dockerfile:1
+
+FROM python:3.12-slim AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
 WORKDIR /app
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-COPY . .
+RUN pip install --upgrade pip \
+    && pip install -r requirements.txt
+
+FROM python:3.12-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:$PATH" \
+    DATA_DIR=/app/data
+
+WORKDIR /app
+
+RUN addgroup --system app \
+    && adduser --system --ingroup app --home /app app \
+    && mkdir -p /app/data \
+    && chown -R app:app /app
+
+COPY --from=builder /opt/venv /opt/venv
+COPY --chown=app:app . .
+
+USER app
+
+EXPOSE 8080
+
 CMD ["python", "main.py"]
 ```
 
