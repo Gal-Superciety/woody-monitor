@@ -205,3 +205,11 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# WOODY Monitor local/runtime files
+.env.*
+!.env.example
+public/woody-monitor-status.json
+*.pid
+*.tmp
+.DS_Store
