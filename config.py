@@ -137,6 +137,12 @@ ONEDEX_BURN_ADDRESS = os.getenv(
 PRICE_URL = os.getenv("PRICE_URL", "https://e-compass.io/token/WOODY-5f9d9c").strip()
 CHART_URL = os.getenv("CHART_URL", PRICE_URL).strip()
 TWITTER_URL = os.getenv("TWITTER_URL", "https://x.com/WOODY_EX").strip()
+ENABLE_X_OFFICIAL_ALERTS = _env_bool("ENABLE_X_OFFICIAL_ALERTS", False)
+X_BEARER_TOKEN = os.getenv("X_BEARER_TOKEN", "").strip()
+X_OFFICIAL_USERNAME = os.getenv("X_OFFICIAL_USERNAME", "WOODY_EX").strip().lstrip("@")
+X_POST_CHECK_INTERVAL = _env_int("X_POST_CHECK_INTERVAL", 120, min_value=60)
+X_POST_STATE_FILE = os.getenv("X_POST_STATE_FILE", "data/processed_x_posts.json").strip()
+X_POST_MAX_RESULTS = _env_int("X_POST_MAX_RESULTS", 10, min_value=5, max_value=100)
 BUY_XEXCHANGE_URL = os.getenv(
     "BUY_XEXCHANGE_URL",
     "https://xexchange.com/trade?firstToken=EGLD&secondToken=WOODY-5f9d9c",
