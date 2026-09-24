@@ -61,6 +61,10 @@ def configure_logging() -> None:
         handler.setFormatter(formatter)
         root_logger.handlers = [handler]
     root_logger.setLevel(logging.INFO)
+    # httpx logs full request URLs. Telegram Bot API embeds the bot token in
+    # the URL path, so INFO-level request logging would leak credentials.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 configure_logging()
