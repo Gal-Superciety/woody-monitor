@@ -2718,109 +2718,73 @@ def is_public_menu_context(chat_type: Optional[str], user_id: Optional[int]) -> 
     return True
 
 
+def _menu_keyboard(rows: List[List[InlineKeyboardButton]]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(rows)
+
+
 def public_menu_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("💰 Price", callback_data="price"),
-            InlineKeyboardButton("💧 Liquidity", callback_data="liquidity"),
-        ],
-        [
-            InlineKeyboardButton("🪙 LP Holders", callback_data="lp_holders"),
-            InlineKeyboardButton("🏆 LP Leaderboard", callback_data="lp_leaderboard"),
-        ],
-        [
-            InlineKeyboardButton("📸 LP Snapshots", callback_data="lp_snapshots"),
-            InlineKeyboardButton("🎁 LP Rewards", callback_data="lp_rewards"),
-            InlineKeyboardButton("📄 LP Export", callback_data="lp_export"),
-        ],
-        [
-            InlineKeyboardButton("👥 Holders", callback_data="holders"),
-            InlineKeyboardButton("📊 Chart", url=CHART_URL),
-        ],
-        [
-            InlineKeyboardButton("🟢 Buy xExchange", url=BUY_XEXCHANGE_URL),
-            InlineKeyboardButton("🟢 Buy XOXNO", url=BUY_XOXNO_URL),
-        ],
-        [
-            InlineKeyboardButton("𝕏 Twitter", url=TWITTER_URL),
-        ],
-        [
-            InlineKeyboardButton("🧠 AI Core", callback_data="ai_status"),
-            InlineKeyboardButton("🧠 AI Analysis", callback_data="ai_analysis"),
-            InlineKeyboardButton("🧭 AI Signal", callback_data="ai_recommendation"),
-        ],
-        [
-            InlineKeyboardButton("📈 Summary", callback_data="market_summary"),
-            InlineKeyboardButton("🌍 Context", callback_data="market_context"),
-        ],
-        [
-            InlineKeyboardButton("⚠️ Risk Radar", callback_data="risk_radar"),
-            InlineKeyboardButton("🧠 Market Pulse", callback_data="market_pulse"),
-        ],
+    return _menu_keyboard([
+        [InlineKeyboardButton("📊 Market", callback_data="menu_market")],
+        [InlineKeyboardButton("💧 LP & Rewards", callback_data="menu_lp")],
+        [InlineKeyboardButton("🧠 AI & Insights", callback_data="menu_ai")],
+        [InlineKeyboardButton("📈 Chart", url=CHART_URL)],
+        [InlineKeyboardButton("🟢 Buy WOODY", url=BUY_XEXCHANGE_URL)],
+        [InlineKeyboardButton("𝕏 Twitter", url=TWITTER_URL)],
     ])
 
 
 def main_menu_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("💰 Price", callback_data="price"),
-            InlineKeyboardButton("💧 Liquidity", callback_data="liquidity"),
-        ],
-        [
-            InlineKeyboardButton("👥 Holders", callback_data="holders"),
-            InlineKeyboardButton("🏆 Top Holders", callback_data="top_holders"),
-        ],
-        [
-            InlineKeyboardButton("🟢 Last Buy", callback_data="last_buy"),
-            InlineKeyboardButton("🔴 Last Sell", callback_data="last_sell"),
-        ],
-        [
-            InlineKeyboardButton("📊 Volume 24h", callback_data="volume_24h"),
-            InlineKeyboardButton("🔥 Top Volume", callback_data="top_volume"),
-        ],
-        [
-            InlineKeyboardButton("📈 Chart", url=CHART_URL),
-            InlineKeyboardButton("📦 Pools", callback_data="pools"),
-        ],
-        [
-            InlineKeyboardButton("🪙 LP Holders", callback_data="lp_holders"),
-            InlineKeyboardButton("🏆 LP Leaderboard", callback_data="lp_leaderboard"),
-        ],
-        [
-            InlineKeyboardButton("📸 LP Snapshots", callback_data="lp_snapshots"),
-            InlineKeyboardButton("🎁 LP Rewards", callback_data="lp_rewards"),
-            InlineKeyboardButton("📄 LP Export", callback_data="lp_export"),
-        ],
-        [
-            InlineKeyboardButton("🟢 Buy xExchange", url=BUY_XEXCHANGE_URL),
-            InlineKeyboardButton("🟢 Buy XOXNO", url=BUY_XOXNO_URL),
-        ],
-        [
-            InlineKeyboardButton("🧠 AI Core", callback_data="ai_status"),
-            InlineKeyboardButton("🧪 Diagnostics", callback_data="diagnostics"),
-            InlineKeyboardButton("🧭 AI Signal", callback_data="ai_recommendation"),
-        ],
-        [
-            InlineKeyboardButton("🧠 Wallet Intel", callback_data="wallet_intelligence"),
-            InlineKeyboardButton("🧠 Accumulation", callback_data="accumulation_detection"),
-        ],
-        [
-            InlineKeyboardButton("📈 Summary", callback_data="market_summary"),
-            InlineKeyboardButton("🧠 AI Analysis", callback_data="ai_analysis"),
-            InlineKeyboardButton("🌍 Context", callback_data="market_context"),
-        ],
-        [
-            InlineKeyboardButton("⚠️ Risk Radar", callback_data="risk_radar"),
-            InlineKeyboardButton("🧠 Market Pulse", callback_data="market_pulse"),
-        ],
-        [
-            InlineKeyboardButton("⚠️ Fake Pump", callback_data="fake_pump_detection"),
-        ],
-        [
-            InlineKeyboardButton("𝕏 Twitter", url=TWITTER_URL),
-        ],
+    return _menu_keyboard([
+        [InlineKeyboardButton("📊 Market", callback_data="menu_market")],
+        [InlineKeyboardButton("💧 LP & Rewards", callback_data="menu_lp")],
+        [InlineKeyboardButton("🧠 AI & Insights", callback_data="menu_ai")],
+        [InlineKeyboardButton("🔐 Admin Tools", callback_data="menu_admin")],
+        [InlineKeyboardButton("📈 Chart", url=CHART_URL)],
+        [InlineKeyboardButton("🟢 Buy WOODY", url=BUY_XEXCHANGE_URL), InlineKeyboardButton("🟢 XOXNO", url=BUY_XOXNO_URL)],
+        [InlineKeyboardButton("𝕏 Twitter", url=TWITTER_URL)],
     ])
 
+
+def market_menu_keyboard(is_public: bool = True) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton("💰 Price", callback_data="price"), InlineKeyboardButton("💧 Liquidity", callback_data="liquidity")],
+        [InlineKeyboardButton("👥 Holders", callback_data="holders"), InlineKeyboardButton("📦 Pools", callback_data="pools")],
+        [InlineKeyboardButton("📊 Volume 24h", callback_data="volume_24h")],
+        [InlineKeyboardButton("📈 Chart", url=CHART_URL), InlineKeyboardButton("🟢 Buy", url=BUY_XEXCHANGE_URL)],
+        [InlineKeyboardButton("◀️ Back", callback_data="menu_back")],
+    ]
+    if not is_public:
+        rows.insert(2, [InlineKeyboardButton("🏆 Top Holders", callback_data="top_holders"), InlineKeyboardButton("🔥 Top Volume", callback_data="top_volume")])
+        rows.insert(3, [InlineKeyboardButton("🟢 Last Buy", callback_data="last_buy"), InlineKeyboardButton("🔴 Last Sell", callback_data="last_sell")])
+    return _menu_keyboard(rows)
+
+
+def lp_menu_keyboard() -> InlineKeyboardMarkup:
+    return _menu_keyboard([
+        [InlineKeyboardButton("🪙 LP Holders", callback_data="lp_holders"), InlineKeyboardButton("🏆 Leaderboard", callback_data="lp_leaderboard")],
+        [InlineKeyboardButton("📸 Snapshots", callback_data="lp_snapshots"), InlineKeyboardButton("🎁 Rewards", callback_data="lp_rewards")],
+        [InlineKeyboardButton("📄 Export CSV", callback_data="lp_export")],
+        [InlineKeyboardButton("◀️ Back", callback_data="menu_back")],
+    ])
+
+
+def ai_menu_keyboard() -> InlineKeyboardMarkup:
+    return _menu_keyboard([
+        [InlineKeyboardButton("🧠 AI Core", callback_data="ai_status"), InlineKeyboardButton("🧭 AI Signal", callback_data="ai_recommendation")],
+        [InlineKeyboardButton("📈 Summary", callback_data="market_summary"), InlineKeyboardButton("🧠 Analysis", callback_data="ai_analysis")],
+        [InlineKeyboardButton("🌍 Context", callback_data="market_context")],
+        [InlineKeyboardButton("⚠️ Risk Radar", callback_data="risk_radar"), InlineKeyboardButton("🧠 Market Pulse", callback_data="market_pulse")],
+        [InlineKeyboardButton("◀️ Back", callback_data="menu_back")],
+    ])
+
+
+def admin_menu_keyboard() -> InlineKeyboardMarkup:
+    return _menu_keyboard([
+        [InlineKeyboardButton("🧠 Wallet Intel", callback_data="wallet_intelligence"), InlineKeyboardButton("📈 Accumulation", callback_data="accumulation_detection")],
+        [InlineKeyboardButton("⚠️ Fake Pump", callback_data="fake_pump_detection"), InlineKeyboardButton("🧪 Diagnostics", callback_data="diagnostics")],
+        [InlineKeyboardButton("🤖 Bot Status", callback_data="bot_status")],
+        [InlineKeyboardButton("◀️ Back", callback_data="menu_back")],
+    ])
 
 def start_caption(is_public: bool) -> str:
     if is_public:
@@ -4188,6 +4152,26 @@ async def menu_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "BUTTON PRESS | data=%s user=%s chat=%s",
         query.data, query.from_user.id if query.from_user else "?", query.message.chat_id if query.message else "?"
     )
+
+    chat_type = query.message.chat.type if query.message and query.message.chat else None
+    is_public = is_public_menu_context(chat_type, query.from_user.id if query.from_user else None)
+    if query.data == "menu_market":
+        await query.message.edit_reply_markup(reply_markup=market_menu_keyboard(is_public))
+        return
+    if query.data == "menu_lp":
+        await query.message.edit_reply_markup(reply_markup=lp_menu_keyboard())
+        return
+    if query.data == "menu_ai":
+        await query.message.edit_reply_markup(reply_markup=ai_menu_keyboard())
+        return
+    if query.data == "menu_admin":
+        if is_public:
+            return
+        await query.message.edit_reply_markup(reply_markup=admin_menu_keyboard())
+        return
+    if query.data == "menu_back":
+        await query.message.edit_reply_markup(reply_markup=public_menu_keyboard() if is_public else main_menu_keyboard())
+        return
 
     if query.data == "price":
         await query.message.reply_text(await asyncio.to_thread(get_price_text), parse_mode=ParseMode.MARKDOWN)
