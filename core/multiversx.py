@@ -28,6 +28,7 @@ from telegram.ext import (
 )
 
 from config import *
+from core.x_posts_reader import XOfficialPostsReader, post_media, post_url
 
 # =========================================================
 # LOGGING
@@ -118,6 +119,14 @@ TOP_VOLUME: Dict[str, Dict[str, float]] = {}
 VOLUME_HISTORY: List[Dict[str, float]] = []
 LAST_ALERTS: Dict[str, Dict[str, Any]] = {"BUY": {}, "SELL": {}}
 LAST_KNOWN_WOODY_USD: float = 0.0
+
+X_POSTS_READER = XOfficialPostsReader(
+    bearer_token=X_BEARER_TOKEN,
+    username=X_OFFICIAL_USERNAME,
+    state_file=X_POST_STATE_FILE,
+    timeout_seconds=API_TIMEOUT_SECONDS,
+    max_results=X_POST_MAX_RESULTS,
+)
 
 WATCHED_POOLS = {
     XEXCHANGE_POOL_ADDRESS: "xExchange",
@@ -2885,6 +2894,40 @@ async def send_alert_to_targets(
         except Exception as exc:
             logger.warning("[ALERT ERROR] %s -> %s", target, exc)
 
+async def x_official_posts_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Relay new original posts from the official WOODY X account."""
+    if not ENABLE_X_OFFICIAL_ALERTS:
+        return
+    if not X_POSTS_READER.enabled:
+        logger.warning("X official alerts enabled but X_BEARER_TOKEN/X_OFFICIAL_USERNAME is missing")
+        return
+    try:
+        posts = await asyncio.to_thread(X_POSTS_READER.new_posts)
+        for post in posts:
+            post_id = str(post.get("id") or "").strip()
+            text = str(post.get("text") or "").strip()
+            if not post_id:
+                continue
+            url = post_url(X_OFFICIAL_USERNAME, post_id)
+            caption = "🐦 *WOODY Official X*\n\n" + text + "\n\n" + url
+            media = post_media(post)
+            targets = chat_targets()
+            for target in targets:
+                try:
+                    if media and media.get("url"):
+                        if media.get("type") == "video":
+                            await context.bot.send_video(chat_id=target, video=media["url"], caption=caption, parse_mode=ParseMode.MARKDOWN)
+                        else:
+                            await context.bot.send_photo(chat_id=target, photo=media["url"], caption=caption, parse_mode=ParseMode.MARKDOWN)
+                    else:
+                        await context.bot.send_message(chat_id=target, text=caption, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=False)
+                    logger.info("Official X post relayed | post_id=%s target=%s", post_id, target)
+                except Exception as exc:
+                    logger.warning("Official X relay failed | post_id=%s target=%s error=%s", post_id, target, exc)
+    except Exception as exc:
+        logger.warning("X official posts check failed: %s", exc)
+
+
 # =========================================================
 # TRANSACTION CLASSIFIER
 # =========================================================
@@ -4451,6 +4494,8 @@ def main() -> None:
     app.job_queue.run_repeating(process_pending_roots, interval=3, first=5)
     app.job_queue.run_repeating(dashboard_status_job, interval=PUBLIC_STATUS_INTERVAL, first=10)
     app.job_queue.run_repeating(lp_snapshot_job, interval=LP_SNAPSHOT_CHECK_INTERVAL, first=30)
+    if ENABLE_X_OFFICIAL_ALERTS:
+        app.job_queue.run_repeating(x_official_posts_job, interval=X_POST_CHECK_INTERVAL, first=15)
 
     if USE_WEBHOOKS:
         webhook_url = f"{WEBHOOK_URL.rstrip('/')}{WEBHOOK_PATH}"
