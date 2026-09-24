@@ -1525,7 +1525,13 @@ async def woody_app_handler(_: web.Request) -> web.Response:
 
 
 async def status_json_handler(_: web.Request) -> web.Response:
-    payload = await asyncio.to_thread(build_dashboard_status_payload)
+    payload: Dict[str, Any]
+    try:
+        with open(PUBLIC_STATUS_FILE, "r", encoding="utf-8") as status_file:
+            cached_payload = json.load(status_file)
+        payload = cached_payload if isinstance(cached_payload, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        payload = await asyncio.to_thread(build_dashboard_status_payload)
     logger.info("PUBLIC STATUS ENDPOINT SERVED")
     return web.json_response(payload, content_type="application/json", headers={"Access-Control-Allow-Origin": "https://woody-website.vercel.app", "Vary": "Origin"})
 
