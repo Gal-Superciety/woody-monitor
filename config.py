@@ -147,7 +147,10 @@ BUY_XEXCHANGE_URL = os.getenv(
     "BUY_XEXCHANGE_URL",
     "https://xexchange.com/trade?firstToken=EGLD&secondToken=WOODY-5f9d9c",
 ).strip()
-BUY_XOXNO_URL = os.getenv("BUY_XOXNO_URL", "https://xoxno.com").strip()
+BUY_ONEDEX_URL = os.getenv("BUY_ONEDEX_URL", "https://onedex.app/").strip()
+BUY_JEX_URL = os.getenv("BUY_JEX_URL", "https://app.jexchange.io/").strip()
+# Legacy only: XOXNO's public product has changed, so this is no longer exposed as a direct WOODY buy link.
+BUY_XOXNO_URL = os.getenv("BUY_XOXNO_URL", "").strip()
 
 BANNER_IMAGE = os.getenv("BANNER_IMAGE", "banner.png").strip()
 BUY_IMAGE = os.getenv("BUY_IMAGE", "buy.png").strip()
