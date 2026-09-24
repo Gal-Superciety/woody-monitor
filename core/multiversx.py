@@ -1419,6 +1419,8 @@ def build_risk_radar(hours: int = 24) -> Dict[str, Any]:
 
 def build_dashboard_status_payload() -> Dict[str, Any]:
     rec = build_ai_recommendation()
+    trim_old_volume_entries(24)
+    volume_24h_usd = sum(safe_float(entry.get("usd")) for entry in VOLUME_HISTORY)
     return {
         "marketPulse": build_market_pulse(),
         "riskRadar": build_risk_radar(),
@@ -1432,6 +1434,8 @@ def build_dashboard_status_payload() -> Dict[str, Any]:
         "fakePump": get_fake_pump_detection_payload(),
         "price": {"usd": rec["price_usd"]},
         "liquidity": {"totalUsd": rec["total_liquidity_usd"]},
+        "holders": {"count": LAST_HOLDERS_COUNT},
+        "volume24hUsd": volume_24h_usd,
         "updatedAt": int(time.time()),
     }
 
