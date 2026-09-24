@@ -245,16 +245,30 @@ def is_real_wallet(addr: str) -> bool:
     return bool(addr) and not addr.startswith("erd1dead") and not is_technical_address(addr)
 
 
-def file_exists(path: str) -> bool:
+def _asset_candidates(path: str) -> list[str]:
     if not path:
-        return False
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    return os.path.exists(os.path.join(base_dir, path))
+        return []
+    name = str(path).strip()
+    module_dir = os.path.dirname(os.path.abspath(__file__))
+    project_dir = os.path.dirname(module_dir)
+    # Assets may live in the project root (current repository layout) or next to this module.
+    return [
+        os.path.join(project_dir, name),
+        os.path.join(module_dir, name),
+    ]
+
+
+def file_exists(path: str) -> bool:
+    return any(os.path.isfile(candidate) for candidate in _asset_candidates(path))
 
 
 def image_path(path: str) -> str:
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base_dir, path)
+    candidates = _asset_candidates(path)
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    # Keep the old behavior for diagnostics even when the asset is missing.
+    return candidates[0] if candidates else str(path)
 
 
 def data_path(path: str) -> str:
@@ -2850,8 +2864,9 @@ async def send_alert_to_targets(
 
     for target in targets:
         try:
-            if file_exists(image_name):
-                with open(image_path(image_name), "rb") as photo:
+            resolved_image = image_name if file_exists(image_name) else (BANNER_IMAGE if file_exists(BANNER_IMAGE) else "")
+            if resolved_image:
+                with open(image_path(resolved_image), "rb") as photo:
                     await context.bot.send_photo(
                         chat_id=target,
                         photo=InputFile(photo),
@@ -3617,20 +3632,25 @@ def choose_image(parsed: Dict[str, Any]) -> str:
     level = _alert_level(parsed)
 
     if tx_type in {"LIQUIDITY_ADDED", "LIQUIDITY_REMOVED"}:
-        return LIQUIDITY_IMAGE if file_exists(LIQUIDITY_IMAGE) else BANNER_IMAGE
-
-    if tx_type == "BUY":
+        candidates = [LIQUIDITY_IMAGE, BANNER_IMAGE]
+    elif tx_type == "BUY":
         if level == "SUPER_WHALE":
-            return SUPER_WHALE_IMAGE
-        if level == "WHALE":
-            return WHALE_BUY_IMAGE
-        if level == "BIG":
-            return BIG_BUY_IMAGE
-        return BUY_IMAGE
+            candidates = [SUPER_WHALE_IMAGE, WHALE_BUY_IMAGE, BIG_BUY_IMAGE, BUY_IMAGE, BANNER_IMAGE]
+        elif level == "WHALE":
+            candidates = [WHALE_BUY_IMAGE, BIG_BUY_IMAGE, BUY_IMAGE, BANNER_IMAGE]
+        elif level == "BIG":
+            candidates = [BIG_BUY_IMAGE, BUY_IMAGE, BANNER_IMAGE]
+        else:
+            candidates = [BUY_IMAGE, BANNER_IMAGE]
+    elif level in {"BIG", "WHALE", "SUPER_WHALE"}:
+        candidates = [BIG_SELL_IMAGE, SELL_IMAGE, BANNER_IMAGE]
+    else:
+        candidates = [SELL_IMAGE, BANNER_IMAGE]
 
-    if level in {"BIG", "WHALE", "SUPER_WHALE"}:
-        return BIG_SELL_IMAGE
-    return SELL_IMAGE
+    for candidate in candidates:
+        if file_exists(candidate):
+            return candidate
+    return ""
 
 
 def build_message(parsed: Dict[str, Any]) -> str:
