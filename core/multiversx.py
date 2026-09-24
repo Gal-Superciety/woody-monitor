@@ -2909,18 +2909,15 @@ async def x_official_posts_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             if not post_id:
                 continue
             url = post_url(X_OFFICIAL_USERNAME, post_id)
-            caption = "🐦 *WOODY Official X*\n\n" + text + "\n\n" + url
+            caption = "🐦 WOODY Official X\n\n" + text + "\n\n" + url
             media = post_media(post)
             targets = chat_targets()
             for target in targets:
                 try:
                     if media and media.get("url"):
-                        if media.get("type") == "video":
-                            await context.bot.send_video(chat_id=target, video=media["url"], caption=caption, parse_mode=ParseMode.MARKDOWN)
-                        else:
-                            await context.bot.send_photo(chat_id=target, photo=media["url"], caption=caption, parse_mode=ParseMode.MARKDOWN)
+                        await context.bot.send_photo(chat_id=target, photo=media["url"], caption=caption)
                     else:
-                        await context.bot.send_message(chat_id=target, text=caption, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=False)
+                        await context.bot.send_message(chat_id=target, text=caption, disable_web_page_preview=False)
                     logger.info("Official X post relayed | post_id=%s target=%s", post_id, target)
                 except Exception as exc:
                     logger.warning("Official X relay failed | post_id=%s target=%s error=%s", post_id, target, exc)
