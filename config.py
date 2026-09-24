@@ -149,11 +149,20 @@ SELL_IMAGE = os.getenv("SELL_IMAGE", "sell.png").strip()
 BIG_BUY_IMAGE = os.getenv("BIG_BUY_IMAGE", "big_buy.png").strip()
 BIG_SELL_IMAGE = os.getenv("BIG_SELL_IMAGE", "big_sell.png").strip()
 NEW_HOLDER_IMAGE = os.getenv("NEW_HOLDER_IMAGE", "new_holder.png").strip()
+LIQUIDITY_IMAGE = os.getenv("LIQUIDITY_IMAGE", "liquidity.png").strip()
+WHALE_BUY_IMAGE = os.getenv("WHALE_BUY_IMAGE", "whale_buy.png").strip()
+SUPER_WHALE_IMAGE = os.getenv("SUPER_WHALE_IMAGE", "super_whale.png").strip()
 
 MIN_ALERT_USD = _env_float("MIN_ALERT_USD", 2, min_value=0)
 BIG_ALERT_USD = _env_float("BIG_ALERT_USD", 10, min_value=0)
 WHALE_ALERT_USD = _env_float("WHALE_ALERT_USD", 100, min_value=0)
 SUPER_WHALE_ALERT_USD = _env_float("SUPER_WHALE_ALERT_USD", 500, min_value=0)
+
+# Native EGLD thresholds for trade alerts. These keep the intended 0.2 / 1 / 3 / 10 EGLD tiers independent of EGLD/USD price.
+MIN_ALERT_EGLD = _env_float("MIN_ALERT_EGLD", 0.2, min_value=0)
+BIG_ALERT_EGLD = _env_float("BIG_ALERT_EGLD", 1.0, min_value=0)
+WHALE_ALERT_EGLD = _env_float("WHALE_ALERT_EGLD", 3.0, min_value=0)
+SUPER_WHALE_ALERT_EGLD = _env_float("SUPER_WHALE_ALERT_EGLD", 10.0, min_value=0)
 
 ROOT_SETTLE_SECONDS = _env_int("ROOT_SETTLE_SECONDS", 6, min_value=0)
 ROOT_MAX_AGE_SECONDS = _env_int("ROOT_MAX_AGE_SECONDS", 90, min_value=1)
