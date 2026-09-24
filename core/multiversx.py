@@ -3563,6 +3563,42 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
     return detected
 
 
+def _is_egld_quote(parsed: Dict[str, Any]) -> bool:
+    token = str(parsed.get("quote_token") or "").strip().upper()
+    return token in {"EGLD", "WEGLD"} or token.startswith("WEGLD-")
+
+
+def _alert_amount(parsed: Dict[str, Any]) -> float:
+    """Use native EGLD amount for EGLD/WEGLD trades; USD for other quote tokens."""
+    if _is_egld_quote(parsed):
+        return safe_float(parsed.get("quote_amount", 0.0))
+    return safe_float(parsed.get("swap_usd_value", 0.0))
+
+
+def _alert_thresholds(parsed: Dict[str, Any]) -> Tuple[float, float, float, float]:
+    if _is_egld_quote(parsed):
+        return MIN_ALERT_EGLD, BIG_ALERT_EGLD, WHALE_ALERT_EGLD, SUPER_WHALE_ALERT_EGLD
+    return MIN_ALERT_USD, BIG_ALERT_USD, WHALE_ALERT_USD, SUPER_WHALE_ALERT_USD
+
+
+def _alert_level(parsed: Dict[str, Any]) -> str:
+    amount = _alert_amount(parsed)
+    minimum, big, whale, super_whale = _alert_thresholds(parsed)
+    if amount >= super_whale:
+        return "SUPER_WHALE"
+    if amount >= whale:
+        return "WHALE"
+    if amount >= big:
+        return "BIG"
+    if amount >= minimum:
+        return "NORMAL"
+    return "BELOW_MIN"
+
+
+def _alert_threshold_met(parsed: Dict[str, Any]) -> bool:
+    return _alert_level(parsed) != "BELOW_MIN"
+
+
 def choose_title(parsed: Dict[str, Any]) -> str:
     tx_type = parsed.get("type", "")
     if tx_type == "LIQUIDITY_ADDED":
@@ -3570,22 +3606,31 @@ def choose_title(parsed: Dict[str, Any]) -> str:
     if tx_type == "LIQUIDITY_REMOVED":
         return "💧 *LIQUIDITY REMOVED*"
 
-    usd = safe_float(parsed.get("swap_usd_value", 0.0))
-
-    if usd >= BIG_ALERT_USD:
-        return f"{'🚀' if tx_type == 'BUY' else '💥'} *BIG {tx_type}*"
+    level = _alert_level(parsed)
+    if level in {"BIG", "WHALE", "SUPER_WHALE"}:
+        return f"{'🚀' if tx_type == 'BUY' else '💥'} *{level.replace('_', ' ')} {tx_type}*"
     return f"{'🟢' if tx_type == 'BUY' else '🔴'} *{tx_type}*"
 
 
 def choose_image(parsed: Dict[str, Any]) -> str:
-    usd = safe_float(parsed.get("swap_usd_value", 0.0))
     tx_type = parsed.get("type", "")
+    level = _alert_level(parsed)
 
     if tx_type in {"LIQUIDITY_ADDED", "LIQUIDITY_REMOVED"}:
-        return BANNER_IMAGE if file_exists(BANNER_IMAGE) else BUY_IMAGE
+        return LIQUIDITY_IMAGE if file_exists(LIQUIDITY_IMAGE) else BANNER_IMAGE
+
     if tx_type == "BUY":
-        return BIG_BUY_IMAGE if usd >= BIG_ALERT_USD else BUY_IMAGE
-    return BIG_SELL_IMAGE if usd >= BIG_ALERT_USD else SELL_IMAGE
+        if level == "SUPER_WHALE":
+            return SUPER_WHALE_IMAGE
+        if level == "WHALE":
+            return WHALE_BUY_IMAGE
+        if level == "BIG":
+            return BIG_BUY_IMAGE
+        return BUY_IMAGE
+
+    if level in {"BIG", "WHALE", "SUPER_WHALE"}:
+        return BIG_SELL_IMAGE
+    return SELL_IMAGE
 
 
 def build_message(parsed: Dict[str, Any]) -> str:
@@ -3868,7 +3913,7 @@ async def _process_pending_roots_inner(context: ContextTypes.DEFAULT_TYPE) -> No
                     )
                     await send_alert_to_targets(context, choose_image(parsed), message)
                     logger.info("ALERT SENT | root=%s type=%s", parsed["root_hash"], parsed["type"])
-                elif parsed and parsed.get("swap_usd_value", 0.0) >= MIN_ALERT_USD:
+                elif parsed and _alert_threshold_met(parsed):
                     logger.info(
                         "ALERT DISPATCH | root=%s type=%s usd=%.2f targets=%s",
                         parsed["root_hash"], parsed["type"], parsed["swap_usd_value"], chat_targets(),
@@ -3887,8 +3932,13 @@ async def _process_pending_roots_inner(context: ContextTypes.DEFAULT_TYPE) -> No
                     )
                 elif parsed:
                     logger.info(
-                        "ALERT SKIP | root=%s type=%s usd=%.2f below MIN_ALERT_USD=%.2f",
-                        root_hash, parsed.get("type"), safe_float(parsed.get("swap_usd_value")), MIN_ALERT_USD,
+                        "ALERT SKIP | root=%s type=%s amount=%.4f threshold=%.4f quote=%s usd=%.2f",
+                        root_hash,
+                        parsed.get("type"),
+                        _alert_amount(parsed),
+                        _alert_thresholds(parsed)[0],
+                        parsed.get("quote_token"),
+                        safe_float(parsed.get("swap_usd_value")),
                     )
                 else:
                     logger.info("ALERT SKIP | root=%s no parseable swap detected", root_hash)
