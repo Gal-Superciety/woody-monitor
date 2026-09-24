@@ -2767,7 +2767,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🧠 AI & Insights", callback_data="menu_ai")],
         [InlineKeyboardButton("🔐 Admin Tools", callback_data="menu_admin")],
         [InlineKeyboardButton("📈 Chart", url=CHART_URL)],
-        [InlineKeyboardButton("🟢 Buy WOODY", url=BUY_XEXCHANGE_URL), InlineKeyboardButton("🟢 XOXNO", url=BUY_XOXNO_URL)],
+        [InlineKeyboardButton("🟢 xExchange", url=BUY_XEXCHANGE_URL), InlineKeyboardButton("🟢 OneDex", url=BUY_ONEDEX_URL)],\n        [InlineKeyboardButton("🟢 JEX", url=BUY_JEX_URL)],
         [InlineKeyboardButton("𝕏 Twitter", url=TWITTER_URL)],
     ])
 
