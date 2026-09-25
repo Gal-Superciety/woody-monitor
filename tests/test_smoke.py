@@ -684,3 +684,26 @@ def test_liquidity_detection_uses_known_lp_token_without_lp_symbol() -> None:
     assert parsed["dex"] == "OneDex"
     assert parsed["quote_token"] == main.WEGLD
     assert parsed["quote_amount"] == 1
+
+
+def test_ecompass_market_stats_extracts_cross_dex_liquidity(monkeypatch) -> None:
+    class Response:
+        text = '<div class="label">Liquidity</div><div class="value usd-value">$ 1,239</div><span class="label">Total TVL</span><span class="price"> $2,482</span><div class="label">Market Cap</div><div class="value usd-value">$ 3,869</div>'
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(main.requests, "get", lambda *args, **kwargs: Response())
+    stats = main.get_ecompass_market_stats()
+    assert stats["liquidity_usd"] == 1239
+    assert stats["total_tvl_usd"] == 2482
+    assert stats["market_cap_usd"] == 3869
+
+
+def test_token_market_stats_prefers_cross_dex_liquidity(monkeypatch) -> None:
+    monkeypatch.setattr(main, "get_json", lambda url: {"accounts": 337, "price": 0.000039, "totalLiquidity": 300, "totalVolume24h": 4.48})
+    monkeypatch.setattr(main, "get_ecompass_market_stats", lambda: {"liquidity_usd": 1239, "total_tvl_usd": 2482, "market_cap_usd": 3869, "source": "e-Compass cross-DEX"})
+    stats = main.get_token_market_stats()
+    assert stats["holders"] == 337
+    assert stats["liquidity_usd"] == 1239
+    assert stats["total_tvl_usd"] == 2482
+    assert stats["volume_24h_usd"] == 4.48

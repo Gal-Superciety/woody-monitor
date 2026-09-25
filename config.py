@@ -135,6 +135,7 @@ ONEDEX_BURN_ADDRESS = os.getenv(
 ).strip()
 
 PRICE_URL = os.getenv("PRICE_URL", "https://e-compass.io/token/WOODY-5f9d9c").strip()
+ECOMPASS_TOKEN_URL = os.getenv("ECOMPASS_TOKEN_URL", PRICE_URL).strip()
 CHART_URL = os.getenv("CHART_URL", PRICE_URL).strip()
 TWITTER_URL = os.getenv("TWITTER_URL", "https://x.com/WOODY_EX").strip()
 ENABLE_X_OFFICIAL_ALERTS = _env_bool("ENABLE_X_OFFICIAL_ALERTS", False)
@@ -147,7 +148,7 @@ BUY_XEXCHANGE_URL = os.getenv(
     "BUY_XEXCHANGE_URL",
     "https://xexchange.com/trade?firstToken=EGLD&secondToken=WOODY-5f9d9c",
 ).strip()
-BUY_ONEDEX_URL = os.getenv("BUY_ONEDEX_URL", "https://onedex.app/").strip()
+BUY_ONEDEX_URL = os.getenv("BUY_ONEDEX_URL", "https://swap.onedex.app/").strip()
 BUY_JEX_URL = os.getenv("BUY_JEX_URL", "https://app.jexchange.io/").strip()
 # Legacy only: XOXNO's public product has changed, so this is no longer exposed as a direct WOODY buy link.
 BUY_XOXNO_URL = os.getenv("BUY_XOXNO_URL", "").strip()
