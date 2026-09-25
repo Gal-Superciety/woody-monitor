@@ -478,10 +478,10 @@ def test_lp_rewards_submenu_contains_lp_tools() -> None:
     labels = _keyboard_labels(main.lp_menu_keyboard())
 
     assert "🪙 LP Holders" in labels
-    assert "🏆 LP Leaderboard" in labels
-    assert "📸 LP Snapshots" in labels
-    assert "🎁 LP Rewards" in labels
-    assert "📄 LP Export" in labels
+    assert "🏆 Leaderboard" in labels
+    assert "📸 Snapshots" in labels
+    assert "🎁 Rewards" in labels
+    assert "📄 Export CSV" in labels
 
 
 def test_lp_snapshots_text_lists_current_month_snapshots(monkeypatch) -> None:
