@@ -134,7 +134,8 @@ ONEDEX_BURN_ADDRESS = os.getenv(
     "erd1deaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaddeaqtv0gag",
 ).strip()
 
-PRICE_URL = os.getenv("PRICE_URL", "https://e-compass.io/token/WOODY-5f9d9c").strip()\nECOMPASS_TOKEN_URL = os.getenv("ECOMPASS_TOKEN_URL", PRICE_URL).strip()
+PRICE_URL = os.getenv("PRICE_URL", "https://e-compass.io/token/WOODY-5f9d9c").strip()
+ECOMPASS_TOKEN_URL = os.getenv("ECOMPASS_TOKEN_URL", PRICE_URL).strip()
 CHART_URL = os.getenv("CHART_URL", PRICE_URL).strip()
 TWITTER_URL = os.getenv("TWITTER_URL", "https://x.com/WOODY_EX").strip()
 ENABLE_X_OFFICIAL_ALERTS = _env_bool("ENABLE_X_OFFICIAL_ALERTS", False)
