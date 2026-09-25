@@ -1459,6 +1459,35 @@ def build_risk_radar(hours: int = 24) -> Dict[str, Any]:
     return {"level": level, "score": min(100, score)}
 
 
+def get_public_pool_reserves() -> List[Dict[str, Any]]:
+    """Publish observed on-chain reserves, never estimated TVL as verified liquidity."""
+    pools = []
+    seen = set()
+    for pool in LP_POOLS:
+        address = str(pool.get("pair_address") or "").strip()
+        if not address or address in seen:
+            continue
+        seen.add(address)
+        snap = get_pool_snapshot(address, str(pool.get("name") or "WOODY pool"))
+        if not snap.get("ok"):
+            continue
+        woody_amount = safe_float(snap.get("woody_amount"))
+        quote_amount = safe_float(snap.get("pair_amount"))
+        quote_symbol = str(snap.get("pair_symbol") or "").strip()
+        if woody_amount <= 0 or quote_amount <= 0 or not quote_symbol:
+            continue
+        pools.append({
+            "dex": str(pool.get("dex") or "DEX"),
+            "pair": f"WOODY/{quote_symbol}",
+            "address": address,
+            "woodyReserve": woody_amount,
+            "quoteReserve": quote_amount,
+            "quoteSymbol": quote_symbol,
+            "valuation": "not_verified",
+        })
+    return pools
+
+
 def build_dashboard_status_payload() -> Dict[str, Any]:
     rec = build_ai_recommendation()
     token_stats = get_token_market_stats()
@@ -1483,6 +1512,7 @@ def build_dashboard_status_payload() -> Dict[str, Any]:
             "totalUsd": liquidity_usd,
             "totalTvlUsd": safe_float(token_stats.get("total_tvl_usd")),
             "source": str(token_stats.get("liquidity_source") or "market feed"),
+            "pools": get_public_pool_reserves(),
         },
         "holders": {"count": holders_count},
         "volume24hUsd": volume_24h_usd,
