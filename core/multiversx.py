@@ -594,22 +594,25 @@ def get_ecompass_market_stats() -> Dict[str, Any]:
         logger.warning("ECOMPASS_MARKET_UNAVAILABLE | error=%s", exc)
         return {}
 
-    def extract(pattern: str) -> float:
-        match = re.search(pattern, html, flags=re.IGNORECASE | re.DOTALL)
-        if not match:
+    def extract_after(label: str) -> float:
+        pos = html.find(label)
+        if pos < 0:
             return 0.0
-        return safe_float(match.group(1).replace(",", ""))
+        window = html[pos:pos + 500]
+        match = re.search(r"\$\s*([0-9][0-9,.]*)", window)
+        return safe_float(match.group(1).replace(",", "")) if match else 0.0
 
-    liquidity = extract(r'class="label">Liquidity</div>\s*<div class="value usd-value">\$\s*([0-9,.]+)')
-    total_tvl = extract(r'class="label">Total TVL</span><span class="price">\s*\$([0-9,.]+)')
-    market_cap = extract(r'class="label">Market Cap</div>\s*<div class="value usd-value">\$\s*([0-9,.]+)')
+    liquidity = extract_after("Liquidity")
+    total_tvl = extract_after("Total TVL")
+    market_cap = extract_after("Market Cap")
+    if liquidity <= 0:
+        return {}
     return {
         "liquidity_usd": liquidity,
         "total_tvl_usd": total_tvl,
         "market_cap_usd": market_cap,
         "source": "e-Compass cross-DEX",
     }
-
 
 def get_token_market_stats() -> Dict[str, Any]:
     data = get_json(f"{MVX_API}/tokens/{WOODY}")
