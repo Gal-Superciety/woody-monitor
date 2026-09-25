@@ -583,14 +583,21 @@ def get_best_price() -> Optional[Dict[str, Any]]:
     return None
 
 
-def get_holders_count() -> Optional[int]:
+def get_token_market_stats() -> Dict[str, float]:
     data = get_json(f"{MVX_API}/tokens/{WOODY}")
     if not isinstance(data, dict):
-        return None
-    try:
-        return int(data["accounts"])
-    except Exception:
-        return None
+        return {}
+    return {
+        "holders": safe_float(data.get("accounts")),
+        "liquidity_usd": safe_float(data.get("totalLiquidity")),
+        "volume_24h_usd": safe_float(data.get("totalVolume24h")),
+    }
+
+
+def get_holders_count() -> Optional[int]:
+    stats = get_token_market_stats()
+    holders = safe_int(stats.get("holders"), 0)
+    return holders if holders > 0 else None
 
 
 def get_liquidity_text() -> str:
@@ -1419,8 +1426,12 @@ def build_risk_radar(hours: int = 24) -> Dict[str, Any]:
 
 def build_dashboard_status_payload() -> Dict[str, Any]:
     rec = build_ai_recommendation()
+    token_stats = get_token_market_stats()
     trim_old_volume_entries(24)
-    volume_24h_usd = sum(safe_float(entry.get("usd")) for entry in VOLUME_HISTORY)
+    tracked_volume_24h_usd = sum(safe_float(entry.get("usd")) for entry in VOLUME_HISTORY)
+    liquidity_usd = safe_float(token_stats.get("liquidity_usd")) or safe_float(rec["total_liquidity_usd"])
+    volume_24h_usd = safe_float(token_stats.get("volume_24h_usd")) or tracked_volume_24h_usd
+    holders_count = safe_int(token_stats.get("holders"), 0) or LAST_HOLDERS_COUNT
     return {
         "marketPulse": build_market_pulse(),
         "riskRadar": build_risk_radar(),
@@ -1433,8 +1444,8 @@ def build_dashboard_status_payload() -> Dict[str, Any]:
         "accumulation": get_accumulation_detection_payload(),
         "fakePump": get_fake_pump_detection_payload(),
         "price": {"usd": rec["price_usd"]},
-        "liquidity": {"totalUsd": rec["total_liquidity_usd"]},
-        "holders": {"count": LAST_HOLDERS_COUNT},
+        "liquidity": {"totalUsd": liquidity_usd, "source": "MultiversX token API"},
+        "holders": {"count": holders_count},
         "volume24hUsd": volume_24h_usd,
         "updatedAt": int(time.time()),
     }
