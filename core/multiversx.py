@@ -140,6 +140,7 @@ WATCHED_POOLS = {
     WOODY_BOBER_POOL_ADDRESS: "WOODY/BOBER",
     WOODY_JEX_POOL_ADDRESS: "WOODY/JEX",
     WOODY_MEX_POOL_ADDRESS: "WOODY/MEX",
+    WOODY_OLV_POOL_ADDRESS: "WOODY/OLV",
 }
 WATCHED_POOLS = {k: v for k, v in WATCHED_POOLS.items() if k}
 LP_TOKEN_IDS: Set[str] = {str(pool.get("lp_token") or "").strip() for pool in LP_POOLS if str(pool.get("lp_token") or "").strip()}
