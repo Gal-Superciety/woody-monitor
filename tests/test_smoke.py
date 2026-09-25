@@ -462,24 +462,26 @@ def _keyboard_labels(markup):
     return [button.text for row in markup.inline_keyboard for button in row]
 
 
-def test_main_menu_contains_lp_rewards_section_buttons() -> None:
+def test_main_menu_links_to_lp_rewards_submenu() -> None:
     labels = _keyboard_labels(main.main_menu_keyboard())
 
-    assert "🪙 LP Holders" in labels
-    assert "🏆 LP Leaderboard" in labels
-    assert "📸 LP Snapshots" in labels
-    assert "🎁 LP Rewards" in labels
-    assert "📄 LP Export" in labels
+    assert "💧 LP & Rewards" in labels
 
 
-def test_public_menu_contains_lp_rewards_section_buttons() -> None:
+def test_public_menu_links_to_lp_rewards_submenu() -> None:
     labels = _keyboard_labels(main.public_menu_keyboard())
 
+    assert "💧 LP & Rewards" in labels
+
+
+def test_lp_rewards_submenu_contains_lp_tools() -> None:
+    labels = _keyboard_labels(main.lp_menu_keyboard())
+
     assert "🪙 LP Holders" in labels
-    assert "🏆 LP Leaderboard" in labels
-    assert "📸 LP Snapshots" in labels
-    assert "🎁 LP Rewards" in labels
-    assert "📄 LP Export" in labels
+    assert "🏆 Leaderboard" in labels
+    assert "📸 Snapshots" in labels
+    assert "🎁 Rewards" in labels
+    assert "📄 Export CSV" in labels
 
 
 def test_lp_snapshots_text_lists_current_month_snapshots(monkeypatch) -> None:
