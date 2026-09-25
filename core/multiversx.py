@@ -1,6 +1,7 @@
 import os
 import time
 import random
+import re
 import logging
 import asyncio
 import json
@@ -583,16 +584,47 @@ def get_best_price() -> Optional[Dict[str, Any]]:
     return None
 
 
-def get_token_market_stats() -> Dict[str, float]:
-    data = get_json(f"{MVX_API}/tokens/{WOODY}")
-    if not isinstance(data, dict):
+def get_ecompass_market_stats() -> Dict[str, Any]:
+    """Read the cross-DEX WOODY market summary published by e-Compass."""
+    try:
+        response = requests.get(ECOMPASS_TOKEN_URL, timeout=API_TIMEOUT_SECONDS)
+        response.raise_for_status()
+        html = response.text
+    except Exception as exc:
+        logger.warning("ECOMPASS_MARKET_UNAVAILABLE | error=%s", exc)
         return {}
+
+    def extract(pattern: str) -> float:
+        match = re.search(pattern, html, flags=re.IGNORECASE | re.DOTALL)
+        if not match:
+            return 0.0
+        return safe_float(match.group(1).replace(",", ""))
+
+    liquidity = extract(r'class="label">Liquidity</div>\s*<div class="value usd-value">\$\s*([0-9,.]+)')
+    total_tvl = extract(r'class="label">Total TVL</span><span class="price">\s*\$([0-9,.]+)')
+    market_cap = extract(r'class="label">Market Cap</div>\s*<div class="value usd-value">\$\s*([0-9,.]+)')
     return {
-        "holders": safe_float(data.get("accounts")),
-        "liquidity_usd": safe_float(data.get("totalLiquidity")),
-        "volume_24h_usd": safe_float(data.get("totalVolume24h")),
+        "liquidity_usd": liquidity,
+        "total_tvl_usd": total_tvl,
+        "market_cap_usd": market_cap,
+        "source": "e-Compass cross-DEX",
     }
 
+
+def get_token_market_stats() -> Dict[str, Any]:
+    data = get_json(f"{MVX_API}/tokens/{WOODY}")
+    if not isinstance(data, dict):
+        data = {}
+    ecompass = get_ecompass_market_stats()
+    return {
+        "holders": safe_float(data.get("accounts")),
+        "price_usd": safe_float(data.get("price")),
+        "liquidity_usd": safe_float(ecompass.get("liquidity_usd")) or safe_float(data.get("totalLiquidity")),
+        "total_tvl_usd": safe_float(ecompass.get("total_tvl_usd")),
+        "market_cap_usd": safe_float(ecompass.get("market_cap_usd")) or safe_float(data.get("marketCap")),
+        "volume_24h_usd": safe_float(data.get("totalVolume24h")),
+        "liquidity_source": str(ecompass.get("source") or "MultiversX token API"),
+    }
 
 def get_holders_count() -> Optional[int]:
     stats = get_token_market_stats()
@@ -1444,7 +1476,7 @@ def build_dashboard_status_payload() -> Dict[str, Any]:
         "accumulation": get_accumulation_detection_payload(),
         "fakePump": get_fake_pump_detection_payload(),
         "price": {"usd": rec["price_usd"]},
-        "liquidity": {"totalUsd": liquidity_usd, "source": "MultiversX token API"},
+        "liquidity": {\n            "totalUsd": liquidity_usd,\n            "totalTvlUsd": safe_float(token_stats.get("total_tvl_usd")),\n            "source": str(token_stats.get("liquidity_source") or "market feed"),\n        },
         "holders": {"count": holders_count},
         "volume24hUsd": volume_24h_usd,
         "updatedAt": int(time.time()),
@@ -4212,7 +4244,7 @@ async def chart_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message:
         await update.message.reply_text(
-            f"🟢 Buy xExchange:\n{BUY_XEXCHANGE_URL}\n\n🟢 Buy XOXNO:\n{BUY_XOXNO_URL}"
+            f"🟢 xExchange:\n{BUY_XEXCHANGE_URL}\n\n🟢 OneDex:\n{BUY_ONEDEX_URL}\n\n🟢 JEX:\n{BUY_JEX_URL}"
         )
 
 
