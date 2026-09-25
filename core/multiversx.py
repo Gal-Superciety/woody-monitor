@@ -585,9 +585,18 @@ def get_best_price() -> Optional[Dict[str, Any]]:
 
 
 def get_ecompass_market_stats() -> Dict[str, Any]:
-    """Read the cross-DEX WOODY market summary published by e-Compass."""
+    """Best-effort cross-DEX summary from e-Compass.
+
+    e-Compass renders market totals client-side, so a plain HTTP response can
+    legitimately contain no values. Never treat that as zero: callers fall
+    back to the MultiversX API until a structured/rendered source is available.
+    """
     try:
-        response = requests.get(ECOMPASS_TOKEN_URL, headers={"User-Agent": "Mozilla/5.0", "Accept": "text/html,application/xhtml+xml"}, timeout=API_TIMEOUT_SECONDS)
+        response = requests.get(
+            ECOMPASS_TOKEN_URL,
+            headers={"User-Agent": "Mozilla/5.0", "Accept": "text/html,application/xhtml+xml"},
+            timeout=API_TIMEOUT_SECONDS,
+        )
         response.raise_for_status()
         html = response.text
     except Exception as exc:
@@ -599,13 +608,14 @@ def get_ecompass_market_stats() -> Dict[str, Any]:
         if pos < 0:
             return 0.0
         window = html[pos:pos + 500]
-        match = re.search(r"\$\s*([0-9][0-9,.]*)", window)
+        match = re.search(r"\\$\\s*([0-9][0-9,.]*)", window)
         return safe_float(match.group(1).replace(",", "")) if match else 0.0
 
     liquidity = extract_after("Liquidity")
     total_tvl = extract_after("Total TVL")
     market_cap = extract_after("Market Cap")
     if liquidity <= 0:
+        logger.info("ECOMPASS_MARKET_RENDER_REQUIRED | using MultiversX fallback")
         return {}
     return {
         "liquidity_usd": liquidity,
