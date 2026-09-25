@@ -587,7 +587,7 @@ def get_best_price() -> Optional[Dict[str, Any]]:
 def get_ecompass_market_stats() -> Dict[str, Any]:
     """Read the cross-DEX WOODY market summary published by e-Compass."""
     try:
-        response = requests.get(ECOMPASS_TOKEN_URL, timeout=API_TIMEOUT_SECONDS)
+        response = requests.get(ECOMPASS_TOKEN_URL, headers={"User-Agent": "Mozilla/5.0", "Accept": "text/html,application/xhtml+xml"}, timeout=API_TIMEOUT_SECONDS)
         response.raise_for_status()
         html = response.text
     except Exception as exc:
