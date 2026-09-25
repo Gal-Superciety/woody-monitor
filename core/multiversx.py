@@ -1476,7 +1476,11 @@ def build_dashboard_status_payload() -> Dict[str, Any]:
         "accumulation": get_accumulation_detection_payload(),
         "fakePump": get_fake_pump_detection_payload(),
         "price": {"usd": rec["price_usd"]},
-        "liquidity": {\n            "totalUsd": liquidity_usd,\n            "totalTvlUsd": safe_float(token_stats.get("total_tvl_usd")),\n            "source": str(token_stats.get("liquidity_source") or "market feed"),\n        },
+        "liquidity": {
+            "totalUsd": liquidity_usd,
+            "totalTvlUsd": safe_float(token_stats.get("total_tvl_usd")),
+            "source": str(token_stats.get("liquidity_source") or "market feed"),
+        },
         "holders": {"count": holders_count},
         "volume24hUsd": volume_24h_usd,
         "updatedAt": int(time.time()),
