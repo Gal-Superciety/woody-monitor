@@ -619,8 +619,15 @@ def get_token_market_stats() -> Dict[str, Any]:
     if not isinstance(data, dict):
         data = {}
     ecompass = get_ecompass_market_stats()
+    holder_value = safe_int(data.get("accounts"), 0)
+    if holder_value <= 0:
+        count_data = get_json(f"{MVX_API}/tokens/{WOODY}/accounts/count")
+        if isinstance(count_data, (int, float, str)):
+            holder_value = safe_int(count_data, 0)
+        elif isinstance(count_data, dict):
+            holder_value = safe_int(count_data.get("count") or count_data.get("accounts"), 0)
     return {
-        "holders": safe_float(data.get("accounts")),
+        "holders": holder_value or None,
         "price_usd": safe_float(data.get("price")),
         "liquidity_usd": safe_float(ecompass.get("liquidity_usd")) or safe_float(data.get("totalLiquidity")),
         "total_tvl_usd": safe_float(ecompass.get("total_tvl_usd")),
@@ -1470,6 +1477,7 @@ def get_public_pool_reserves() -> List[Dict[str, Any]]:
         seen.add(address)
         snap = get_pool_snapshot(address, str(pool.get("name") or "WOODY pool"))
         if not snap.get("ok"):
+            pools.append({"dex": str(pool.get("dex") or "DEX"), "pair": str(pool.get("name") or "WOODY pool"), "address": address, "status": "unavailable", "reason": str(snap.get("reason") or "pool data unavailable"), "valuation": "not_verified"})
             continue
         woody_amount = safe_float(snap.get("woody_amount"))
         quote_amount = safe_float(snap.get("pair_amount"))
