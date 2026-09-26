@@ -714,7 +714,8 @@ def test_token_market_stats_prefers_cross_dex_liquidity(monkeypatch) -> None:
 
 def test_public_liquidity_total_uses_readable_pools_not_token_api(monkeypatch) -> None:
     monkeypatch.setattr(main, "build_ai_recommendation", lambda: {"price_usd": 0.00004, "recommendation": "WATCH", "confidence": 30, "risk": "LOW", "reason": "test"})
-    monkeypatch.setattr(main, "get_token_market_stats", lambda: {"liquidity_usd": 307.87, "holders": 338})
+    monkeypatch.setattr(main, "get_token_market_stats", lambda: {"liquidity_usd": 307.87, "holders": 338, "volume_24h_usd": 99})
+    monkeypatch.setattr(main, "VOLUME_HISTORY", [{"ts": main.time.time(), "usd": 3, "type": "BUY"}])
     monkeypatch.setattr(main, "build_market_pulse", lambda: {})
     monkeypatch.setattr(main, "build_risk_radar", lambda: {})
     monkeypatch.setattr(main, "get_accumulation_detection_payload", lambda: {})
@@ -728,6 +729,9 @@ def test_public_liquidity_total_uses_readable_pools_not_token_api(monkeypatch) -
     assert abs(payload["liquidity"]["totalUsd"] - 960) < 0.000001
     assert payload["liquidity"]["estimatedPoolCount"] == 2
     assert "estimated" in payload["liquidity"]["valuation"]
+    assert payload["volume24hUsd"] == 3
+    assert payload["volume"]["reportedApiUsd"] == 99
+    assert payload["volume"]["tradeCount"] == 1
 
 
 def test_reward_pool_save_reports_storage_failure(monkeypatch) -> None:
@@ -883,3 +887,30 @@ def test_lp_snapshot_does_not_report_success_when_storage_fails(monkeypatch) -> 
     result = main.save_lp_snapshot(force=True)
     assert result["ok"] is False
     assert "could not be saved" in result["reason"]
+
+
+def test_signal_text_and_dashboard_use_same_builders(monkeypatch) -> None:
+    monkeypatch.setattr(main, "build_market_pulse", lambda hours=24: {
+        "score": 42, "mood": "Defensive", "activity": "Low", "trendStrength": "Weak", "reasons": ["test flow"]})
+    monkeypatch.setattr(main, "build_risk_radar", lambda hours=24: {
+        "score": 38, "level": "MEDIUM", "detected": ["partial liquidity visibility"]})
+    assert "Pulse Score: *42/100*" in main.get_market_pulse_text()
+    assert "Mood: *Defensive*" in main.get_market_pulse_text()
+    assert "Risk Score: *38/100*" in main.get_risk_radar_text()
+    assert "partial liquidity visibility" in main.get_risk_radar_text()
+
+
+def test_bot_liquidity_uses_same_public_pool_valuation(monkeypatch) -> None:
+    monkeypatch.setattr(main, "get_best_price", lambda: {"price_usd": 0.00004})
+    pools = [
+        {"dex": "OneDex", "pair": "WOODY/WEGLD", "woodyReserve": 10_000_000, "quoteReserve": 100},
+        {"dex": "JEX", "pair": "WOODY/JEX", "woodyReserve": 2_000_000, "quoteReserve": 20},
+        {"dex": "xExchange", "pair": "WOODY/USDC", "status": "unavailable"},
+    ]
+    monkeypatch.setattr(main, "get_public_pool_reserves", lambda: pools)
+    payload = main.build_public_liquidity(0.00004, pools)
+    assert abs(payload["totalUsd"] - 960) < 1e-8
+    assert sum(pool["estimatedUsd"] or 0 for pool in payload["pools"]) == payload["totalUsd"]
+    assert "*$960.00*" in main.get_liquidity_text()
+    assert "unavailable" in main.get_liquidity_text()
+    assert main.build_public_liquidity(0, pools)["totalUsd"] is None
