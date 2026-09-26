@@ -707,3 +707,52 @@ def test_token_market_stats_prefers_cross_dex_liquidity(monkeypatch) -> None:
     assert stats["liquidity_usd"] == 1239
     assert stats["total_tvl_usd"] == 2482
     assert stats["volume_24h_usd"] == 4.48
+
+
+def test_onedex_woody_pair_uses_pair_specific_view_reserves(monkeypatch) -> None:
+    import base64
+
+    values = {
+        "getPairFirstTokenId": main.WOODY.encode(),
+        "getPairSecondTokenId": main.WEGLD.encode(),
+        "getPairFirstTokenReserve": int(12_345_678 * 10**18).to_bytes(32, "big").lstrip(b"\x00"),
+        "getPairSecondTokenReserve": int(123 * 10**18).to_bytes(32, "big").lstrip(b"\x00"),
+        "getPairLpTokenId": b"WOODYWEGLD-9832b2",
+    }
+
+    def fake_post_json(url, payload):
+        assert url.endswith("/query")
+        assert payload["args"] == ["022f"]  # pair id 559
+        raw = values[payload["funcName"]]
+        return {"data": {"data": {"returnData": [base64.b64encode(raw).decode()]}}}
+
+    monkeypatch.setattr(main, "post_json", fake_post_json)
+    monkeypatch.setattr(main, "get_token_metadata", lambda token: {"decimals": 18})
+
+    snap = main.get_onedex_woody_pool_snapshot()
+    assert snap["ok"] is True
+    assert snap["pair_id"] == 559
+    assert snap["lp_token"] == "WOODYWEGLD-9832b2"
+    assert snap["woody_amount"] == 12_345_678
+    assert snap["pair_symbol"] == "WEGLD"
+    assert snap["pair_amount"] == 123
+
+
+def test_onedex_pair_fails_closed_on_wrong_tokens(monkeypatch) -> None:
+    import base64
+
+    def fake_post_json(url, payload):
+        raw_by_function = {
+            "getPairFirstTokenId": b"NOTWOODY-aaaaaa",
+            "getPairSecondTokenId": main.WEGLD.encode(),
+            "getPairFirstTokenReserve": (1).to_bytes(1, "big"),
+            "getPairSecondTokenReserve": (1).to_bytes(1, "big"),
+            "getPairLpTokenId": b"WOODYWEGLD-9832b2",
+        }
+        raw = raw_by_function[payload["funcName"]]
+        return {"data": {"data": {"returnData": [base64.b64encode(raw).decode()]}}}
+
+    monkeypatch.setattr(main, "post_json", fake_post_json)
+    snap = main.get_onedex_woody_pool_snapshot()
+    assert snap["ok"] is False
+    assert "verification failed" in snap["reason"]
