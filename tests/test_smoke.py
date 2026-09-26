@@ -843,3 +843,15 @@ def test_runtime_state_uses_configured_data_directory(tmp_path, monkeypatch) -> 
     main.write_json_file("data/last_alerts.json", {"BUY": {"amount": 1}})
     assert (tmp_path / "runtime" / "last_alerts.json").exists()
     assert main.read_json_file("data/last_alerts.json", {}) == {"BUY": {"amount": 1}}
+
+
+def test_lp_snapshot_does_not_report_success_when_storage_fails(monkeypatch) -> None:
+    monkeypatch.setattr(main, "load_lp_snapshots", lambda: {"snapshots": []})
+    monkeypatch.setattr(main, "fetch_lp_holders", lambda: {
+        "ok": True, "lp_token_id": "LP-WOODYEGLD", "total_supply": 100,
+        "pool_value_egld": 5, "holders": [],
+    })
+    monkeypatch.setattr(main, "write_json_file", lambda path, payload: False)
+    result = main.save_lp_snapshot(force=True)
+    assert result["ok"] is False
+    assert "could not be saved" in result["reason"]
