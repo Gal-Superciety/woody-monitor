@@ -709,6 +709,30 @@ def test_token_market_stats_prefers_cross_dex_liquidity(monkeypatch) -> None:
     assert stats["volume_24h_usd"] == 4.48
 
 
+def test_public_liquidity_total_uses_readable_pools_not_token_api(monkeypatch) -> None:
+    monkeypatch.setattr(main, "build_ai_recommendation", lambda: {"price_usd": 0.00004, "recommendation": "WATCH", "confidence": 30, "risk": "LOW", "reason": "test"})
+    monkeypatch.setattr(main, "get_token_market_stats", lambda: {"liquidity_usd": 307.87, "holders": 338})
+    monkeypatch.setattr(main, "build_market_pulse", lambda: {})
+    monkeypatch.setattr(main, "build_risk_radar", lambda: {})
+    monkeypatch.setattr(main, "get_accumulation_detection_payload", lambda: {})
+    monkeypatch.setattr(main, "get_fake_pump_detection_payload", lambda: {})
+    monkeypatch.setattr(main, "get_public_pool_reserves", lambda: [
+        {"woodyReserve": 10_000_000, "quoteReserve": 100},
+        {"woodyReserve": 2_000_000, "quoteReserve": 20},
+        {"status": "unavailable"},
+    ])
+    payload = main.build_dashboard_status_payload()
+    assert abs(payload["liquidity"]["totalUsd"] - 960) < 0.000001
+    assert payload["liquidity"]["estimatedPoolCount"] == 2
+    assert "estimated" in payload["liquidity"]["valuation"]
+
+
+def test_reward_pool_save_reports_storage_failure(monkeypatch) -> None:
+    monkeypatch.setattr(main, "read_json_file", lambda *args: {})
+    monkeypatch.setattr(main, "write_json_file", lambda *args: False)
+    assert main.save_last_lp_reward_pool(1.5) is False
+
+
 def test_onedex_woody_pair_uses_pair_specific_view_reserves(monkeypatch) -> None:
     import base64
 

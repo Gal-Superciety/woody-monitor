@@ -1522,7 +1522,15 @@ def build_dashboard_status_payload() -> Dict[str, Any]:
     token_stats = get_token_market_stats()
     trim_old_volume_entries(24)
     tracked_volume_24h_usd = sum(safe_float(entry.get("usd")) for entry in VOLUME_HISTORY)
-    liquidity_usd = safe_float(token_stats.get("liquidity_usd")) or safe_float(rec["total_liquidity_usd"])
+    pools = get_public_pool_reserves()
+    woody_price = safe_float(rec["price_usd"])
+    readable_pools = [pool for pool in pools if pool.get("woodyReserve") and pool.get("quoteReserve")]
+    # Value both sides using the WOODY reference price. This is an estimate,
+    # not a separately verified USD price for every quote token.
+    estimated_pool_usd = (
+        2 * woody_price * sum(safe_float(pool["woodyReserve"]) for pool in readable_pools)
+        if woody_price > 0 and readable_pools else None
+    )
     volume_24h_usd = safe_float(token_stats.get("volume_24h_usd")) or tracked_volume_24h_usd
     holders_count = safe_int(token_stats.get("holders"), 0) or LAST_HOLDERS_COUNT
     return {
@@ -1538,10 +1546,11 @@ def build_dashboard_status_payload() -> Dict[str, Any]:
         "fakePump": get_fake_pump_detection_payload(),
         "price": {"usd": rec["price_usd"]},
         "liquidity": {
-            "totalUsd": liquidity_usd,
-            "totalTvlUsd": safe_float(token_stats.get("total_tvl_usd")),
-            "source": str(token_stats.get("liquidity_source") or "market feed"),
-            "pools": get_public_pool_reserves(),
+            "totalUsd": estimated_pool_usd,
+            "source": "on-chain pool reserves × WOODY reference price",
+            "valuation": "estimated; quote-token USD prices not independently valued",
+            "estimatedPoolCount": len(readable_pools),
+            "pools": pools,
         },
         "holders": {"count": holders_count},
         "volume24hUsd": volume_24h_usd,
@@ -2489,7 +2498,7 @@ def format_rewards_report(reward_pool_egld: float) -> str:
         return "⚠️ *WOODY Global LP Rewards*\n\nSome active pools are unavailable. Reward shares are withheld until the full snapshot can be verified."
     if safe_float(data.get("total_eligible_egld")) <= 0:
         return "🎁 *WOODY Global LP Rewards*\n\nNo eligible global LP liquidity found right now."
-    save_last_lp_reward_pool(reward_pool_egld)
+    reward_pool_saved = save_last_lp_reward_pool(reward_pool_egld)
     lines = [
         "🎁 *WOODY Global LP Rewards*",
         f"Reward pool: *{reward_pool_egld:,.6f} EGLD*",
@@ -2498,6 +2507,8 @@ def format_rewards_report(reward_pool_egld: float) -> str:
     ]
     for idx, row in enumerate(data.get("rows", []), start=1):
         lines.append(f"{idx}. `{row.get('wallet')}`\n   LP value: *{safe_float(row.get('total_egld')):,.6f} EGLD*\n   Share: *{safe_float(row.get('share_pct')):.4f}%*\n   Reward: *{safe_float(row.get('reward_egld')):,.8f} EGLD*")
+    if not reward_pool_saved:
+        lines.append("\n⚠️ Reward pool could not be saved; the monthly leaderboard may show an older reward amount.")
     return "\n".join(lines)
 
 
@@ -2646,12 +2657,12 @@ def calculate_monthly_lp_rewards(reward_pool_egld: float, month_key: Optional[st
     return {**averages, "rows": rows, "reward_pool_egld": reward_pool_egld}
 
 
-def save_last_lp_reward_pool(reward_pool_egld: float, month_key: Optional[str] = None) -> None:
+def save_last_lp_reward_pool(reward_pool_egld: float, month_key: Optional[str] = None) -> bool:
     payload = read_json_file(LP_REWARDS_FILE, {})
     if not isinstance(payload, dict):
         payload = {}
     payload[current_month_key() if month_key is None else month_key] = {"reward_pool_egld": reward_pool_egld, "updated_at": datetime.now(timezone.utc).isoformat()}
-    write_json_file(LP_REWARDS_FILE, payload)
+    return write_json_file(LP_REWARDS_FILE, payload)
 
 
 def get_last_lp_reward_pool(month_key: Optional[str] = None) -> float:
