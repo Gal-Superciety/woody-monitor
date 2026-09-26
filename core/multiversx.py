@@ -383,24 +383,6 @@ def _is_mvx_api_url(url: str) -> bool:
     return bool(url and MVX_API and url.startswith(MVX_API.rstrip("/") + "/"))
 
 
-MVX_RATE_LIMIT_COOLDOWN_UNTIL = 0.0
-
-
-def _record_mvx_rate_limit(response: requests.Response) -> None:
-    global MVX_RATE_LIMIT_COOLDOWN_UNTIL
-    if response.status_code != 429:
-        return
-    try:
-        retry_after = float(response.headers.get("Retry-After", "5"))
-    except (TypeError, ValueError):
-        retry_after = 5.0
-    with MVX_RATE_LIMIT_LOCK:
-        MVX_RATE_LIMIT_COOLDOWN_UNTIL = max(
-            MVX_RATE_LIMIT_COOLDOWN_UNTIL,
-            time.monotonic() + min(60.0, max(1.0, retry_after)),
-        )
-
-
 def _wait_for_mvx_rate_limit() -> None:
     global MVX_RATE_LIMIT_TOKENS, MVX_RATE_LIMIT_UPDATED_AT
     while True:
@@ -412,14 +394,10 @@ def _wait_for_mvx_rate_limit() -> None:
                 MVX_RATE_LIMIT_TOKENS + (elapsed * float(MVX_API_RATE_LIMIT_PER_SECOND)),
             )
             MVX_RATE_LIMIT_UPDATED_AT = now
-            cooldown_wait = MVX_RATE_LIMIT_COOLDOWN_UNTIL - now
-            if cooldown_wait > 0:
-                wait_seconds = cooldown_wait
-            elif MVX_RATE_LIMIT_TOKENS >= 1.0:
+            if MVX_RATE_LIMIT_TOKENS >= 1.0:
                 MVX_RATE_LIMIT_TOKENS -= 1.0
                 return
-            else:
-                wait_seconds = (1.0 - MVX_RATE_LIMIT_TOKENS) / float(MVX_API_RATE_LIMIT_PER_SECOND)
+            wait_seconds = (1.0 - MVX_RATE_LIMIT_TOKENS) / float(MVX_API_RATE_LIMIT_PER_SECOND)
         logger.debug("MVX API rate limit wait", extra={"wait_seconds": wait_seconds})
         time.sleep(min(max(wait_seconds, 0.01), 1.0))
 
@@ -431,8 +409,6 @@ def get_json(url: str, params: Optional[dict] = None) -> Optional[Any]:
             _wait_for_mvx_rate_limit()
         logger.debug("HTTP GET", extra={"url": url, "params": params})
         r = requests.get(url, params=params, headers=UA, timeout=API_TIMEOUT_SECONDS)
-        if _is_mvx_api_url(url):
-            _record_mvx_rate_limit(r)
         r.raise_for_status()
         API_OK_COUNT += 1
         return r.json()
@@ -450,8 +426,6 @@ def post_json(url: str, payload: dict) -> Optional[Any]:
             _wait_for_mvx_rate_limit()
         logger.debug("HTTP POST", extra={"url": url})
         r = requests.post(url, json=payload, headers=UA, timeout=API_TIMEOUT_SECONDS)
-        if _is_mvx_api_url(url):
-            _record_mvx_rate_limit(r)
         r.raise_for_status()
         API_OK_COUNT += 1
         return r.json()

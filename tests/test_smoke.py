@@ -726,16 +726,6 @@ def test_reward_pool_save_reports_storage_failure(monkeypatch) -> None:
     assert main.save_last_lp_reward_pool(1.5) is False
 
 
-def test_mvx_429_sets_shared_retry_after_cooldown(monkeypatch) -> None:
-    class Response:
-        status_code = 429
-        headers = {"Retry-After": "12"}
-
-    monkeypatch.setattr(main.time, "monotonic", lambda: 100.0)
-    monkeypatch.setattr(main, "MVX_RATE_LIMIT_COOLDOWN_UNTIL", 0.0)
-    main._record_mvx_rate_limit(Response())
-    assert main.MVX_RATE_LIMIT_COOLDOWN_UNTIL == 112.0
-
 
 def test_onedex_woody_pair_uses_pair_specific_view_reserves(monkeypatch) -> None:
     import base64
