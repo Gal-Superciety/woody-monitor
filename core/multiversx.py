@@ -1475,7 +1475,7 @@ def get_public_pool_reserves() -> List[Dict[str, Any]]:
         if not address or address in seen:
             continue
         seen.add(address)
-        snap = get_pool_snapshot(address, str(pool.get("name") or "WOODY pool"))
+        snap = get_onedex_woody_pool_snapshot() if str(pool.get("dex") or "").lower() == "onedex" and str(pool.get("lp_token") or "") == "WOODYWEGLD-9832b2" else get_pool_snapshot(address, str(pool.get("name") or "WOODY pool"))
         if not snap.get("ok"):
             pools.append({"dex": str(pool.get("dex") or "DEX"), "pair": str(pool.get("name") or "WOODY pool"), "address": address, "status": "unavailable", "reason": str(snap.get("reason") or "pool data unavailable"), "valuation": "not_verified"})
             continue
