@@ -1096,7 +1096,7 @@ def build_risk_radar(hours: int = 24) -> Dict[str, Any]:
         suggestion = "Monitor next market moves carefully."
     else:
         risk_level = "LOW"
-        suggestion = "Risk structure is controlled; continue disciplined monitoring."
+        suggestion = "Few configured risk markers detected; limited observations can hide risks."
 
     return {"level": risk_level, "score": min(100, score), "detected": detected,
             "suggestion": suggestion, "windowHours": hours, "sampleCount": len(trades)}
@@ -1259,7 +1259,7 @@ def build_market_pulse(hours: int = 24) -> Dict[str, Any]:
 
     if readable_pools == len(pool_snapshots) and pool_snapshots:
         score += 10
-        reasons.append("liquidity stable across tracked pools")
+        reasons.append("reserves readable across tracked pools")
     elif readable_pools > 0:
         score += 2
         reasons.append("liquidity partially visible")
