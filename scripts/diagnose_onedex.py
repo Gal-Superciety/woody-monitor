@@ -45,9 +45,13 @@ def main():
     account = read(f"/accounts/{POOL}")
     if isinstance(account, dict):
         print("Account:", json.dumps({k: account.get(k) for k in ("address", "isSmartContract", "ownerAddress", "balance")}))
+    count = read(f"/accounts/{POOL}/tokens/count")
+    print("Configured contract token count:", count)
     tokens = read(f"/accounts/{POOL}/tokens", {"from": 0, "size": 100})
     if isinstance(tokens, list):
         print("Token identifiers on configured address:", [t.get("identifier") for t in tokens])
+    if isinstance(tokens, list) and not any(t.get("identifier") == WOODY for t in tokens):
+        print("WOODY missing from first token-list page; checking direct token endpoint instead.")
     for token in (WOODY, WEGLD):
         show_balance(read(f"/accounts/{POOL}/tokens/{token}"), token)
     lp = read(f"/tokens/{LP}")
