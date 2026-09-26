@@ -656,40 +656,24 @@ def get_holders_count() -> Optional[int]:
 
 
 def get_liquidity_text() -> str:
-    rows: List[Tuple[str, float, str]] = []
-    total_usd = 0.0
-
-    for addr, label in WATCHED_POOLS.items():
-        snap = get_pool_snapshot(addr, label)
-        if not snap.get("ok"):
-            reason = str(snap.get("reason", "unavailable"))
-            if label == "OneDex" and "WOODY balance" in reason:
-                reason = "OneDex pool detected but WOODY balance unavailable from API"
-            rows.append((label, 0.0, f"⚠️ {reason}"))
-            continue
-        pool_value = safe_float(snap.get("pool_value_usd"))
-        total_usd += pool_value
-        rows.append((label, pool_value, ""))
-
-    dominant_pool = max(rows, key=lambda x: x[1])[0] if rows else "N/A"
-    healthy_pools = sum(1 for _, value, reason in rows if value > 0 and not reason)
-    health = "Stable" if healthy_pools >= max(1, len(rows) // 2) else "Fragile"
-    lines: List[str] = []
-    for idx, (label, value, reason) in enumerate(rows, start=1):
-        if reason:
-            lines.append(f"{idx}. *{label}* → {reason}")
-            continue
-        share = (value / total_usd * 100) if total_usd > 0 else 0.0
-        bar_fill = int(round(share / 10))
-        bar = "█" * bar_fill + "░" * (10 - bar_fill)
-        lines.append(f"{idx}. *{label}* • `${value:,.2f}`\n   `{bar}` {share:.1f}%")
-
+    price = safe_float((get_best_price() or {}).get("price_usd"))
+    liquidity = build_public_liquidity(price, get_public_pool_reserves())
+    lines = []
+    for pool in liquidity["pools"]:
+        label = f"{pool.get('dex', 'DEX')} · {pool.get('pair', 'WOODY pool')}"
+        value = pool.get("estimatedUsd")
+        if value is None:
+            lines.append(f"• {label}: unavailable")
+        else:
+            lines.append(f"• {label}: *${value:,.2f}*")
+    total = liquidity["totalUsd"]
+    total_text = f"${total:,.2f}" if total is not None else "Unavailable"
     return (
-        "💧 *WOODY Liquidity Intelligence*\n\n"
-        f"Dominant pool: *{dominant_pool}*\n"
-        f"Liquidity health: *{health}*\n\n"
+        "💧 *WOODY Pool Liquidity Estimate*\n\n"
         + "\n".join(lines)
-        + f"\n\nPool distribution summary • total: `${total_usd:,.2f}`"
+        + f"\n\nTotal: *{total_text}* across {liquidity['estimatedPoolCount']} readable pools."
+        + "\nMethod: 2 × WOODY reserve × WOODY reference price."
+        + "\nQuote-token USD prices are not independently valued; unavailable pools are excluded."
     )
 
 
@@ -1055,7 +1039,7 @@ def get_ai_analysis_text(hours: int = 24) -> str:
     return "🧠 *WOODY AI Analysis*\n\n" + "\n".join(bullets) + f"\n\nAI Confidence: *{confidence}/100*\nShort-term outlook: *{outlook}*"
 
 
-def get_risk_radar_text(hours: int = 24) -> str:
+def build_risk_radar(hours: int = 24) -> Dict[str, Any]:
     trades = _recent_trades(hours)
     buys = [x for x in trades if _entry_side(x) > 0]
     sells = [x for x in trades if _entry_side(x) < 0]
@@ -1114,19 +1098,16 @@ def get_risk_radar_text(hours: int = 24) -> str:
         risk_level = "LOW"
         suggestion = "Risk structure is controlled; continue disciplined monitoring."
 
-    detected_lines = "\n".join(f"• {item}" for item in detected) if detected else "• no major risk anomalies detected"
-    logger.info("RISK RADAR GENERATED | level=%s score=%s detected=%s", risk_level, score, len(detected))
-    return (
-        "⚠️ *WOODY AI Risk Radar*\n\n"
-        f"Risk Level: *{risk_level}*\n"
-        f"Risk Score: *{min(100, score)}/100*\n\n"
-        "Detected:\n"
-        f"{detected_lines}\n\n"
-        "AI Suggestion:\n"
-        f"{suggestion}"
-    )
+    return {"level": risk_level, "score": min(100, score), "detected": detected,
+            "suggestion": suggestion, "windowHours": hours, "sampleCount": len(trades)}
 
 
+def get_risk_radar_text(hours: int = 24) -> str:
+    signal = build_risk_radar(hours)
+    reasons = "\n".join(f"• {item}" for item in signal["detected"]) or "• no major risk markers detected"
+    return ("⚠️ *WOODY Risk Radar*\n\n"
+            f"Risk Level: *{signal['level']}*\nRisk Score: *{signal['score']}/100*\n\n"
+            f"Detected:\n{reasons}\n\nBased on monitored activity; a low score is not a safety guarantee.")
 
 
 def get_accumulation_detection_text(hours: int = 24) -> str:
@@ -1249,7 +1230,7 @@ def get_accumulation_detection_text(hours: int = 24) -> str:
         + "\n\nAI Interpretation:\n"
         + interpretation
     )
-def get_market_pulse_text(hours: int = 24) -> str:
+def build_market_pulse(hours: int = 24) -> Dict[str, Any]:
     trades = _recent_trades(hours)
     buys = [x for x in trades if _entry_side(x) > 0]
     sells = [x for x in trades if _entry_side(x) < 0]
@@ -1305,18 +1286,16 @@ def get_market_pulse_text(hours: int = 24) -> str:
     mood = "Bullish" if score >= 68 else ("Balanced" if score >= 45 else "Defensive")
     trend_strength = "Strong" if score >= 78 else ("Moderate" if score >= 55 else "Weak")
 
-    logger.info("MARKET PULSE GENERATED | score=%s mood=%s", score, mood)
-    return (
-        "🧠 *WOODY Market Pulse*\n\n"
-        f"Pulse Score: *{score}/100*\n"
-        f"Mood: *{mood}*\n"
-        f"Trend Strength: *{trend_strength}*\n"
-        f"Activity: *{activity}*\n\n"
-        "Reasons:\n"
-        + "\n".join(f"• {reason}" for reason in reasons[:4])
-    )
+    return {"score": score, "mood": mood, "activity": activity, "trendStrength": trend_strength,
+            "reasons": reasons, "windowHours": hours, "sampleCount": len(trades)}
 
 
+def get_market_pulse_text(hours: int = 24) -> str:
+    signal = build_market_pulse(hours)
+    reasons = "\n".join(f"• {reason}" for reason in signal["reasons"][:4])
+    return ("🧠 *WOODY Market Pulse*\n\n"
+            f"Pulse Score: *{signal['score']}/100*\nMood: *{signal['mood']}*\n"
+            f"Trend Strength: *{signal['trendStrength']}*\nActivity: *{signal['activity']}*\n\nReasons:\n{reasons}")
 
 
 def get_fake_pump_detection_text(hours: int = 24) -> str:
@@ -1408,8 +1387,8 @@ def get_fake_pump_detection_text(hours: int = 24) -> str:
         status = "SPECULATIVE MOMENTUM"
         interpretation = "Momentum is active but speculative. Confirmation from liquidity and holder growth is still weak."
     else:
-        status = "HEALTHY MOMENTUM"
-        interpretation = "Momentum appears healthier, with fewer fake-pump characteristics right now."
+        status = "FEW RISK MARKERS"
+        interpretation = "Few monitored risk markers are present. Low activity or missing observations can limit this assessment."
 
     if not detected:
         detected = ["no strong fake pump markers detected"]
@@ -1418,7 +1397,7 @@ def get_fake_pump_detection_text(hours: int = 24) -> str:
     return (
         "⚠️ *WOODY Fake Pump Detection*\n\n"
         f"Status: *{status}*\n"
-        f"Confidence: *{confidence}/100*\n\n"
+        f"Risk marker score: *{confidence}/100*\n\n"
         "Detected:\n"
         + "\n".join(f"• {item}" for item in detected[:6])
         + "\n\nAI Interpretation:\n"
@@ -1443,49 +1422,14 @@ def get_accumulation_detection_payload(hours: int = 24) -> Dict[str, Any]:
 
 def get_fake_pump_detection_payload(hours: int = 24) -> Dict[str, Any]:
     text = get_fake_pump_detection_text(hours)
-    status = "HEALTHY MOMENTUM"
+    status = "FEW RISK MARKERS"
     confidence = 0
     for token in text.splitlines():
         if token.startswith("Status:"):
             status = token.split("*")[1]
-        if token.startswith("Confidence:"):
+        if token.startswith(("Risk marker score:", "Confidence:")):
             confidence = safe_int(token.split("*")[1].split("/")[0], 0)
-    return {"status": status, "confidence": confidence}
-
-
-def build_market_pulse(hours: int = 24) -> Dict[str, Any]:
-    trades = _recent_trades(hours)
-    buys = [x for x in trades if _entry_side(x) > 0]
-    sells = [x for x in trades if _entry_side(x) < 0]
-    buy_volume = sum(safe_float(x.get("usd")) for x in buys)
-    sell_volume = sum(safe_float(x.get("usd")) for x in sells)
-    score = max(35, min(92, int(55 + (buy_volume - sell_volume) / max(1.0, buy_volume + sell_volume) * 40)))
-    mood = "Defensive" if score < 48 else ("Balanced" if score < 60 else "Constructive")
-    total_usd = buy_volume + sell_volume
-    activity = "Low" if total_usd < BIG_ALERT_USD * 4 else ("Medium" if total_usd < WHALE_ALERT_USD * 8 else "High")
-    return {"score": score, "mood": mood, "activity": activity}
-
-
-def build_risk_radar(hours: int = 24) -> Dict[str, Any]:
-    trades = _recent_trades(hours)
-    buys = [x for x in trades if _entry_side(x) > 0]
-    sells = [x for x in trades if _entry_side(x) < 0]
-    buy_volume = sum(safe_float(x.get("usd")) for x in buys)
-    sell_volume = sum(safe_float(x.get("usd")) for x in sells)
-    score = 0
-    if sell_volume > buy_volume * 1.15 and (buy_volume + sell_volume) > 0:
-        score += 18
-    if max((safe_float(x.get("usd")) for x in sells), default=0.0) >= WHALE_ALERT_USD:
-        score += 20
-    if (not WS_CONNECTED) or API_FAIL_COUNT > API_OK_COUNT:
-        score += 16
-    recent_2h = _recent_trades(2)
-    if len(recent_2h) < 3 or sum(safe_float(x.get("usd")) for x in recent_2h) < BIG_ALERT_USD:
-        score += 10
-    if LAST_HOLDERS_COUNT is not None and PENDING_HOLDER_VALUE is not None and PENDING_HOLDER_VALUE < LAST_HOLDERS_COUNT:
-        score += 12
-    level = "LOW" if score < 28 else ("MEDIUM" if score < 55 else "HIGH")
-    return {"level": level, "score": min(100, score)}
+    return {"status": status, "confidence": confidence, "riskScore": confidence, "sampleCount": len(_recent_trades(hours))}
 
 
 def get_public_pool_reserves() -> List[Dict[str, Any]]:
@@ -1518,6 +1462,20 @@ def get_public_pool_reserves() -> List[Dict[str, Any]]:
     return pools
 
 
+def build_public_liquidity(woody_price: float, pools: List[Dict[str, Any]]) -> Dict[str, Any]:
+    valued = []
+    for pool in pools:
+        item = dict(pool)
+        readable = safe_float(pool.get("woodyReserve")) > 0 and safe_float(pool.get("quoteReserve")) > 0
+        item["estimatedUsd"] = 2 * woody_price * safe_float(pool.get("woodyReserve")) if readable and woody_price > 0 else None
+        valued.append(item)
+    estimates = [p["estimatedUsd"] for p in valued if p["estimatedUsd"] is not None]
+    return {"totalUsd": sum(estimates) if estimates else None,
+            "source": "on-chain pool reserves × WOODY reference price",
+            "valuation": "estimated; quote-token USD prices not independently valued",
+            "estimatedPoolCount": len(estimates), "pools": valued}
+
+
 def build_dashboard_status_payload() -> Dict[str, Any]:
     rec = build_ai_recommendation()
     token_stats = get_token_market_stats()
@@ -1525,14 +1483,7 @@ def build_dashboard_status_payload() -> Dict[str, Any]:
     tracked_volume_24h_usd = sum(safe_float(entry.get("usd")) for entry in VOLUME_HISTORY)
     pools = get_public_pool_reserves()
     woody_price = safe_float(rec["price_usd"])
-    readable_pools = [pool for pool in pools if pool.get("woodyReserve") and pool.get("quoteReserve")]
-    # Value both sides using the WOODY reference price. This is an estimate,
-    # not a separately verified USD price for every quote token.
-    estimated_pool_usd = (
-        2 * woody_price * sum(safe_float(pool["woodyReserve"]) for pool in readable_pools)
-        if woody_price > 0 and readable_pools else None
-    )
-    volume_24h_usd = safe_float(token_stats.get("volume_24h_usd")) or tracked_volume_24h_usd
+    liquidity = build_public_liquidity(woody_price, pools)
     holders_count = safe_int(token_stats.get("holders"), 0) or LAST_HOLDERS_COUNT
     return {
         "marketPulse": build_market_pulse(),
@@ -1546,15 +1497,12 @@ def build_dashboard_status_payload() -> Dict[str, Any]:
         "accumulation": get_accumulation_detection_payload(),
         "fakePump": get_fake_pump_detection_payload(),
         "price": {"usd": rec["price_usd"]},
-        "liquidity": {
-            "totalUsd": estimated_pool_usd,
-            "source": "on-chain pool reserves × WOODY reference price",
-            "valuation": "estimated; quote-token USD prices not independently valued",
-            "estimatedPoolCount": len(readable_pools),
-            "pools": pools,
-        },
+        "liquidity": liquidity,
         "holders": {"count": holders_count},
-        "volume24hUsd": volume_24h_usd,
+        "volume24hUsd": tracked_volume_24h_usd,
+        "volume": {"usd": tracked_volume_24h_usd, "source": "WOODY Monitor detected trades",
+                   "tradeCount": len(VOLUME_HISTORY), "windowHours": 24,
+                   "reportedApiUsd": token_stats.get("volume_24h_usd")},
         "updatedAt": int(time.time()),
     }
 
