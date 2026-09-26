@@ -4090,10 +4090,16 @@ async def ws_connect_loop(stop_event: asyncio.Event) -> None:
             for root_hash in hashes:
                 add_root(root_hash)
 
+        @sio.on("error")
+        async def on_subscription_error(data):
+            # The socket server reports subscription failures through this event,
+            # even when emit() itself succeeds. Keep the diagnostic bounded.
+            logger.warning("WS SUBSCRIPTION ERROR | payload=%s", str(data)[:500])
+
         # Catch-all to surface any unexpected event names from the API
         @sio.on("*")
         async def on_any_event(event, data):
-            if event in {"connect", "disconnect", "customTransfers", "customTransferUpdate"}:
+            if event in {"connect", "disconnect", "customTransfers", "customTransferUpdate", "error"}:
                 return
             logger.info("WS EVENT | unhandled event=%s payload_type=%s", event, type(data).__name__)
 
