@@ -3983,7 +3983,12 @@ def add_root(root_hash: str) -> None:
 
 
 async def _send_subscriptions(sio: socketio.AsyncClient) -> None:
-    """Emit all subscribeCustomTransfers subscriptions and log each attempt."""
+    """Subscribe to WOODY and pool addresses within the server's 10-slot limit.
+
+    LP mint/burn transactions involve a pool address. Subscribing to each LP
+    token as well would exceed the socket server's per-client limit and cause
+    silent subscription rejections.
+    """
     logger.info("WS SUBSCRIBE | Sending token subscription for %s", WOODY)
     try:
         await sio.emit("subscribeCustomTransfers", {"token": WOODY})
@@ -3991,7 +3996,7 @@ async def _send_subscriptions(sio: socketio.AsyncClient) -> None:
     except Exception as exc:
         logger.warning("WS SUBSCRIBE | Token subscription failed for %s -> %s", WOODY, exc)
 
-    for pool in WATCHED_POOLS:
+    for pool in list(WATCHED_POOLS)[:9]:
         logger.info("WS SUBSCRIBE | Sending address subscription for pool %s", pool)
         try:
             await sio.emit("subscribeCustomTransfers", {"address": pool})
@@ -3999,13 +4004,8 @@ async def _send_subscriptions(sio: socketio.AsyncClient) -> None:
         except Exception as exc:
             logger.warning("WS SUBSCRIBE | Address subscription failed for pool %s -> %s", pool, exc)
 
-    for lp_token in LP_TOKEN_IDS:
-        logger.info("WS SUBSCRIBE | Sending LP token subscription for %s", lp_token)
-        try:
-            await sio.emit("subscribeCustomTransfers", {"token": lp_token})
-            logger.info("WS SUBSCRIBE | LP token subscription sent for %s", lp_token)
-        except Exception as exc:
-            logger.warning("WS SUBSCRIBE | LP token subscription failed for %s -> %s", lp_token, exc)
+    if len(WATCHED_POOLS) > 9:
+        logger.warning("WS SUBSCRIBE | %s pool addresses exceed the remaining 9 subscription slots", len(WATCHED_POOLS))
 
 
 def _extract_root_hashes(data: Any) -> List[str]:
