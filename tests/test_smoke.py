@@ -756,3 +756,66 @@ def test_onedex_pair_fails_closed_on_wrong_tokens(monkeypatch) -> None:
     snap = main.get_onedex_woody_pool_snapshot()
     assert snap["ok"] is False
     assert "verification failed" in snap["reason"]
+
+
+def test_onedex_pool_snapshot_never_reads_shared_account_balances(monkeypatch) -> None:
+    main.POOL_SNAPSHOT_CACHE.clear()
+    monkeypatch.setattr(main, "get_json", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("shared contract balance read")))
+    monkeypatch.setattr(main, "get_onedex_woody_pool_snapshot", lambda: {
+        "ok": True, "woody_amount": 100, "pair_amount": 2,
+        "pair_token": main.WEGLD, "pair_symbol": "WEGLD",
+    })
+    monkeypatch.setattr(main, "get_egld_usd", lambda: 10)
+    snap = main.get_pool_snapshot(main.ONEDEX_POOL_ADDRESS, "OneDex")
+    assert snap["pool_value_usd"] == 40
+    assert main.get_pool_tvl_egld(main.LP_POOLS[0])["pool_value_egld"] == 4
+    main.POOL_SNAPSHOT_CACHE.clear()
+
+
+def test_lp_snapshot_refuses_incomplete_holder_pagination(monkeypatch) -> None:
+    monkeypatch.setattr(main, "LP_HOLDERS_PAGE_SIZE", 1)
+    monkeypatch.setattr(main, "discover_xexchange_lp_token_id", lambda: "LP-WOODYEGLD")
+    monkeypatch.setattr(main, "get_lp_total_supply_raw_and_decimals", lambda token: (100, 0))
+    monkeypatch.setattr(main, "get_xexchange_pool_value_egld", lambda: 2)
+    monkeypatch.setattr(main, "get_json", lambda *args, **kwargs: [{"address": "erd1alice", "balance": "50"}])
+    result = main.fetch_lp_holders(limit_pages=1)
+    assert result["ok"] is False
+    assert "pagination limit" in result["reason"]
+
+
+def test_vm_query_uses_gateway_when_api_returns_no_values(monkeypatch) -> None:
+    import base64
+
+    urls = []
+
+    def fake_post(url, payload):
+        urls.append(url)
+        if "gateway" not in url:
+            return {"data": {"data": {"returnCode": "error", "returnData": []}}}
+        return {"data": {"data": {"returnCode": "ok", "returnData": [base64.b64encode(b"WOODY-5f9d9c").decode()]}}}
+
+    monkeypatch.setattr(main, "post_json", fake_post)
+    assert main._vm_query_scalar("getPairFirstTokenId", ["022f"]) == b"WOODY-5f9d9c"
+    assert len(urls) == 2
+
+
+def test_global_rewards_refuse_partial_active_pool_snapshot(monkeypatch) -> None:
+    partial = {
+        "pools": [{"status": "active", "ok": False, "label": "OneDex WOODY/WEGLD"}],
+        "rows": [{"wallet": "erd1alice", "total_egld": 2}],
+        "total_eligible_egld": 2,
+        "complete": False,
+    }
+    monkeypatch.setattr(main, "build_global_snapshot", lambda: partial)
+    rewards = main.calculate_lp_rewards(5)
+    assert rewards["rows"] == []
+    assert "withheld" in main.format_rewards_report(5)
+    import pytest
+    with pytest.raises(ValueError, match="cannot be verified"):
+        main.build_lp_export_csv(5)
+
+
+def test_broken_onedex_bober_pool_is_not_eligible() -> None:
+    bober = next(pool for pool in main.LP_POOLS if pool.get("lp_token") == "WOODYBOBER-1a1703")
+    assert bober["status"] == "excluded"
+    assert main.get_lp_holders(bober)["excluded"] is True
