@@ -53,7 +53,7 @@ def main():
     lp = read(f"/tokens/{LP}")
     if isinstance(lp, dict):
         print("LP metadata:", json.dumps({k: lp.get(k) for k in ("identifier", "name", "supply", "decimals", "owner")}))
-    print("If WOODY is absent at the configured address, verify the actual OneDex pair contract from on-chain LP transactions; do not substitute a router or estimate reserves.")
+    print("OneDex uses a shared contract for multiple pairs. If WOODY is absent from its account balances, resolve WOODY/EGLD reserves through a verified pair-specific on-chain view or indexer; never use unrelated tokens from the shared contract as pool reserves.")
 
 if __name__ == "__main__":
     main()
