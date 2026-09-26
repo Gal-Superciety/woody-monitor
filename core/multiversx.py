@@ -6,6 +6,7 @@ import logging
 import asyncio
 import json
 import threading
+import tempfile
 import calendar
 import csv
 import base64
@@ -307,16 +308,22 @@ def read_json_file(path: str, default: Any) -> Any:
         return default
 
 
-def write_json_file(path: str, payload: Any) -> None:
+def write_json_file(path: str, payload: Any) -> bool:
+    temporary = ""
     try:
         target = data_path(path)
         os.makedirs(os.path.dirname(target), exist_ok=True)
-        tmp = f"{target}.tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
+        fd, temporary = tempfile.mkstemp(prefix=".woody-", suffix=".tmp", dir=os.path.dirname(target))
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
-        os.replace(tmp, target)
+        os.replace(temporary, target)
+        return True
     except Exception as exc:
         logger.warning("Failed writing json file %s -> %s", path, exc)
+        return False
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def trim_old_volume_entries(hours: int = 24) -> None:
@@ -2566,7 +2573,8 @@ def save_lp_snapshot(force: bool = False, snapshot_time: Optional[datetime] = No
     }
     store["snapshots"].append(entry)
     store["snapshots"] = sorted(store["snapshots"], key=lambda x: str(x.get("created_at") or x.get("date", "")))[-120:]
-    write_json_file(LP_SNAPSHOT_FILE, store)
+    if not write_json_file(LP_SNAPSHOT_FILE, store):
+        return {"ok": False, "reason": "LP snapshot could not be saved to persistent storage"}
     logger.info("LP SNAPSHOT SAVED | date=%s holders=%s", date_key, len(entry["holders"]))
     return {"ok": True, "snapshot": entry}
 
