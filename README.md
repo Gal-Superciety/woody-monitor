@@ -9,7 +9,7 @@ WOODY Monitor Bot – Telegram bot that tracks WOODY token swaps, big buys, big 
    git clone <repo-url>
    cd woody-monitor
    ```
-2. **Creează un mediu Python izolat.**
+2. **Creează un mediu Python izolat.** Necesită Python 3.10 sau mai nou; producția Docker folosește Python 3.12.
    ```bash
    python3 -m venv .venv
    source .venv/bin/activate
