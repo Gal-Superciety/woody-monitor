@@ -709,6 +709,15 @@ def get_price_text() -> str:
 
 def _estimate_token_context_price(token_id: str) -> Dict[str, Any]:
     for addr, label in WATCHED_POOLS.items():
+        if addr == ONEDEX_POOL_ADDRESS:
+            snap = get_pool_snapshot(addr, label)
+            if not snap.get("ok"):
+                continue
+            token_amount = safe_float(snap.get("woody_amount")) if token_id == WOODY else (safe_float(snap.get("pair_amount")) if token_id == WEGLD else 0.0)
+            wegld_amount = safe_float(snap.get("pair_amount"))
+            if token_amount > 0 and token_id == WOODY and wegld_amount > 0:
+                return {"ok": True, "price_usd": wegld_amount / token_amount * get_egld_usd(), "pool": label, "pool_status": "active"}
+            continue
         res_map = reserves(addr)
         token_amount = find_token_amount(res_map, token_id)
         if token_amount <= 0:
@@ -1954,6 +1963,17 @@ def get_pool_snapshot(pool_address: str, label: str) -> Dict[str, Any]:
     cached = POOL_SNAPSHOT_CACHE.get(pool_address)
     if cached and now - cached[1] < POOL_SNAPSHOT_TTL_SECONDS:
         return cached[0]
+
+    if pool_address == ONEDEX_POOL_ADDRESS:
+        result = get_onedex_woody_pool_snapshot()
+        result["label"] = label
+        if result.get("ok"):
+            pair_amount = safe_float(result.get("pair_amount"))
+            egld_usd = get_egld_usd()
+            result["pool_value_usd"] = pair_amount * 2 * egld_usd if egld_usd > 0 else 0.0
+            result["value_reason"] = "" if egld_usd > 0 else "EGLD USD price unavailable"
+        POOL_SNAPSHOT_CACHE[pool_address] = (result, now)
+        return result
 
     data = get_json(f"{MVX_API}/accounts/{pool_address}/tokens")
     if data is None:
