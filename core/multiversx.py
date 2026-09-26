@@ -286,8 +286,13 @@ def image_path(path: str) -> str:
 
 
 def data_path(path: str) -> str:
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base_dir, path)
+    if os.path.isabs(path):
+        return path
+    project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if path == "data" or path.startswith("data/"):
+        base_dir = DATA_DIR if os.path.isabs(DATA_DIR) else os.path.join(project_dir, DATA_DIR)
+        return os.path.join(base_dir, path[5:] if path.startswith("data/") else "")
+    return os.path.join(project_dir, path)
 
 
 def ensure_data_dir() -> None:
@@ -303,9 +308,9 @@ def read_json_file(path: str, default: Any) -> Any:
 
 
 def write_json_file(path: str, payload: Any) -> None:
-    ensure_data_dir()
     try:
         target = data_path(path)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
         tmp = f"{target}.tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
