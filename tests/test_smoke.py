@@ -819,3 +819,21 @@ def test_broken_onedex_bober_pool_is_not_eligible() -> None:
     bober = next(pool for pool in main.LP_POOLS if pool.get("lp_token") == "WOODYBOBER-1a1703")
     assert bober["status"] == "excluded"
     assert main.get_lp_holders(bober)["excluded"] is True
+
+def test_websocket_subscriptions_stay_within_server_limit() -> None:
+    import asyncio
+
+    class Socket:
+        def __init__(self):
+            self.payloads = []
+
+        async def emit(self, event, payload):
+            assert event == "subscribeCustomTransfers"
+            self.payloads.append(payload)
+
+    socket = Socket()
+    asyncio.run(main._send_subscriptions(socket))
+    assert len(socket.payloads) <= 10
+    assert {"token": main.WOODY} in socket.payloads
+    assert {"address": main.ONEDEX_POOL_ADDRESS} in socket.payloads
+    assert all(payload.get("token") not in main.LP_TOKEN_IDS for payload in socket.payloads)
