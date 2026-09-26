@@ -1873,7 +1873,10 @@ def get_wallet_intelligence_text(limit: int = 10) -> str:
 def _vm_query_scalar(function_name: str, args: Optional[List[str]] = None) -> Optional[bytes]:
     """Run a read-only SC query and return its first raw result."""
     payload = {"scAddress": ONEDEX_POOL_ADDRESS, "funcName": function_name, "args": args or []}
-    data = post_json(f"{MVX_API}/query", payload)\n    if data is None:\n        # Public gateway exposes the canonical VM query route; keep this as a\n        # read-only fallback when the API facade does not proxy /query.\n        data = post_json("https://gateway.multiversx.com/vm-values/query", payload)
+    data = post_json(f"{MVX_API}/vm-values/query", payload)
+    if data is None:
+        # Fall back to the public gateway when the API facade is unavailable.
+        data = post_json("https://gateway.multiversx.com/vm-values/query", payload)
     values = _extract_vm_return_data(data)
     if not values:
         return None
