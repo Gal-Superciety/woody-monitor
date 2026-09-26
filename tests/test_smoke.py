@@ -837,3 +837,9 @@ def test_websocket_subscriptions_stay_within_server_limit() -> None:
     assert {"token": main.WOODY} in socket.payloads
     assert {"address": main.ONEDEX_POOL_ADDRESS} in socket.payloads
     assert all(payload.get("token") not in main.LP_TOKEN_IDS for payload in socket.payloads)
+
+def test_runtime_state_uses_configured_data_directory(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main, "DATA_DIR", str(tmp_path / "runtime"))
+    main.write_json_file("data/last_alerts.json", {"BUY": {"amount": 1}})
+    assert (tmp_path / "runtime" / "last_alerts.json").exists()
+    assert main.read_json_file("data/last_alerts.json", {}) == {"BUY": {"amount": 1}}
