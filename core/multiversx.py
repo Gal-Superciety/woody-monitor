@@ -1540,8 +1540,10 @@ def build_dashboard_status_payload() -> Dict[str, Any]:
 def write_dashboard_status_json() -> None:
     payload = build_dashboard_status_payload()
     os.makedirs(os.path.dirname(PUBLIC_STATUS_FILE) or ".", exist_ok=True)
-    with open(PUBLIC_STATUS_FILE, "w", encoding="utf-8") as f:
+    temporary = f"{PUBLIC_STATUS_FILE}.tmp"
+    with open(temporary, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
+    os.replace(temporary, PUBLIC_STATUS_FILE)
     logger.info("WOODY DASHBOARD JSON UPDATED")
 
 
@@ -1629,8 +1631,14 @@ async def status_json_handler(_: web.Request) -> web.Response:
         payload = cached_payload if isinstance(cached_payload, dict) else {}
     except (OSError, json.JSONDecodeError):
         payload = await asyncio.to_thread(build_dashboard_status_payload)
+    payload = dict(payload)
+    updated_at = safe_int(payload.get("updatedAt"), 0)
+    payload["freshness"] = {
+        "ageSeconds": max(0, int(time.time()) - updated_at) if updated_at else None,
+        "stale": not updated_at or time.time() - updated_at > max(120, PUBLIC_STATUS_INTERVAL * 3),
+    }
     logger.info("PUBLIC STATUS ENDPOINT SERVED")
-    return web.json_response(payload, content_type="application/json", headers={"Access-Control-Allow-Origin": "*"})
+    return web.json_response(payload, content_type="application/json", headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-store"})
 
 
 def start_public_status_server() -> None:
@@ -1883,7 +1891,7 @@ def _vm_query_scalar(function_name: str, args: Optional[List[str]] = None) -> Op
     """Run a read-only SC query and return its first raw result."""
     payload = {"scAddress": ONEDEX_POOL_ADDRESS, "funcName": function_name, "args": args or []}
     data = post_json(f"{MVX_API}/vm-values/query", payload)
-    if data is None:
+    if not _extract_vm_return_data(data):
         # Fall back to the public gateway when the API facade is unavailable.
         data = post_json("https://gateway.multiversx.com/vm-values/query", payload)
     values = _extract_vm_return_data(data)
@@ -2209,16 +2217,18 @@ def fetch_lp_holders(limit_pages: int = LP_HOLDERS_MAX_PAGES) -> Dict[str, Any]:
 
     total_supply_raw, lp_decimals = get_lp_total_supply_raw_and_decimals(lp_token_id)
     pool_value_egld = get_xexchange_pool_value_egld()
+    if total_supply_raw <= 0 or pool_value_egld <= 0:
+        return {"ok": False, "reason": "LP supply or verified pool value unavailable", "lp_token_id": lp_token_id}
     accounts: List[Dict[str, Any]] = []
+    complete = False
 
     for page in range(max(1, limit_pages)):
         params = {"from": page * LP_HOLDERS_PAGE_SIZE, "size": LP_HOLDERS_PAGE_SIZE}
         data = get_json(f"{MVX_API}/tokens/{lp_token_id}/accounts", params=params)
         if not isinstance(data, list):
-            if page == 0:
-                return {"ok": False, "reason": "LP holders API unavailable / unexpected response", "lp_token_id": lp_token_id}
-            break
+            return {"ok": False, "reason": "LP holders API unavailable / unexpected response", "lp_token_id": lp_token_id}
         if not data:
+            complete = True
             break
         for item in data:
             address = str(item.get("address") or item.get("owner") or "")
@@ -2227,7 +2237,11 @@ def fetch_lp_holders(limit_pages: int = LP_HOLDERS_MAX_PAGES) -> Dict[str, Any]:
                 continue
             accounts.append({"wallet": address, "balance_raw": balance_raw})
         if len(data) < LP_HOLDERS_PAGE_SIZE:
+            complete = True
             break
+
+    if not complete:
+        return {"ok": False, "reason": "LP holder pagination limit reached; increase LP_HOLDERS_MAX_PAGES", "lp_token_id": lp_token_id}
 
     total_supply_raw = _correct_lp_supply_raw(total_supply_raw, lp_decimals, [safe_int(a.get("balance_raw")) for a in accounts], lp_token_id)
     total_supply = amount_from_raw(total_supply_raw, lp_decimals)
@@ -2313,21 +2327,25 @@ def get_pool_tvl_egld(pool: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def get_lp_holders(pool: Dict[str, Any], limit_pages: int = LP_HOLDERS_MAX_PAGES) -> Dict[str, Any]:
-    if str(pool.get("status")) == "excluded":
-        return {"ok": False, "excluded": True, "reason": pool.get("reason", "excluded")}
+    if str(pool.get("status")) != "active":
+        return {"ok": False, "excluded": True, "reason": pool.get("reason", "not verified")}
     lp_token_id = discover_pool_lp_token(pool)
     if not lp_token_id:
         return {"ok": False, "reason": "LP token missing"}
     total_supply_raw, lp_decimals = get_lp_total_supply_raw_and_decimals(lp_token_id)
     tvl = get_pool_tvl_egld(pool)
     pool_value_egld = safe_float(tvl.get("pool_value_egld"))
+    if not tvl.get("ok") or total_supply_raw <= 0 or pool_value_egld <= 0:
+        return {"ok": False, "lp_token_id": lp_token_id, "reason": str(tvl.get("reason") or "LP supply or verified pool value unavailable")}
     accounts: List[Dict[str, Any]] = []
+    complete = False
     for page in range(max(1, limit_pages)):
         params = {"from": page * LP_HOLDERS_PAGE_SIZE, "size": LP_HOLDERS_PAGE_SIZE}
         data = get_json(f"{MVX_API}/tokens/{lp_token_id}/accounts", params=params)
         if not isinstance(data, list):
             return {"ok": False, "lp_token_id": lp_token_id, "reason": "LP holders API unavailable / unexpected response"}
         if not data:
+            complete = True
             break
         for item in data:
             address = str(item.get("address") or item.get("owner") or "")
@@ -2336,7 +2354,11 @@ def get_lp_holders(pool: Dict[str, Any], limit_pages: int = LP_HOLDERS_MAX_PAGES
                 continue
             accounts.append({"wallet": address, "balance_raw": balance_raw})
         if len(data) < LP_HOLDERS_PAGE_SIZE:
+            complete = True
             break
+
+    if not complete:
+        return {"ok": False, "lp_token_id": lp_token_id, "reason": "LP holder pagination limit reached; increase LP_HOLDERS_MAX_PAGES"}
 
     total_supply_raw = _correct_lp_supply_raw(total_supply_raw, lp_decimals, [safe_int(a.get("balance_raw")) for a in accounts], lp_token_id)
     holders: List[Dict[str, Any]] = []
@@ -2363,8 +2385,8 @@ def build_global_snapshot() -> Dict[str, Any]:
     pools: List[Dict[str, Any]] = []
     for pool in LP_POOLS:
         label = _pool_label(pool)
-        if str(pool.get("status")) == "excluded":
-            pools.append({**pool, "label": label, "status_text": "excluded", "ok": False})
+        if str(pool.get("status")) != "active":
+            pools.append({**pool, "label": label, "status_text": str(pool.get("status")), "ok": False})
             continue
         result = get_lp_holders(pool)
         status_text = "LP token found" if result.get("lp_token_id") else "LP token missing"
@@ -2382,12 +2404,13 @@ def build_global_snapshot() -> Dict[str, Any]:
     total = sum(safe_float(r.get("total_egld")) for r in rows)
     for row in rows:
         row["share_pct"] = safe_float(row.get("total_egld")) / total * 100 if total > 0 else 0.0
-    return {"pools": pools, "rows": rows, "total_eligible_egld": total, "eligible_wallets": len(rows)}
+    complete = all(p.get("ok") for p in pools if p.get("status") == "active")
+    return {"pools": pools, "rows": rows, "total_eligible_egld": total, "eligible_wallets": len(rows), "complete": complete}
 
 
 def format_snapshot_report(snapshot: Optional[Dict[str, Any]] = None, limit: int = 20) -> str:
     data = snapshot or build_global_snapshot()
-    active_count = sum(1 for p in data.get("pools", []) if p.get("status_text") != "excluded")
+    active_count = sum(1 for p in data.get("pools", []) if p.get("status") == "active")
     egld_usd = get_egld_usd()
     total_egld = safe_float(data.get("total_eligible_egld"))
     lines = [
@@ -2426,7 +2449,7 @@ def format_snapshot_report(snapshot: Optional[Dict[str, Any]] = None, limit: int
             f"≈ *{fmt_usd(value_egld * egld_usd)}*",
             "",
         ])
-    errors = [p for p in data.get("pools", []) if not p.get("ok") and p.get("status_text") != "excluded"]
+    errors = [p for p in data.get("pools", []) if not p.get("ok") and p.get("status") == "active"]
     if errors:
         lines.extend(["", "⚠️ *Pool unavailable / error:*"])
         for p in errors:
@@ -2438,6 +2461,8 @@ def calculate_lp_rewards(reward_pool_egld: float, snapshot: Optional[Dict[str, A
     if isinstance(snapshot, str):
         return calculate_monthly_lp_rewards(reward_pool_egld, snapshot)
     data = snapshot or build_global_snapshot()
+    if data.get("complete") is False:
+        return {**data, "rows": [], "reward_pool_egld": reward_pool_egld, "reason": "Some active LP pools are unavailable; reward shares cannot be verified"}
     rows = []
     total = safe_float(data.get("total_eligible_egld"))
     for row in data.get("rows", []):
@@ -2448,6 +2473,8 @@ def calculate_lp_rewards(reward_pool_egld: float, snapshot: Optional[Dict[str, A
 
 def format_rewards_report(reward_pool_egld: float) -> str:
     data = calculate_lp_rewards(reward_pool_egld)
+    if data.get("complete") is False:
+        return "⚠️ *WOODY Global LP Rewards*\n\nSome active pools are unavailable. Reward shares are withheld until the full snapshot can be verified."
     if safe_float(data.get("total_eligible_egld")) <= 0:
         return "🎁 *WOODY Global LP Rewards*\n\nNo eligible global LP liquidity found right now."
     save_last_lp_reward_pool(reward_pool_egld)
@@ -2466,8 +2493,8 @@ def format_pools_report() -> str:
     data = build_global_snapshot()
     lines = ["📦 *WOODY LP Pools Monitored*", ""]
     for idx, pool in enumerate(data.get("pools", []), start=1):
-        if pool.get("status_text") == "excluded":
-            status = "excluded"
+        if pool.get("status_text") in {"excluded", "unverified"}:
+            status = str(pool.get("status_text"))
         elif pool.get("ok"):
             status = "active / LP token found"
         else:
@@ -2773,6 +2800,8 @@ def get_lp_rewards_text(reward_pool_egld: float) -> str:
 def build_lp_export_csv(reward_pool_egld: Optional[float] = None) -> Tuple[bytes, str]:
     pool = get_last_lp_reward_pool() if reward_pool_egld is None else safe_float(reward_pool_egld)
     data = calculate_lp_rewards(pool)
+    if data.get("complete") is False:
+        raise ValueError("Some active LP pools are unavailable; reward CSV cannot be verified")
     output = StringIO()
     writer = csv.writer(output)
     writer.writerow(["wallet_address", "average_lp", "percent_of_total", "reward_egld"])
@@ -4372,7 +4401,11 @@ async def lp_rewards_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def lp_export_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
-    content, filename = await asyncio.to_thread(build_lp_export_csv)
+    try:
+        content, filename = await asyncio.to_thread(build_lp_export_csv)
+    except ValueError as exc:
+        await update.message.reply_text(f"⚠️ {exc}")
+        return
     bio = BytesIO(content)
     bio.name = filename
     await update.message.reply_document(
