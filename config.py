@@ -203,7 +203,7 @@ WOODY_OLV_POOL_ADDRESS = os.getenv(
 GLOBAL_LP_DUST_EGLD = _env_float("GLOBAL_LP_DUST_EGLD", 0.000001, min_value=0)
 
 LP_POOLS: List[Dict[str, Any]] = [
-    {"dex": "OneDex", "name": "WOODY/EGLD", "pair_address": ONEDEX_POOL_ADDRESS, "lp_token": "WOODYWEGLD-9832b2", "quote_token": WEGLD, "status": "active"},
+    {"dex": "OneDex", "name": "WOODY/WEGLD", "pair_address": ONEDEX_POOL_ADDRESS, "lp_token": "WOODYWEGLD-9832b2", "quote_token": WEGLD, "status": "active"},
     {"dex": "OneDex", "name": "WOODY/BOBER", "pair_address": "", "lp_token": "WOODYBOBER-1a1703", "quote_token": BOBER, "status": "active"},
     {"dex": "OneDex", "name": "WOODY/ONE", "pair_address": "", "lp_token": "WOODYONE-826f23", "quote_token": ONE, "status": "active"},
     {"dex": "xExchange", "name": "WOODY/USDC", "pair_address": WOODY_USDC_POOL_ADDRESS, "lp_token": "WOODYUSDC-56b519", "quote_token": USDC_HINT, "status": "active"},
