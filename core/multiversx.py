@@ -1869,6 +1869,83 @@ def get_wallet_intelligence_text(limit: int = 10) -> str:
     return "\n".join(lines).strip()
 
 
+
+def _vm_query_scalar(function_name: str, args: Optional[List[str]] = None) -> Optional[bytes]:
+    """Run a read-only SC query and return its first raw result."""
+    payload = {"scAddress": ONEDEX_POOL_ADDRESS, "funcName": function_name, "args": args or []}
+    data = post_json(f"{MVX_API}/query", payload)
+    values = _extract_vm_return_data(data)
+    if not values:
+        return None
+    try:
+        return base64.b64decode(values[0])
+    except Exception:
+        return None
+
+
+def get_onedex_woody_pool_snapshot() -> Dict[str, Any]:
+    """Read pair-specific WOODY/WEGLD reserves from OneDex view endpoints.
+
+    OneDex keeps many pairs in one smart contract, so account ESDT balances are
+    aggregate balances and must never be presented as a single pool's reserves.
+    """
+    pair_id = int(ONEDEX_WOODY_PAIR_ID)
+    pair_arg = format(pair_id, "x")
+    if len(pair_arg) % 2:
+        pair_arg = "0" + pair_arg
+
+    first_id_raw = _vm_query_scalar("getPairFirstTokenId", [pair_arg])
+    second_id_raw = _vm_query_scalar("getPairSecondTokenId", [pair_arg])
+    first_reserve_raw = _vm_query_scalar("getPairFirstTokenReserve", [pair_arg])
+    second_reserve_raw = _vm_query_scalar("getPairSecondTokenReserve", [pair_arg])
+    lp_id_raw = _vm_query_scalar("getPairLpTokenId", [pair_arg])
+
+    if None in (first_id_raw, second_id_raw, first_reserve_raw, second_reserve_raw):
+        return {"label": "WOODY/WEGLD", "ok": False, "reason": "OneDex pair view unavailable"}
+
+    try:
+        first_id = first_id_raw.decode("utf-8")
+        second_id = second_id_raw.decode("utf-8")
+        lp_id = lp_id_raw.decode("utf-8") if lp_id_raw else ""
+        first_raw = int.from_bytes(first_reserve_raw, "big")
+        second_raw = int.from_bytes(second_reserve_raw, "big")
+    except Exception:
+        return {"label": "WOODY/WEGLD", "ok": False, "reason": "OneDex pair view decode failed"}
+
+    expected = {WOODY, WEGLD}
+    if {first_id, second_id} != expected:
+        logger.warning("OneDex pair id mismatch", extra={"pair_id": pair_id, "first": first_id, "second": second_id})
+        return {"label": "WOODY/WEGLD", "ok": False, "reason": "OneDex pair id/token verification failed"}
+    if lp_id and lp_id != "WOODYWEGLD-9832b2":
+        return {"label": "WOODY/WEGLD", "ok": False, "reason": "OneDex LP token verification failed"}
+
+    metadata = {WOODY: get_token_metadata(WOODY), WEGLD: get_token_metadata(WEGLD)}
+    decimals = {
+        WOODY: safe_int(metadata[WOODY].get("decimals"), 18),
+        WEGLD: safe_int(metadata[WEGLD].get("decimals"), 18),
+    }
+    amounts = {
+        first_id: first_raw / (10 ** decimals[first_id]),
+        second_id: second_raw / (10 ** decimals[second_id]),
+    }
+    woody_amount = safe_float(amounts.get(WOODY))
+    wegld_amount = safe_float(amounts.get(WEGLD))
+    if woody_amount <= 0 or wegld_amount <= 0:
+        return {"label": "WOODY/WEGLD", "ok": False, "reason": "OneDex pair reserves are empty"}
+
+    return {
+        "label": "WOODY/WEGLD",
+        "ok": True,
+        "woody_amount": woody_amount,
+        "pair_token": WEGLD,
+        "pair_symbol": "WEGLD",
+        "pair_amount": wegld_amount,
+        "pair_id": pair_id,
+        "lp_token": lp_id or "WOODYWEGLD-9832b2",
+        "reserve_source": "OneDex viewPair storage endpoints",
+    }
+
+
 def get_pool_snapshot(pool_address: str, label: str) -> Dict[str, Any]:
     now = time.time()
     cached = POOL_SNAPSHOT_CACHE.get(pool_address)
