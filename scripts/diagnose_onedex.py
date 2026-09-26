@@ -1,4 +1,4 @@
-"""Read-only diagnostics for OneDex WOODY/EGLD. No wallet or signing required.
+"""Read-only diagnostics for OneDex WOODY/WEGLD. No wallet or signing required.
 
 Run: python scripts/diagnose_onedex.py
 This does not claim pool reserves unless both token balances are observed.
@@ -53,7 +53,13 @@ def main():
     lp = read(f"/tokens/{LP}")
     if isinstance(lp, dict):
         print("LP metadata:", json.dumps({k: lp.get(k) for k in ("identifier", "name", "supply", "decimals", "owner")}))
-    print("OneDex uses a shared contract for multiple pairs. If WOODY is absent from its account balances, resolve WOODY/EGLD reserves through a verified pair-specific on-chain view or indexer; never use unrelated tokens from the shared contract as pool reserves.")
+    lp_txs = read(f"/tokens/{LP}/transactions", {"size": 5})
+    if isinstance(lp_txs, list):
+        print("Recent LP transactions (read-only discovery):")
+        for tx in lp_txs:
+            if isinstance(tx, dict):
+                print(json.dumps({k: tx.get(k) for k in ("txHash", "sender", "receiver", "function", "timestamp")}))
+    print("OneDex uses a shared contract for multiple pairs. If WOODY is absent from its account balances, resolve WOODY/WEGLD reserves through a verified pair-specific on-chain view or indexer; never use unrelated tokens from the shared contract as pool reserves.")
 
 if __name__ == "__main__":
     main()
