@@ -112,6 +112,8 @@ ONEDEX_POOL_ADDRESS = os.getenv(
     "ONEDEX_POOL_ADDRESS",
     "erd1qqqqqqqqqqqqqpgqqz6vp9y50ep867vnr296mqf3dduh6guvmvlsu3sujc",
 ).strip()
+# Pair 559 was created on-chain for WOODY-5f9d9c / WEGLD-bd4d79 (OneDex createPair event).
+ONEDEX_WOODY_PAIR_ID = _env_int("ONEDEX_WOODY_PAIR_ID", 559, min_value=1)
 WOODY_USDC_POOL_ADDRESS = os.getenv(
     "WOODY_USDC_POOL_ADDRESS",
     "erd1qqqqqqqqqqqqqpgqjhy8hut0d9rzwqlz37e5nsmlj2rch6vd2jpss7a69j",
