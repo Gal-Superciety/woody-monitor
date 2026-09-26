@@ -59,7 +59,7 @@ def main():
         for tx in lp_txs:
             if isinstance(tx, dict):
                 print(json.dumps({k: tx.get(k) for k in ("txHash", "sender", "receiver", "function", "timestamp")}))
-    print("OneDex uses a shared contract for multiple pairs. If WOODY is absent from its account balances, resolve WOODY/WEGLD reserves through a verified pair-specific on-chain view or indexer; never use unrelated tokens from the shared contract as pool reserves.")
+    print("The LP token metadata confirms this contract as issuer. Direct token balance queries avoid list pagination, but shared-contract WEGLD balance may include other pairs. Do not publish WOODY/WEGLD reserves until pair-specific WEGLD is verified.")
 
 if __name__ == "__main__":
     main()
