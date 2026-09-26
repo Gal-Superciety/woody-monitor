@@ -585,19 +585,12 @@ def test_lp_snapshot_confirmation_uses_requested_summary_format() -> None:
     assert "Date: 06.06.2026 12:34" in text
 
 
-def test_woody_app_dashboard_contains_required_sections() -> None:
-    html = main.woody_app_html()
-    required_sections = [
-        "Connect MultiversX Wallet",
-        "Premium Access",
-        "Holder Levels",
-        "Daily Missions",
-        "AI Assistant",
-        "WOODY Monitor",
-        "WOODY-5f9d9c",
-    ]
-    for section in required_sections:
-        assert section in html
+def test_railway_app_redirects_to_public_command_center() -> None:
+    import asyncio
+
+    response = asyncio.run(main.woody_app_handler(None))
+    assert response.status == 302
+    assert response.headers["Location"] == main.WOODY_APP_URL
 
 
 def test_lp_supply_decoded_integer_is_corrected_against_holder_balances(monkeypatch) -> None:

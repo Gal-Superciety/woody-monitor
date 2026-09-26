@@ -135,6 +135,7 @@ Toate variabilele cunoscute sunt listate în `.env.example`. Cele mai importante
 | `GLOBAL_LP_DUST_EGLD` | Prag minim EGLD estimat sub care pozițiile LP globale sunt ignorate ca dust. |
 | `DATA_DIR`, `LAST_ALERTS_FILE`, `TOP_VOLUME_FILE`, `VOLUME_HISTORY_FILE`, `ROOT_CACHE_FILE` | Locații pentru date persistente locale. |
 | `PUBLIC_STATUS_FILE`, `PUBLIC_STATUS_INTERVAL`, `PUBLIC_STATUS_HOST`, `PUBLIC_STATUS_PORT`, `PORT` | Configurarea statusului public HTTP/JSON; `PORT` este util pe platforme PaaS, iar `PUBLIC_STATUS_PORT` are prioritate. |
+| `WOODY_APP_URL` | Destinația redirectului de la domeniul tehnic Railway către Command Center public. |
 
 ## Alerte și în grupul de Telegram (nu doar privat)
 
