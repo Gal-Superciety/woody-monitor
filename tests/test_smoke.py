@@ -593,6 +593,16 @@ def test_railway_app_redirects_to_public_command_center() -> None:
     assert response.headers["Location"] == main.WOODY_APP_URL
 
 
+def test_public_status_missing_file_returns_fast_unavailable(monkeypatch, tmp_path) -> None:
+    import asyncio
+
+    monkeypatch.setattr(main, "PUBLIC_STATUS_FILE", str(tmp_path / "missing.json"))
+    monkeypatch.setattr(main, "build_dashboard_status_payload", lambda: (_ for _ in ()).throw(AssertionError("must not query chain")))
+    response = asyncio.run(main.status_json_handler(None))
+    assert response.status == 503
+    assert b"status_initializing" in response.body
+
+
 def test_lp_supply_decoded_integer_is_corrected_against_holder_balances(monkeypatch) -> None:
     monkeypatch.setattr(main, "discover_xexchange_lp_token_id", lambda: "LP-WOODYEGLD")
     monkeypatch.setattr(main, "get_lp_total_supply_raw_and_decimals", lambda token: (10_000, 18))

@@ -1581,9 +1581,15 @@ async def status_json_handler(_: web.Request) -> web.Response:
     try:
         with open(PUBLIC_STATUS_FILE, "r", encoding="utf-8") as status_file:
             cached_payload = json.load(status_file)
-        payload = cached_payload if isinstance(cached_payload, dict) else {}
-    except (OSError, json.JSONDecodeError):
-        payload = await asyncio.to_thread(build_dashboard_status_payload)
+        if not isinstance(cached_payload, dict) or not cached_payload.get("updatedAt"):
+            raise ValueError("Invalid public status file")
+        payload = cached_payload
+    except (OSError, ValueError):
+        return web.json_response(
+            {"available": False, "reason": "status_initializing"},
+            status=503,
+            headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-store"},
+        )
     payload = dict(payload)
     updated_at = safe_int(payload.get("updatedAt"), 0)
     payload["freshness"] = {
