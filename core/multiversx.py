@@ -2316,23 +2316,27 @@ def build_global_snapshot() -> Dict[str, Any]:
 
 
 def get_verified_quote_usd(token_id: str, egld_usd: float) -> Dict[str, Any]:
-    """Read USD quote only from exact token metadata; never assume stablecoin peg."""
+    """Return a *trusted* USD quote or fail closed.
+
+    Token metadata prices have no guaranteed timestamp, liquidity or source
+    confidence. They are diagnostic only until an independently verified
+    feed with explicit freshness and liquidity checks is implemented.
+    """
     if token_id == WEGLD and egld_usd > 0:
         return {"ok": True, "price_usd": egld_usd, "source": "EGLD USD feed"}
     if not token_id:
         return {"ok": False, "reason": "missing quote token"}
     metadata = get_token_metadata(token_id)
-    # MultiversX API token metadata may expose a USD price; accept only
-    # a positive, finite number from the exact token identifier.
     try:
         from math import isfinite
         value = float(metadata.get("price") or 0)
     except (ValueError, TypeError, OverflowError):
         value = 0.0
-    if value > 0 and isfinite(value) and str(metadata.get("identifier") or "") == token_id:
-        return {"ok": True, "price_usd": value,
+    if (value > 0 and isfinite(value) and
+            str(metadata.get("identifier") or "") == token_id):
+        return {"ok": False, "indicative_usd": value,
                 "source": f"MultiversX token metadata: {token_id}",
-                "confidence": "indicative"}
+                "reason": "indicative metadata price has no verified freshness or liquidity"}
     return {"ok": False, "reason": f"verified USD quote unavailable for {token_id}"}
 
 
