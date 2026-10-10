@@ -2365,6 +2365,12 @@ def build_global_usd_valuation() -> Dict[str, Any]:
         result = get_lp_holders(pool, require_tvl=False)
         snap = get_pool_snapshot(str(pool.get("pair_address") or ""), label)
         quote_token = str(snap.get("pair_token") or "")
+        expected_quote = str(pool.get("quote_token") or "")
+        if expected_quote and quote_token != expected_quote:
+            complete = False
+            pools.append({"label": label, "status": "unverified", "quote_token": quote_token,
+                          "reason": "Pool quote token does not match configured token identifier"})
+            continue
         quote_symbol = symbol(quote_token).upper() if quote_token else ""
         quote_price = get_verified_quote_usd(quote_token, egld_usd)
         quote_usd = safe_float(quote_price.get("price_usd")) if quote_price.get("ok") else 0.0
