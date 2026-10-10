@@ -200,3 +200,29 @@ def test_metadata_quote_produces_indicative_not_reward_eligible_valuation():
     assert result["indicative_only"] is True
     assert result["valuation_complete"] is False
     assert result["pools"][0]["quote_price_confidence"] == "indicative"
+
+
+def test_backdated_live_snapshot_is_rejected_before_api_reads():
+    from datetime import datetime, timedelta, timezone
+    yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+    with patch.object(m, "build_global_usd_valuation") as valuation:
+        result = m.save_global_usd_snapshot(force=True, snapshot_time=yesterday)
+    assert result["ok"] is False
+    assert "historical" in result["reason"]
+    valuation.assert_not_called()
+
+
+def test_off_schedule_manual_snapshot_cannot_become_reward_checkpoint():
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    if m.is_lp_snapshot_day(now):
+        return
+    with patch.object(m, "read_json_file", return_value={"snapshots": []}), \
+         patch.object(m, "build_global_usd_valuation", return_value={
+             "valuation_complete": True, "total_eligible_usd": 10,
+             "pools": [{"status": "verified"}],
+             "holders": [{"wallet": "erd1wallet", "estimated_usd": 10}]}), \
+         patch.object(m, "write_json_file") as write:
+        result = m.save_global_usd_snapshot(force=True, snapshot_time=now)
+    assert result["ok"] is False
+    write.assert_not_called()
