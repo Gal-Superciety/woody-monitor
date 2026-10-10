@@ -72,3 +72,39 @@ def test_global_valuation_sums_independent_token_legs():
     assert result["valuation_complete"] is True
     assert result["pools"][0]["pool_value_usd"] == 210
     assert result["holders"][0]["estimated_usd"] == 52.5
+
+
+def test_exact_quote_token_metadata():
+    with patch.object(m, "get_token_metadata", return_value={
+        "identifier": "JEX-abc123", "price": 0.0123
+    }):
+        result = m.get_verified_quote_usd("JEX-abc123", 12)
+        assert result["ok"] is True
+        assert result["price_usd"] == 0.0123
+        assert m.get_verified_quote_usd("BOBER-xyz", 12)["ok"] is False
+
+
+def test_global_usd_snapshot_never_saves_partial():
+    from datetime import datetime, timezone
+    with patch.object(m, "read_json_file", return_value={"snapshots": []}), \
+         patch.object(m, "build_global_usd_valuation",
+                      return_value={"valuation_complete": False, "pools": []}), \
+         patch.object(m, "write_json_file") as write:
+        result = m.save_global_usd_snapshot(
+            force=True, snapshot_time=datetime(2026, 10, 15, tzinfo=timezone.utc))
+    assert result["ok"] is False
+    write.assert_not_called()
+
+
+def test_global_usd_snapshot_persists_verified_data():
+    from datetime import datetime, timezone
+    valuation = {"valuation_complete": True, "holders": [
+        {"wallet": "erd1a", "estimated_usd": 100}],
+        "total_eligible_usd": 100, "pools": []}
+    with patch.object(m, "read_json_file", return_value={"snapshots": []}), \
+         patch.object(m, "build_global_usd_valuation", return_value=valuation), \
+         patch.object(m, "write_json_file", return_value=True) as write:
+        result = m.save_global_usd_snapshot(
+            force=True, snapshot_time=datetime(2026, 10, 15, tzinfo=timezone.utc))
+    assert result["ok"] is True
+    assert write.call_args.args[1]["snapshots"][0]["date"] == "2026-10-15"
