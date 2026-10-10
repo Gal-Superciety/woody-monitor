@@ -81,8 +81,8 @@ def test_exact_quote_token_metadata():
         "identifier": "JEX-abc123", "price": 0.0123
     }):
         result = m.get_verified_quote_usd("JEX-abc123", 12)
-        assert result["ok"] is True
-        assert result["price_usd"] == 0.0123
+        assert result["ok"] is False
+        assert result["indicative_usd"] == 0.0123
         assert m.get_verified_quote_usd("BOBER-xyz", 12)["ok"] is False
 
 
