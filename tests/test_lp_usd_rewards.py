@@ -89,12 +89,15 @@ def test_exact_quote_token_metadata():
 
 def test_global_usd_snapshot_never_saves_partial():
     from datetime import datetime, timezone
-    with patch.object(m, "read_json_file", return_value={"snapshots": []}), \
+    fixed = datetime(2026, 10, 15, tzinfo=timezone.utc)
+    with patch.object(m, "datetime") as clock, \
+         patch.object(m, "read_json_file", return_value={"snapshots": []}), \
          patch.object(m, "build_global_usd_valuation",
                       return_value={"valuation_complete": False, "pools": []}), \
          patch.object(m, "write_json_file") as write:
+        clock.now.return_value = fixed
         result = m.save_global_usd_snapshot(
-            force=True, snapshot_time=datetime(2026, 10, 15, tzinfo=timezone.utc))
+            force=True, snapshot_time=fixed)
     assert result["ok"] is False
     write.assert_not_called()
 
@@ -107,8 +110,9 @@ def test_global_usd_snapshot_persists_verified_data():
     with patch.object(m, "read_json_file", return_value={"snapshots": []}), \
          patch.object(m, "build_global_usd_valuation", return_value=valuation), \
          patch.object(m, "write_json_file", return_value=True) as write:
+        clock.now.return_value = fixed
         result = m.save_global_usd_snapshot(
-            force=True, snapshot_time=datetime(2026, 10, 15, tzinfo=timezone.utc))
+            force=True, snapshot_time=fixed)
     assert result["ok"] is True
     assert write.call_args.args[1]["snapshots"][0]["date"] == "2026-10-15"
 
