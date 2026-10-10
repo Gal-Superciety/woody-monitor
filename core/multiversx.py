@@ -2275,7 +2275,7 @@ def get_lp_holders(pool: Dict[str, Any], limit_pages: int = LP_HOLDERS_MAX_PAGES
         balance_raw = safe_int(account.get("balance_raw"))
         lp_amount = amount_from_raw(balance_raw, lp_decimals)
         estimated_egld = (balance_raw / total_supply_raw * pool_value_egld) if total_supply_raw > 0 and pool_value_egld > 0 else 0.0
-        row = {"wallet": address, "lp_amount": lp_amount, "estimated_egld": estimated_egld}
+        row = {"wallet": address, "lp_amount": lp_amount, "balance_raw": str(balance_raw), "estimated_egld": estimated_egld}
         all_estimated.append(row)
         if not is_real_wallet(address) or estimated_egld <= GLOBAL_LP_DUST_EGLD:
             continue
@@ -2372,14 +2372,18 @@ def build_global_usd_valuation() -> Dict[str, Any]:
                           "quote_token": quote_token,
                           "reason": result.get("reason") or quote_price.get("reason") or "Quote USD price or reserves unavailable"})
             continue
-        # Existing LP holder reader has already verified token supply,
-        # pagination and its own sanity checks.
-        pool_value_egld = safe_float(result.get("pool_value_egld"))
+        # Derive ownership from exact raw LP balances and raw supply.
+        # Do not reuse the EGLD valuation as an ownership proxy.
+        supply_raw = safe_int(result.get("total_supply_raw"))
+        if supply_raw <= 0:
+            complete = False
+            pools.append({"label": label, "status": "unverified", "reason": "LP supply unavailable"})
+            continue
         for holder in result.get("holders", []):
             wallet = str(holder.get("wallet") or "")
             if not wallet:
                 continue
-            fraction = safe_float(holder.get("estimated_egld")) / pool_value_egld
+            fraction = safe_int(holder.get("balance_raw")) / supply_raw
             if not 0 < fraction <= 1:
                 complete = False
                 continue
