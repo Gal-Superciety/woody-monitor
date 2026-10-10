@@ -2663,6 +2663,18 @@ def get_month_lp_usd_snapshots(month_key: Optional[str] = None) -> List[Dict[str
                   key=lambda snap: str(snap.get("date", "")))
 
 
+def required_month_lp_snapshot_dates(month_key: str) -> List[str]:
+    """Three calendar checkpoints; rewards require all three."""
+    try:
+        year, month = (int(x) for x in month_key.split("-"))
+        last_day = calendar.monthrange(year, month)[1]
+        if not 1 <= month <= 12:
+            return []
+        return [f"{year:04d}-{month:02d}-{day:02d}" for day in (1, 15, last_day)]
+    except (ValueError, TypeError):
+        return []
+
+
 def calculate_monthly_lp_averages(month_key: Optional[str] = None) -> Dict[str, Any]:
     """Rank only independently valued, complete snapshots by USD.
 
@@ -2671,6 +2683,9 @@ def calculate_monthly_lp_averages(month_key: Optional[str] = None) -> Dict[str, 
     """
     snapshots = get_month_lp_usd_snapshots(month_key)
     eligible = [s for s in snapshots if is_valid_global_usd_snapshot(s)]
+    required = required_month_lp_snapshot_dates(month_key or current_month_key())
+    found_dates = [str(s.get("date") or "") for s in eligible]
+    checkpoints_complete = (len(required) == 3 and sorted(found_dates) == sorted(required))
     sums: Dict[str, Dict[str, float]] = {}
     for snap in eligible:
         for holder in snap.get("holders", []):
@@ -2702,7 +2717,9 @@ def calculate_monthly_lp_averages(month_key: Optional[str] = None) -> Dict[str, 
         "total_average_usd": total_average_usd,
         "total_average_lp": 0.0,
         "excluded_snapshots": len(snapshots) - len(eligible),
-        "valuation_complete": bool(eligible) and len(eligible) == len(snapshots),
+        "valuation_complete": checkpoints_complete and len(eligible) == len(snapshots),
+        "required_dates": required,
+        "missing_dates": [date for date in required if date not in found_dates],
     }
 
 
