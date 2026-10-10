@@ -267,3 +267,10 @@ def test_pool_quote_token_mismatch_blocks_usd_valuation():
     assert result["total_eligible_usd"] == 0
     assert result["pools"][0]["status"] == "unverified"
     quote.assert_not_called()
+
+
+def test_unverified_pool_is_not_eligible():
+    with patch.object(m, "LP_POOLS", [{"status": "unverified", "name": "WOODY/ONE"}]), patch.object(m, "get_egld_usd", return_value=10), patch.object(m, "get_best_price", return_value={"price_usd": 0.01}):
+        result = m.build_global_usd_valuation()
+    assert result["valuation_complete"] is False
+    assert result["pools"][0]["status"] == "unverified"
