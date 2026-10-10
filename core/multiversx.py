@@ -2420,8 +2420,8 @@ def save_global_usd_snapshot(force: bool = False,
     if any(x.get("date") == date_key for x in store["snapshots"]):
         return {"ok": True, "skipped": True, "date": date_key}
     data = build_global_usd_valuation()
-    if not data.get("valuation_complete"):
-        return {"ok": False, "reason": "some pool prices or LP holders are unverified",
+    if not is_valid_global_usd_snapshot(data):
+        return {"ok": False, "reason": "some pool prices, LP holders or USD totals are unverified",
                 "pools": data.get("pools", [])}
     data["date"] = date_key
     store["snapshots"].append(data)
@@ -2618,6 +2618,41 @@ def _snapshot_holder_estimated_egld(holder: Dict[str, Any], snap: Dict[str, Any]
     return safe_float(holder.get("estimated_egld"))
 
 
+def is_valid_global_usd_snapshot(snap: Dict[str, Any]) -> bool:
+    """Reject corrupt, duplicated or internally inconsistent reward inputs."""
+    from math import isfinite
+    if snap.get("valuation_complete") is not True:
+        return False
+    holders = snap.get("holders")
+    pools = snap.get("pools")
+    if not isinstance(holders, list) or not holders or not isinstance(pools, list) or not pools:
+        return False
+    if any(p.get("status") == "unverified" for p in pools if isinstance(p, dict)):
+        return False
+    if not any(isinstance(p, dict) and p.get("status") == "verified" for p in pools):
+        return False
+    seen = set()
+    total = 0.0
+    for holder in holders:
+        if not isinstance(holder, dict):
+            return False
+        wallet = str(holder.get("wallet") or "")
+        try:
+            value = float(holder.get("estimated_usd"))
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if not wallet or wallet in seen or not isfinite(value) or value <= 0:
+            return False
+        seen.add(wallet)
+        total += value
+    try:
+        reported = float(snap.get("total_eligible_usd"))
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return (isfinite(reported) and reported > 0 and
+            abs(total - reported) <= max(0.01, reported * 0.000001))
+
+
 def get_month_lp_usd_snapshots(month_key: Optional[str] = None) -> List[Dict[str, Any]]:
     key = month_key or current_month_key()
     store = read_json_file("data/lp_usd_snapshots.json", {"snapshots": []})
@@ -2635,8 +2670,7 @@ def calculate_monthly_lp_averages(month_key: Optional[str] = None) -> Dict[str, 
     conversion; keep them visible but never silently mix LP units across pools.
     """
     snapshots = get_month_lp_usd_snapshots(month_key)
-    eligible = [s for s in snapshots if s.get("valuation_complete") is True
-                and safe_float(s.get("total_eligible_usd")) > 0]
+    eligible = [s for s in snapshots if is_valid_global_usd_snapshot(s)]
     sums: Dict[str, Dict[str, float]] = {}
     for snap in eligible:
         for holder in snap.get("holders", []):
