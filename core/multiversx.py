@@ -2233,16 +2233,16 @@ def get_pool_tvl_egld(pool: Dict[str, Any]) -> Dict[str, Any]:
     return {**snap, "pool_value_egld": (pool_usd / egld_usd) if egld_usd > 0 and pool_usd > 0 else 0.0}
 
 
-def get_lp_holders(pool: Dict[str, Any], limit_pages: int = LP_HOLDERS_MAX_PAGES) -> Dict[str, Any]:
+def get_lp_holders(pool: Dict[str, Any], limit_pages: int = LP_HOLDERS_MAX_PAGES, require_tvl: bool = True) -> Dict[str, Any]:
     if str(pool.get("status")) != "active":
         return {"ok": False, "excluded": True, "reason": pool.get("reason", "not verified")}
     lp_token_id = discover_pool_lp_token(pool)
     if not lp_token_id:
         return {"ok": False, "reason": "LP token missing"}
     total_supply_raw, lp_decimals = get_lp_total_supply_raw_and_decimals(lp_token_id)
-    tvl = get_pool_tvl_egld(pool)
+    tvl = get_pool_tvl_egld(pool) if require_tvl else {"ok": True, "pool_value_egld": 0.0}
     pool_value_egld = safe_float(tvl.get("pool_value_egld"))
-    if not tvl.get("ok") or total_supply_raw <= 0 or pool_value_egld <= 0:
+    if total_supply_raw <= 0 or (require_tvl and (not tvl.get("ok") or pool_value_egld <= 0)):
         return {"ok": False, "lp_token_id": lp_token_id, "reason": str(tvl.get("reason") or "LP supply or verified pool value unavailable")}
     accounts: List[Dict[str, Any]] = []
     complete = False
@@ -2268,6 +2268,8 @@ def get_lp_holders(pool: Dict[str, Any], limit_pages: int = LP_HOLDERS_MAX_PAGES
         return {"ok": False, "lp_token_id": lp_token_id, "reason": "LP holder pagination limit reached; increase LP_HOLDERS_MAX_PAGES"}
 
     total_supply_raw = _correct_lp_supply_raw(total_supply_raw, lp_decimals, [safe_int(a.get("balance_raw")) for a in accounts], lp_token_id)
+    if sum(safe_int(a.get("balance_raw")) for a in accounts) > total_supply_raw:
+        return {"ok": False, "lp_token_id": lp_token_id, "reason": "LP balances exceed total LP supply"}
     holders: List[Dict[str, Any]] = []
     all_estimated: List[Dict[str, Any]] = []
     for account in accounts:
@@ -2277,11 +2279,11 @@ def get_lp_holders(pool: Dict[str, Any], limit_pages: int = LP_HOLDERS_MAX_PAGES
         estimated_egld = (balance_raw / total_supply_raw * pool_value_egld) if total_supply_raw > 0 and pool_value_egld > 0 else 0.0
         row = {"wallet": address, "lp_amount": lp_amount, "balance_raw": str(balance_raw), "estimated_egld": estimated_egld}
         all_estimated.append(row)
-        if not is_real_wallet(address) or estimated_egld <= GLOBAL_LP_DUST_EGLD:
+        if not is_real_wallet(address) or (require_tvl and estimated_egld <= GLOBAL_LP_DUST_EGLD):
             continue
         holders.append(row)
 
-    if not _lp_sanity_ok(all_estimated, pool_value_egld, _pool_label(pool)):
+    if require_tvl and not _lp_sanity_ok(all_estimated, pool_value_egld, _pool_label(pool)):
         return {"ok": False, "lp_token_id": lp_token_id, "reason": "LP valuation sanity check failed; refusing to publish incorrect values"}
 
     return {"ok": True, "lp_token_id": lp_token_id, "total_supply_raw": str(total_supply_raw), "lp_decimals": lp_decimals, "pool_value_egld": pool_value_egld, "holders": holders, "pool_ok": bool(tvl.get("ok")), "pool_reason": tvl.get("reason", "")}
@@ -2358,7 +2360,7 @@ def build_global_usd_valuation() -> Dict[str, Any]:
         if str(pool.get("status")) != "active":
             pools.append({"label": label, "status": "excluded", "reason": pool.get("reason", "")})
             continue
-        result = get_lp_holders(pool)
+        result = get_lp_holders(pool, require_tvl=False)
         snap = get_pool_snapshot(str(pool.get("pair_address") or ""), label)
         quote_token = str(snap.get("pair_token") or "")
         quote_symbol = symbol(quote_token).upper() if quote_token else ""
@@ -2370,7 +2372,7 @@ def build_global_usd_valuation() -> Dict[str, Any]:
         pool_usd = woody_reserve * woody_usd + quote_reserve * quote_usd
         if (not result.get("ok") or not snap.get("ok") or woody_usd <= 0
                 or quote_usd <= 0 or woody_reserve <= 0 or quote_reserve <= 0
-                or safe_float(result.get("pool_value_egld")) <= 0):
+                or safe_int(result.get("total_supply_raw")) <= 0):
             complete = False
             pools.append({"label": label, "status": "unverified",
                           "quote_token": quote_token,
