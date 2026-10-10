@@ -42,8 +42,8 @@ def test_absent_wallet_counts_zero_across_snapshots():
 
 def test_global_valuation_requires_quote_usd_price():
     pool = {"status": "active", "pair_address": "erd1pair", "name": "WOODY/JEX"}
-    holder_data = {"ok": True, "pool_value_egld": 20,
-                   "holders": [{"wallet": "erd1wallet", "estimated_egld": 10}]}
+    holder_data = {"ok": True, "pool_value_egld": 20, "total_supply_raw": "1000",
+                   "holders": [{"wallet": "erd1wallet", "balance_raw": "500", "estimated_egld": 10}]}
     snap = {"ok": True, "woody_amount": 1000, "pair_amount": 100,
             "pair_token": "JEX-123", "pair_symbol": "JEX"}
     with patch.object(m, "LP_POOLS", [pool]), \
@@ -59,8 +59,8 @@ def test_global_valuation_requires_quote_usd_price():
 
 def test_global_valuation_sums_independent_token_legs():
     pool = {"status": "active", "pair_address": "erd1pair", "name": "WOODY/EGLD"}
-    holder_data = {"ok": True, "pool_value_egld": 40,
-                   "holders": [{"wallet": "erd1wallet", "estimated_egld": 10}]}
+    holder_data = {"ok": True, "pool_value_egld": 40, "total_supply_raw": "1000",
+                   "holders": [{"wallet": "erd1wallet", "balance_raw": "250", "estimated_egld": 10}]}
     snap = {"ok": True, "woody_amount": 1000, "pair_amount": 20,
             "pair_token": m.WEGLD, "pair_symbol": "WEGLD"}
     with patch.object(m, "LP_POOLS", [pool]), \
