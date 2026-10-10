@@ -7,7 +7,7 @@ from core import multiversx as m
 
 
 def test_mixed_pool_lp_units_do_not_control_rewards():
-    snap = {"valuation_complete": True, "total_eligible_usd": 300.0,
+    snap = {"valuation_complete": True, "total_eligible_usd": 300.0, "pools": [{"status": "verified"}],
             "holders": [
                 {"wallet": "erd1a", "lp_amount": 1000000, "estimated_usd": 100},
                 {"wallet": "erd1b", "lp_amount": 1, "estimated_usd": 200},
@@ -30,9 +30,9 @@ def test_incomplete_snapshots_withhold_rewards():
 
 def test_absent_wallet_counts_zero_across_snapshots():
     snaps = [
-        {"valuation_complete": True, "total_eligible_usd": 100,
+        {"valuation_complete": True, "total_eligible_usd": 100, "pools": [{"status": "verified"}],
          "holders": [{"wallet": "erd1a", "estimated_usd": 100}]},
-        {"valuation_complete": True, "total_eligible_usd": 100,
+        {"valuation_complete": True, "total_eligible_usd": 100, "pools": [{"status": "verified"}],
          "holders": [{"wallet": "erd1b", "estimated_usd": 100}]},
     ]
     with patch.object(m, "get_month_lp_usd_snapshots", return_value=snaps):
@@ -100,7 +100,7 @@ def test_global_usd_snapshot_persists_verified_data():
     from datetime import datetime, timezone
     valuation = {"valuation_complete": True, "holders": [
         {"wallet": "erd1a", "estimated_usd": 100}],
-        "total_eligible_usd": 100, "pools": []}
+        "total_eligible_usd": 100, "pools": [{"status": "verified"}]}
     with patch.object(m, "read_json_file", return_value={"snapshots": []}), \
          patch.object(m, "build_global_usd_valuation", return_value=valuation), \
          patch.object(m, "write_json_file", return_value=True) as write:
@@ -108,3 +108,18 @@ def test_global_usd_snapshot_persists_verified_data():
             force=True, snapshot_time=datetime(2026, 10, 15, tzinfo=timezone.utc))
     assert result["ok"] is True
     assert write.call_args.args[1]["snapshots"][0]["date"] == "2026-10-15"
+
+
+def test_usd_snapshot_rejects_mismatched_holder_totals():
+    snap = {"valuation_complete": True, "total_eligible_usd": 100,
+            "pools": [{"status": "verified"}],
+            "holders": [{"wallet": "erd1a", "estimated_usd": 99}]}
+    assert m.is_valid_global_usd_snapshot(snap) is False
+
+
+def test_usd_snapshot_rejects_duplicate_wallets():
+    snap = {"valuation_complete": True, "total_eligible_usd": 100,
+            "pools": [{"status": "verified"}],
+            "holders": [{"wallet": "erd1a", "estimated_usd": 50},
+                        {"wallet": "erd1a", "estimated_usd": 50}]}
+    assert m.is_valid_global_usd_snapshot(snap) is False
