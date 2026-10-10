@@ -2642,13 +2642,14 @@ def _snapshot_holder_estimated_egld(holder: Dict[str, Any], snap: Dict[str, Any]
 def is_valid_global_usd_snapshot(snap: Dict[str, Any]) -> bool:
     """Reject corrupt, duplicated or internally inconsistent reward inputs."""
     from math import isfinite
-    if snap.get("valuation_complete") is not True:
+    if snap.get("valuation_complete") is not True or snap.get("indicative_only") is True:
         return False
     holders = snap.get("holders")
     pools = snap.get("pools")
     if not isinstance(holders, list) or not holders or not isinstance(pools, list) or not pools:
         return False
-    if any(p.get("status") == "unverified" for p in pools if isinstance(p, dict)):
+    if any(not isinstance(p, dict) or p.get("status") not in {"verified", "excluded"}
+           or p.get("quote_price_confidence") == "indicative" for p in pools):
         return False
     if not any(isinstance(p, dict) and p.get("status") == "verified" for p in pools):
         return False
