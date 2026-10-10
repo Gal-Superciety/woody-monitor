@@ -2318,28 +2318,29 @@ def build_global_snapshot() -> Dict[str, Any]:
 
 
 def get_verified_quote_usd(token_id: str, egld_usd: float) -> Dict[str, Any]:
-    """Return a *trusted* USD quote or fail closed.
+    """Price a quote token from its exact MultiversX token metadata.
 
-    Token metadata prices have no guaranteed timestamp, liquidity or source
-    confidence. They are diagnostic only until an independently verified
-    feed with explicit freshness and liquidity checks is implemented.
+    API prices are indicative unless an independent freshness/liquidity
+    attestation is available. Record provenance so reports can distinguish
+    estimates from verified financial inputs.
     """
-    if token_id == WEGLD and egld_usd > 0:
-        return {"ok": True, "price_usd": egld_usd, "source": "EGLD USD feed"}
+    from math import isfinite
+    if token_id == WEGLD and isfinite(egld_usd) and egld_usd > 0:
+        return {"ok": True, "price_usd": egld_usd, "source": "EGLD USD feed",
+                "confidence": "feed"}
     if not token_id:
         return {"ok": False, "reason": "missing quote token"}
     metadata = get_token_metadata(token_id)
     try:
-        from math import isfinite
         value = float(metadata.get("price") or 0)
     except (ValueError, TypeError, OverflowError):
         value = 0.0
-    if (value > 0 and isfinite(value) and
+    if (isfinite(value) and value > 0 and
             str(metadata.get("identifier") or "") == token_id):
-        return {"ok": False, "indicative_usd": value,
+        return {"ok": True, "price_usd": value,
                 "source": f"MultiversX token metadata: {token_id}",
-                "reason": "indicative metadata price has no verified freshness or liquidity"}
-    return {"ok": False, "reason": f"verified USD quote unavailable for {token_id}"}
+                "confidence": "indicative"}
+    return {"ok": False, "reason": f"USD quote unavailable for exact token {token_id}"}
 
 
 def build_global_usd_valuation() -> Dict[str, Any]:
@@ -2355,6 +2356,7 @@ def build_global_usd_valuation() -> Dict[str, Any]:
     wallets: Dict[str, Dict[str, Any]] = {}
     pools: List[Dict[str, Any]] = []
     complete = True
+    prices_indicative = False
     for pool in LP_POOLS:
         label = _pool_label(pool)
         if str(pool.get("status")) != "active":
@@ -2366,6 +2368,8 @@ def build_global_usd_valuation() -> Dict[str, Any]:
         quote_symbol = symbol(quote_token).upper() if quote_token else ""
         quote_price = get_verified_quote_usd(quote_token, egld_usd)
         quote_usd = safe_float(quote_price.get("price_usd")) if quote_price.get("ok") else 0.0
+        if quote_price.get("confidence") == "indicative":
+            prices_indicative = True
         # Stablecoin parity is not assumed: a verified price feed is required.
         woody_reserve = safe_float(snap.get("woody_amount"))
         quote_reserve = safe_float(snap.get("pair_amount"))
@@ -2401,12 +2405,14 @@ def build_global_usd_valuation() -> Dict[str, Any]:
                       "woody_reserve": woody_reserve, "woody_usd": woody_usd,
                       "quote_token": quote_token, "quote_reserve": quote_reserve,
                       "quote_usd": quote_usd, "quote_price_source": quote_price.get("source"),
+                      "quote_price_confidence": quote_price.get("confidence"),
                       "source": best.get("source", "unknown")})
     rows = sorted(wallets.values(), key=lambda row: row["estimated_usd"], reverse=True)
     total = sum(row["estimated_usd"] for row in rows)
     for row in rows:
         row["share_pct"] = row["estimated_usd"] / total * 100 if total > 0 else 0.0
-    return {"created_at": now, "valuation_complete": complete and bool(rows),
+    return {"created_at": now, "valuation_complete": complete and bool(rows) and not prices_indicative,
+            "indicative_only": prices_indicative,
             "total_eligible_usd": total, "holders": rows, "pools": pools,
             "pricing": {"egld_usd": egld_usd, "woody_usd": woody_usd,
                         "woody_source": best.get("source", "unavailable")}}
