@@ -13,7 +13,7 @@ log = logging.getLogger(__name__)
 BERLIN = ZoneInfo("Europe/Berlin")
 SITE = "https://www.woodyvmx.com"
 X_URL = "https://x.com/WOODY_EX"
-BUY_URL = "https://www.woodyvmx.com"
+BUY_URL = "https://xexchange.com/trade?firstToken=EGLD&secondToken=WOODY-5f9d9c"
 TOKEN = "WOODY-5f9d9c"
 
 
@@ -37,7 +37,7 @@ def welcome_text(name):
         f"🪙 Token: <code>{TOKEN}</code>\n"
         f"🌐 Website: {SITE}\n"
         f"🐦 X: {X_URL}\n"
-        "🛒 Buy WOODY: use the Buy WOODY section on our website.\n\n"
+        "🛒 Buy WOODY: xExchange (check token ID before swapping).\n\n"
         "Enjoy your stay! 🌲💙"
     )
 
@@ -70,7 +70,7 @@ async def welcome_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_target(update.effective_chat):
         return
     user = update.effective_user
-    if not user or not (await context.bot.get_chat_member(update.effective_chat.id, user.id)).status in ("administrator", "creator"):
+    if not user or (await context.bot.get_chat_member(update.effective_chat.id, user.id)).status not in ("administrator", "creator"):
         return
     await update.effective_message.reply_text(
         welcome_text("everyone"), parse_mode="HTML",
@@ -121,7 +121,8 @@ async def morning_job(context: ContextTypes.DEFAULT_TYPE):
     try:
         message = await make_brief()
         await context.bot.send_message(chat_id=target_chat(), text=message, disable_web_page_preview=True)
-        m.write_json_file(state_file, {"last_sent_date": date})
+        if not m.write_json_file(state_file, {"last_sent_date": date}):
+            log.error("Morning brief sent but deduplication state could not be saved")
     except Exception:
         log.exception("Morning brief failed; retry only on next scheduled run")
 
