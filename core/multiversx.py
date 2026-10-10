@@ -2359,8 +2359,17 @@ def build_global_usd_valuation() -> Dict[str, Any]:
     prices_indicative = False
     for pool in LP_POOLS:
         label = _pool_label(pool)
-        if str(pool.get("status")) != "active":
-            pools.append({"label": label, "status": "excluded", "reason": pool.get("reason", "")})
+        pool_status = str(pool.get("status") or "")
+        if pool_status != "active":
+            if pool_status != "excluded":
+                complete = False
+            pools.append({"label": label, "status": "excluded" if pool_status == "excluded" else "unverified",
+                          "reason": pool.get("reason", "Pool not verified")})
+            continue
+        if not str(pool.get("quote_token") or ""):
+            complete = False
+            pools.append({"label": label, "status": "unverified",
+                          "reason": "Active pool missing exact quote token identifier"})
             continue
         result = get_lp_holders(pool, require_tvl=False)
         snap = get_pool_snapshot(str(pool.get("pair_address") or ""), label)
