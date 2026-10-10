@@ -2402,6 +2402,32 @@ def build_global_usd_valuation() -> Dict[str, Any]:
                         "woody_source": best.get("source", "unavailable")}}
 
 
+def save_global_usd_snapshot(force: bool = False,
+                             snapshot_time: Optional[datetime] = None) -> Dict[str, Any]:
+    """Persist only complete valuations; legacy LP snapshots stay untouched."""
+    dt = snapshot_time or datetime.now(timezone.utc)
+    date_key = dt.strftime("%Y-%m-%d")
+    if not force and not is_lp_snapshot_day(dt):
+        return {"ok": False, "reason": "not a scheduled snapshot day"}
+    path = "data/lp_usd_snapshots.json"
+    store = read_json_file(path, {"snapshots": []})
+    if not isinstance(store, dict) or not isinstance(store.get("snapshots"), list):
+        return {"ok": False, "reason": "invalid USD snapshot store"}
+    if any(x.get("date") == date_key for x in store["snapshots"]):
+        return {"ok": True, "skipped": True, "date": date_key}
+    data = build_global_usd_valuation()
+    if not data.get("valuation_complete"):
+        return {"ok": False, "reason": "some pool prices or LP holders are unverified",
+                "pools": data.get("pools", [])}
+    data["date"] = date_key
+    store["snapshots"].append(data)
+    store["snapshots"] = sorted(store["snapshots"],
+                                key=lambda x: str(x.get("date", "")))[-120:]
+    if not write_json_file(path, store):
+        return {"ok": False, "reason": "persistent USD snapshot write failed"}
+    return {"ok": True, "snapshot": data}
+
+
 def format_snapshot_report(snapshot: Optional[Dict[str, Any]] = None, limit: int = 20) -> str:
     data = snapshot or build_global_snapshot()
     active_count = sum(1 for p in data.get("pools", []) if p.get("status") == "active")
