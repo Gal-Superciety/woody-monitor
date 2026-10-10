@@ -2315,6 +2315,27 @@ def build_global_snapshot() -> Dict[str, Any]:
     return {"pools": pools, "rows": rows, "total_eligible_egld": total, "eligible_wallets": len(rows), "complete": complete}
 
 
+def get_verified_quote_usd(token_id: str, egld_usd: float) -> Dict[str, Any]:
+    """Read USD quote only from exact token metadata; never assume stablecoin peg."""
+    if token_id == WEGLD and egld_usd > 0:
+        return {"ok": True, "price_usd": egld_usd, "source": "EGLD USD feed"}
+    if not token_id:
+        return {"ok": False, "reason": "missing quote token"}
+    metadata = get_token_metadata(token_id)
+    # MultiversX API token metadata may expose a USD price; accept only
+    # a positive, finite number from the exact token identifier.
+    try:
+        from math import isfinite
+        value = float(metadata.get("price") or 0)
+    except (ValueError, TypeError, OverflowError):
+        value = 0.0
+    if value > 0 and isfinite(value) and str(metadata.get("identifier") or "") == token_id:
+        return {"ok": True, "price_usd": value,
+                "source": f"MultiversX token metadata: {token_id}",
+                "confidence": "indicative"}
+    return {"ok": False, "reason": f"verified USD quote unavailable for {token_id}"}
+
+
 def build_global_usd_valuation() -> Dict[str, Any]:
     """Independent reserve-based USD valuation; fail closed for missing inputs.
 
@@ -2325,7 +2346,6 @@ def build_global_usd_valuation() -> Dict[str, Any]:
     egld_usd = get_egld_usd()
     best = get_best_price() or {}
     woody_usd = safe_float(best.get("price_usd"))
-    prices = {WOODY: woody_usd, WEGLD: egld_usd}
     wallets: Dict[str, Dict[str, Any]] = {}
     pools: List[Dict[str, Any]] = []
     complete = True
@@ -2338,9 +2358,8 @@ def build_global_usd_valuation() -> Dict[str, Any]:
         snap = get_pool_snapshot(str(pool.get("pair_address") or ""), label)
         quote_token = str(snap.get("pair_token") or "")
         quote_symbol = symbol(quote_token).upper() if quote_token else ""
-        quote_usd = prices.get(quote_token, 0.0)
-        if quote_symbol in {"EGLD", "WEGLD"}:
-            quote_usd = egld_usd
+        quote_price = get_verified_quote_usd(quote_token, egld_usd)
+        quote_usd = safe_float(quote_price.get("price_usd")) if quote_price.get("ok") else 0.0
         # Stablecoin parity is not assumed: a verified price feed is required.
         woody_reserve = safe_float(snap.get("woody_amount"))
         quote_reserve = safe_float(snap.get("pair_amount"))
@@ -2351,7 +2370,7 @@ def build_global_usd_valuation() -> Dict[str, Any]:
             complete = False
             pools.append({"label": label, "status": "unverified",
                           "quote_token": quote_token,
-                          "reason": result.get("reason") or "Quote USD price or reserves unavailable"})
+                          "reason": result.get("reason") or quote_price.get("reason") or "Quote USD price or reserves unavailable"})
             continue
         # Existing LP holder reader has already verified token supply,
         # pagination and its own sanity checks.
@@ -2371,7 +2390,8 @@ def build_global_usd_valuation() -> Dict[str, Any]:
         pools.append({"label": label, "status": "verified", "pool_value_usd": pool_usd,
                       "woody_reserve": woody_reserve, "woody_usd": woody_usd,
                       "quote_token": quote_token, "quote_reserve": quote_reserve,
-                      "quote_usd": quote_usd, "source": best.get("source", "unknown")})
+                      "quote_usd": quote_usd, "quote_price_source": quote_price.get("source"),
+                      "source": best.get("source", "unknown")})
     rows = sorted(wallets.values(), key=lambda row: row["estimated_usd"], reverse=True)
     total = sum(row["estimated_usd"] for row in rows)
     for row in rows:
