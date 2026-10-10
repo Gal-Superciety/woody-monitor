@@ -2793,11 +2793,11 @@ def get_lp_snapshots_text() -> str:
              f"Month: *{current_month_key()}*",
              "Schedule: day 1, 15 and last day of month", ""]
     if not snapshots:
-        return "\\n".join(lines + ["No verified global USD snapshots saved yet."])
+        return "\n".join(lines + ["No verified global USD snapshots saved yet."])
     for snap in snapshots:
         lines.append(f"• {snap.get('date')}: {fmt_usd(snap.get('total_eligible_usd'))} "
                      f"({len(snap.get('holders', []))} wallets)")
-    return "\\n".join(lines)
+    return "\n".join(lines)
 
 
 def get_lp_rewards_help_text() -> str:
@@ -2825,7 +2825,7 @@ def get_lp_rewards_help_text() -> str:
 def get_lp_rewards_text(reward_pool_egld: float) -> str:
     data = calculate_monthly_lp_rewards(reward_pool_egld)
     if not data.get("valuation_complete") or not data.get("rows"):
-        return "⚠️ *LP Rewards*\\n\\nVerified USD snapshots missing or incomplete. No reward allocations available."
+        return "⚠️ *LP Rewards*\n\nVerified USD snapshots missing or incomplete. No reward allocations available."
     lines = ["🎁 *WOODY LP Rewards — Monthly USD-weighted*",
              f"Reward pool: *{reward_pool_egld:,.6f} EGLD*", ""]
     for row in data["rows"]:
@@ -2833,7 +2833,7 @@ def get_lp_rewards_text(reward_pool_egld: float) -> str:
                      f"{fmt_usd(row.get('average_usd'))} | "
                      f"{fmt_pct(row.get('share_pct'))} | "
                      f"{fmt_egld(row.get('reward_egld'))}")
-    return "\\n".join(lines)
+    return "\n".join(lines)
 
 
 def build_lp_export_csv(reward_pool_egld: Optional[float] = None) -> Tuple[bytes, str]:
