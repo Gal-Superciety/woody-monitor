@@ -1,9 +1,13 @@
 """Focused offline tests for opt-in community messages."""
 import os
+import sys
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 from datetime import datetime
 from zoneinfo import ZoneInfo
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.community_updates import build_brief, enabled, is_target, welcome_text
 
