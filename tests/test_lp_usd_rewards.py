@@ -12,7 +12,8 @@ def test_mixed_pool_lp_units_do_not_control_rewards():
                 {"wallet": "erd1a", "lp_amount": 1000000, "estimated_usd": 100},
                 {"wallet": "erd1b", "lp_amount": 1, "estimated_usd": 200},
             ]}
-    with patch.object(m, "get_month_lp_usd_snapshots", return_value=[snap]):
+    with patch.object(m, "get_month_lp_usd_snapshots", return_value=[dict(snap, date=date) for date in ("2026-09-01", "2026-09-15", "2026-09-30")]), \
+         patch.object(m, "current_month_key", return_value="2026-09"):
         result = m.calculate_monthly_lp_rewards(3)
     rewards = {row["wallet"]: row["reward_egld"] for row in result["rows"]}
     assert rewards["erd1a"] == 1
@@ -35,9 +36,10 @@ def test_absent_wallet_counts_zero_across_snapshots():
         {"valuation_complete": True, "total_eligible_usd": 100, "pools": [{"status": "verified"}],
          "holders": [{"wallet": "erd1b", "estimated_usd": 100}]},
     ]
-    with patch.object(m, "get_month_lp_usd_snapshots", return_value=snaps):
+    with patch.object(m, "get_month_lp_usd_snapshots", return_value=[dict(snaps[0], date="2026-09-01"), dict(snaps[1], date="2026-09-15"), dict(snaps[1], date="2026-09-30")]), \
+         patch.object(m, "current_month_key", return_value="2026-09"):
         result = m.calculate_monthly_lp_averages()
-    assert [r["average_usd"] for r in result["rows"]] == [50, 50]
+    assert [round(r["average_usd"], 6) for r in result["rows"]] == [66.666667, 33.333333]
 
 
 def test_global_valuation_requires_quote_usd_price():
@@ -123,3 +125,27 @@ def test_usd_snapshot_rejects_duplicate_wallets():
             "holders": [{"wallet": "erd1a", "estimated_usd": 50},
                         {"wallet": "erd1a", "estimated_usd": 50}]}
     assert m.is_valid_global_usd_snapshot(snap) is False
+
+
+def test_rewards_withheld_if_month_has_only_two_checkpoints():
+    snap = {"valuation_complete": True, "total_eligible_usd": 100,
+            "pools": [{"status": "verified"}],
+            "holders": [{"wallet": "erd1a", "estimated_usd": 100}]}
+    records = [dict(snap, date=date) for date in ("2026-09-01", "2026-09-15")]
+    with patch.object(m, "get_month_lp_usd_snapshots", return_value=records), \
+         patch.object(m, "current_month_key", return_value="2026-09"):
+        result = m.calculate_monthly_lp_rewards(5)
+    assert result["rows"] == []
+    assert result["missing_dates"] == ["2026-09-30"]
+
+
+def test_rewards_withheld_if_duplicate_checkpoint():
+    snap = {"valuation_complete": True, "total_eligible_usd": 100,
+            "pools": [{"status": "verified"}],
+            "holders": [{"wallet": "erd1a", "estimated_usd": 100}]}
+    records = [dict(snap, date=date) for date in
+               ("2026-09-01", "2026-09-15", "2026-09-15", "2026-09-30")]
+    with patch.object(m, "get_month_lp_usd_snapshots", return_value=records), \
+         patch.object(m, "current_month_key", return_value="2026-09"):
+        result = m.calculate_monthly_lp_rewards(5)
+    assert result["rows"] == []
