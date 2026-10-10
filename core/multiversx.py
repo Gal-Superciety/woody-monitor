@@ -2421,7 +2421,13 @@ def build_global_usd_valuation() -> Dict[str, Any]:
 def save_global_usd_snapshot(force: bool = False,
                              snapshot_time: Optional[datetime] = None) -> Dict[str, Any]:
     """Persist only complete valuations; legacy LP snapshots stay untouched."""
-    dt = snapshot_time or datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
+    dt = snapshot_time or now
+    if dt.tzinfo is None:
+        return {"ok": False, "reason": "snapshot time must be timezone-aware UTC"}
+    dt = dt.astimezone(timezone.utc)
+    if dt.date() != now.date():
+        return {"ok": False, "reason": "historical or future snapshots cannot use live balances"}
     date_key = dt.strftime("%Y-%m-%d")
     if not force and not is_lp_snapshot_day(dt):
         return {"ok": False, "reason": "not a scheduled snapshot day"}
@@ -2436,6 +2442,9 @@ def save_global_usd_snapshot(force: bool = False,
         return {"ok": False, "reason": "some pool prices, LP holders or USD totals are unverified",
                 "pools": data.get("pools", [])}
     data["date"] = date_key
+    data["scheduled_checkpoint"] = is_lp_snapshot_day(dt)
+    if not data["scheduled_checkpoint"]:
+        return {"ok": False, "reason": "manual off-schedule valuations cannot be stored as monthly reward checkpoints"}
     store["snapshots"].append(data)
     store["snapshots"] = sorted(store["snapshots"],
                                 key=lambda x: str(x.get("date", "")))[-120:]
