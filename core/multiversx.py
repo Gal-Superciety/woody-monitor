@@ -2614,13 +2614,23 @@ def _snapshot_holder_estimated_egld(holder: Dict[str, Any], snap: Dict[str, Any]
     return safe_float(holder.get("estimated_egld"))
 
 
+def get_month_lp_usd_snapshots(month_key: Optional[str] = None) -> List[Dict[str, Any]]:
+    key = month_key or current_month_key()
+    store = read_json_file("data/lp_usd_snapshots.json", {"snapshots": []})
+    if not isinstance(store, dict) or not isinstance(store.get("snapshots"), list):
+        return []
+    return sorted([snap for snap in store["snapshots"]
+                   if isinstance(snap, dict) and str(snap.get("date", "")).startswith(key)],
+                  key=lambda snap: str(snap.get("date", "")))
+
+
 def calculate_monthly_lp_averages(month_key: Optional[str] = None) -> Dict[str, Any]:
     """Rank only independently valued, complete snapshots by USD.
 
     Legacy single-pool EGLD snapshots have no reliable historical USD
     conversion; keep them visible but never silently mix LP units across pools.
     """
-    snapshots = get_month_lp_snapshots(month_key)
+    snapshots = get_month_lp_usd_snapshots(month_key)
     eligible = [s for s in snapshots if s.get("valuation_complete") is True
                 and safe_float(s.get("total_eligible_usd")) > 0]
     sums: Dict[str, Dict[str, float]] = {}
@@ -2778,38 +2788,26 @@ def format_lp_snapshot_confirmation(snapshot: Dict[str, Any]) -> str:
 
 
 def get_lp_snapshots_text() -> str:
-    snapshots = get_month_lp_snapshots()
-    schedule_line = "Automatic snapshots: day 1, day 15 and the final day of each month."
-    lines = [
-        "📸 *LP Snapshots*",
-        f"Month: *{current_month_key()}*",
-        f"Pool: `{XEXCHANGE_POOL_ADDRESS}`",
-        schedule_line,
-        "",
-    ]
+    snapshots = get_month_lp_usd_snapshots()
+    lines = ["📸 *WOODY Global LP USD Snapshots*",
+             f"Month: *{current_month_key()}*",
+             "Schedule: day 1, 15 and last day of month", ""]
     if not snapshots:
-        lines.append("No LP snapshots saved for the current month yet.")
-        return "\n".join(lines)
-
-    for idx, snapshot in enumerate(snapshots, start=1):
-        holders = snapshot.get("holders", []) if isinstance(snapshot.get("holders"), list) else []
-        lines.append(
-            f"{idx}. *{snapshot.get('date')}*\n"
-            f"   Holders: *{len(holders)}*\n"
-            f"   LP token: `{snapshot.get('lp_token_id', 'N/A')}`\n"
-            f"   Pool value: *{safe_float(snapshot.get('pool_value_egld')):,.6f} EGLD*"
-        )
-    return "\n".join(lines)
+        return "\\n".join(lines + ["No verified global USD snapshots saved yet."])
+    for snap in snapshots:
+        lines.append(f"• {snap.get('date')}: {fmt_usd(snap.get('total_eligible_usd'))} "
+                     f"({len(snap.get('holders', []))} wallets)")
+    return "\\n".join(lines)
 
 
 def get_lp_rewards_help_text() -> str:
     saved_pool = get_last_lp_reward_pool()
     lines = [
         "🎁 *LP Rewards*",
-        "Monthly EGLD rewards are calculated proportionally by average LP held.",
+        "Monthly EGLD rewards are calculated proportionally by verified average LP value in USD.",
         "",
         "Formula:",
-        "`Reward = User average LP / Total average LP * Monthly EGLD reward pool`",
+        "`Reward = Wallet average USD / Total average USD * Monthly EGLD reward pool`",
         "",
         "Use command:",
         "`/lp_rewards X`",
@@ -2825,26 +2823,33 @@ def get_lp_rewards_help_text() -> str:
 
 
 def get_lp_rewards_text(reward_pool_egld: float) -> str:
-    return format_rewards_report(reward_pool_egld)
+    data = calculate_monthly_lp_rewards(reward_pool_egld)
+    if not data.get("valuation_complete") or not data.get("rows"):
+        return "⚠️ *LP Rewards*\\n\\nVerified USD snapshots missing or incomplete. No reward allocations available."
+    lines = ["🎁 *WOODY LP Rewards — Monthly USD-weighted*",
+             f"Reward pool: *{reward_pool_egld:,.6f} EGLD*", ""]
+    for row in data["rows"]:
+        lines.append(f"`{short_wallet(str(row.get('wallet')))}` "
+                     f"{fmt_usd(row.get('average_usd'))} | "
+                     f"{fmt_pct(row.get('share_pct'))} | "
+                     f"{fmt_egld(row.get('reward_egld'))}")
+    return "\\n".join(lines)
 
 
 def build_lp_export_csv(reward_pool_egld: Optional[float] = None) -> Tuple[bytes, str]:
     pool = get_last_lp_reward_pool() if reward_pool_egld is None else safe_float(reward_pool_egld)
-    data = calculate_lp_rewards(pool)
-    if data.get("complete") is False:
-        raise ValueError("Some active LP pools are unavailable; reward CSV cannot be verified")
+    data = calculate_monthly_lp_rewards(pool)
+    if not data.get("valuation_complete") or not data.get("rows"):
+        raise ValueError("Verified USD snapshots missing or incomplete; reward export withheld")
     output = StringIO()
     writer = csv.writer(output)
-    writer.writerow(["wallet_address", "average_lp", "percent_of_total", "reward_egld"])
-    for row in data.get("rows", []):
-        writer.writerow([
-            row.get("wallet"),
-            f"{safe_float(row.get('total_egld') if row.get('total_egld') is not None else row.get('average_lp')):.18f}",
-            f"{safe_float(row.get('share_pct')):.8f}",
-            f"{safe_float(row.get('reward_egld')):.18f}",
-        ])
-    filename = f"woody_lp_rewards_{current_month_key()}.csv"
-    return output.getvalue().encode("utf-8"), filename
+    writer.writerow(["wallet_address", "average_usd", "percent_of_total", "reward_egld"])
+    for row in data["rows"]:
+        writer.writerow([row.get("wallet"),
+                         f"{safe_float(row.get('average_usd')):.8f}",
+                         f"{safe_float(row.get('share_pct')):.8f}",
+                         f"{safe_float(row.get('reward_egld')):.18f}"])
+    return output.getvalue().encode("utf-8"), f"woody_lp_rewards_{current_month_key()}.csv"
 
 
 def get_pools_text(title: str = "📦 *WOODY Pools*") -> str:
@@ -4414,12 +4419,12 @@ async def lp_snapshot_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.info("LP_SNAPSHOT_DENIED | user=%s chat=%s", user_id or "?", update.effective_chat.id if update.effective_chat else "?")
         return
 
-    result = await asyncio.to_thread(save_lp_snapshot, True)
+    result = await asyncio.to_thread(save_global_usd_snapshot, True)
     if not result.get("ok"):
         await update.message.reply_text(f"⚠️ LP snapshot could not be saved: {result.get('reason', 'unknown error')}")
         return
 
-    await update.message.reply_text(format_lp_snapshot_confirmation(result.get("snapshot", {})))
+    await update.message.reply_text(f"📸 Global USD snapshot saved: {fmt_usd(result.get('snapshot', {}).get('total_eligible_usd'))}")
 
 
 async def lp_rewards_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4664,7 +4669,7 @@ async def dashboard_status_job(_: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def lp_snapshot_job(_: ContextTypes.DEFAULT_TYPE) -> None:
     try:
-        result = await asyncio.to_thread(save_lp_snapshot)
+        result = await asyncio.to_thread(save_global_usd_snapshot)
         if result.get("ok") and not result.get("skipped"):
             snapshot = result.get("snapshot", {})
             logger.info("LP snapshot job saved %s holders=%s", snapshot.get("date"), len(snapshot.get("holders", [])))
