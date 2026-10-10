@@ -2502,44 +2502,59 @@ def _snapshot_holder_estimated_egld(holder: Dict[str, Any], snap: Dict[str, Any]
 
 
 def calculate_monthly_lp_averages(month_key: Optional[str] = None) -> Dict[str, Any]:
+    """Rank only independently valued, complete snapshots by USD.
+
+    Legacy single-pool EGLD snapshots have no reliable historical USD
+    conversion; keep them visible but never silently mix LP units across pools.
+    """
     snapshots = get_month_lp_snapshots(month_key)
+    eligible = [s for s in snapshots if s.get("valuation_complete") is True
+                and safe_float(s.get("total_eligible_usd")) > 0]
     sums: Dict[str, Dict[str, float]] = {}
-    snapshot_total_lp_sum = 0.0
-    for snap in snapshots:
-        snapshot_total_lp_sum += _snapshot_total_lp(snap)
+    for snap in eligible:
         for holder in snap.get("holders", []):
             wallet = str(holder.get("wallet") or "")
             if not wallet:
                 continue
-            bucket = sums.setdefault(wallet, {"lp": 0.0, "egld": 0.0})
-            bucket["lp"] += safe_float(holder.get("lp_amount"))
-            bucket["egld"] += _snapshot_holder_estimated_egld(holder, snap)
+            value = safe_float(holder.get("estimated_usd"))
+            if value < 0:
+                continue
+            bucket = sums.setdefault(wallet, {"usd": 0.0})
+            bucket["usd"] += value
 
-    sample_count = len(snapshots)
+    sample_count = len(eligible)
     rows: List[Dict[str, Any]] = []
     for wallet, values in sums.items():
         rows.append({
             "wallet": wallet,
-            "average_lp": values["lp"] / sample_count if sample_count else 0.0,
-            "average_egld": values["egld"] / sample_count if sample_count else 0.0,
+            "average_usd": values["usd"] / sample_count if sample_count else 0.0,
         })
-    rows.sort(key=lambda x: safe_float(x.get("average_lp")), reverse=True)
-    total_average_lp = snapshot_total_lp_sum / sample_count if sample_count else 0.0
-    if total_average_lp <= 0:
-        total_average_lp = sum(safe_float(r.get("average_lp")) for r in rows)
+    rows.sort(key=lambda x: safe_float(x.get("average_usd")), reverse=True)
+    total_average_usd = sum(safe_float(r.get("average_usd")) for r in rows)
     for row in rows:
-        row["share_pct"] = (safe_float(row.get("average_lp")) / total_average_lp * 100) if total_average_lp > 0 else 0.0
-    return {"snapshots": snapshots, "rows": rows, "total_average_lp": total_average_lp}
+        row["share_pct"] = (
+            safe_float(row.get("average_usd")) / total_average_usd * 100
+            if total_average_usd > 0 else 0.0
+        )
+    return {
+        "snapshots": eligible, "rows": rows,
+        "total_average_usd": total_average_usd,
+        "total_average_lp": 0.0,
+        "excluded_snapshots": len(snapshots) - len(eligible),
+        "valuation_complete": bool(eligible) and len(eligible) == len(snapshots),
+    }
 
 
 def calculate_monthly_lp_rewards(reward_pool_egld: float, month_key: Optional[str] = None) -> Dict[str, Any]:
     averages = calculate_monthly_lp_averages(month_key)
-    total = safe_float(averages.get("total_average_lp"))
+    total = safe_float(averages.get("total_average_usd"))
+    if not averages.get("valuation_complete") or total <= 0:
+        return {**averages, "rows": [], "reward_pool_egld": reward_pool_egld,
+                "reason": "Historical USD valuations missing or incomplete; rewards withheld"}
     rows: List[Dict[str, Any]] = []
     for row in averages.get("rows", []):
-        share = (safe_float(row.get("average_lp")) / total) if total > 0 else 0.0
-        reward = share * max(0.0, reward_pool_egld)
-        rows.append({**row, "reward_egld": reward})
+        share = safe_float(row.get("average_usd")) / total
+        rows.append({**row, "reward_egld": share * max(0.0, reward_pool_egld)})
     return {**averages, "rows": rows, "reward_pool_egld": reward_pool_egld}
 
 
@@ -2602,37 +2617,30 @@ def get_lp_holders_text(limit: Optional[int] = None) -> str:
 
 def get_lp_leaderboard_text() -> str:
     data = calculate_monthly_lp_averages()
-    snapshots = data.get("snapshots", [])
-    if not snapshots:
-        return "🏆 *Monthly LP Leaderboard*\n\nNo LP snapshots for the current month yet. Snapshots are saved on day 1, day 15 and the final day of each month."
+    if not data.get("valuation_complete"):
+        return (
+            "🏆 *Monthly LP Leaderboard*\n\n"
+            "⚠️ USD valuation snapshots are missing or incomplete. "
+            "Rewards are withheld until all active pools and historical "
+            "token prices can be verified. Older EGLD-only snapshots "
+            "cannot be safely compared across different LP tokens."
+        )
     reward_pool = get_last_lp_reward_pool()
-    reward_data = calculate_monthly_lp_rewards(reward_pool) if reward_pool > 0 else {"rows": data.get("rows", [])}
-    rewards = {str(r.get("wallet")): safe_float(r.get("reward_egld")) for r in reward_data.get("rows", [])}
-    egld_usd = get_egld_usd()
-    lines = [
-        "🏆 *Monthly LP Leaderboard*",
-        f"Month: *{current_month_key()}*",
-        f"Snapshots used: *{len(snapshots)}* ({', '.join(str(s.get('date')) for s in snapshots)})",
-        "",
-    ]
+    rewards_data = calculate_monthly_lp_rewards(reward_pool)
+    rewards = {str(r.get("wallet")): safe_float(r.get("reward_egld"))
+               for r in rewards_data.get("rows", [])}
+    lines = ["🏆 *Monthly LP Leaderboard (USD)*",
+             f"Month: *{current_month_key()}*",
+             f"Verified snapshots: *{len(data['snapshots'])}*", ""]
     for idx, row in enumerate(data.get("rows", []), start=1):
-        avg_value = safe_float(row.get("average_egld"))
+        wallet = str(row.get("wallet"))
         lines.extend([
-            f"{rank_emoji(idx)} *Wallet*",
-            f"`{short_wallet(str(row.get('wallet')))}`",
-            "",
-            "Average LP:",
-            f"*{fmt_lp(row.get('average_lp'))}*",
-            "",
-            "Average LP Value:",
-            f"*{fmt_egld(avg_value)}*",
-            f"≈ *{fmt_usd(avg_value * egld_usd)}*",
-            "",
-            "Average Share:",
-            f"*{fmt_pct(row.get('share_pct'))}*",
+            f"{rank_emoji(idx)} `{short_wallet(wallet)}`",
+            f"Average LP value: *{fmt_usd(row.get('average_usd'))}*",
+            f"Reward share: *{fmt_pct(row.get('share_pct'))}*",
         ])
-        if reward_pool > 0:
-            lines.extend(["", "Estimated Monthly Reward:", f"*{fmt_egld(rewards.get(str(row.get('wallet')), 0.0))}*"])
+        if reward_pool > 0 and rewards_data.get("rows"):
+            lines.append(f"Estimated reward: *{fmt_egld(rewards.get(wallet, 0))}*")
         lines.append("")
     return "\n".join(lines)
 
