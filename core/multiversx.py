@@ -2315,6 +2315,73 @@ def build_global_snapshot() -> Dict[str, Any]:
     return {"pools": pools, "rows": rows, "total_eligible_egld": total, "eligible_wallets": len(rows), "complete": complete}
 
 
+def build_global_usd_valuation() -> Dict[str, Any]:
+    """Independent reserve-based USD valuation; fail closed for missing inputs.
+
+    Never infer a quote token price from an unrelated WOODY pool or add
+    different LP token denominations together.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    egld_usd = get_egld_usd()
+    best = get_best_price() or {}
+    woody_usd = safe_float(best.get("price_usd"))
+    prices = {WOODY: woody_usd, WEGLD: egld_usd}
+    wallets: Dict[str, Dict[str, Any]] = {}
+    pools: List[Dict[str, Any]] = []
+    complete = True
+    for pool in LP_POOLS:
+        label = _pool_label(pool)
+        if str(pool.get("status")) != "active":
+            pools.append({"label": label, "status": "excluded", "reason": pool.get("reason", "")})
+            continue
+        result = get_lp_holders(pool)
+        snap = get_pool_snapshot(str(pool.get("pair_address") or ""), label)
+        quote_token = str(snap.get("pair_token") or "")
+        quote_symbol = symbol(quote_token).upper() if quote_token else ""
+        quote_usd = prices.get(quote_token, 0.0)
+        if quote_symbol in {"EGLD", "WEGLD"}:
+            quote_usd = egld_usd
+        # Stablecoin parity is not assumed: a verified price feed is required.
+        woody_reserve = safe_float(snap.get("woody_amount"))
+        quote_reserve = safe_float(snap.get("pair_amount"))
+        pool_usd = woody_reserve * woody_usd + quote_reserve * quote_usd
+        if (not result.get("ok") or not snap.get("ok") or woody_usd <= 0
+                or quote_usd <= 0 or woody_reserve <= 0 or quote_reserve <= 0
+                or safe_float(result.get("pool_value_egld")) <= 0):
+            complete = False
+            pools.append({"label": label, "status": "unverified",
+                          "quote_token": quote_token,
+                          "reason": result.get("reason") or "Quote USD price or reserves unavailable"})
+            continue
+        # Existing LP holder reader has already verified token supply,
+        # pagination and its own sanity checks.
+        pool_value_egld = safe_float(result.get("pool_value_egld"))
+        for holder in result.get("holders", []):
+            wallet = str(holder.get("wallet") or "")
+            if not wallet:
+                continue
+            fraction = safe_float(holder.get("estimated_egld")) / pool_value_egld
+            if not 0 < fraction <= 1:
+                complete = False
+                continue
+            value = pool_usd * fraction
+            entry = wallets.setdefault(wallet, {"wallet": wallet, "estimated_usd": 0.0, "pools": []})
+            entry["estimated_usd"] += value
+            entry["pools"].append({"pool": label, "estimated_usd": value})
+        pools.append({"label": label, "status": "verified", "pool_value_usd": pool_usd,
+                      "woody_reserve": woody_reserve, "woody_usd": woody_usd,
+                      "quote_token": quote_token, "quote_reserve": quote_reserve,
+                      "quote_usd": quote_usd, "source": best.get("source", "unknown")})
+    rows = sorted(wallets.values(), key=lambda row: row["estimated_usd"], reverse=True)
+    total = sum(row["estimated_usd"] for row in rows)
+    for row in rows:
+        row["share_pct"] = row["estimated_usd"] / total * 100 if total > 0 else 0.0
+    return {"created_at": now, "valuation_complete": complete and bool(rows),
+            "total_eligible_usd": total, "holders": rows, "pools": pools,
+            "pricing": {"egld_usd": egld_usd, "woody_usd": woody_usd,
+                        "woody_source": best.get("source", "unavailable")}}
+
+
 def format_snapshot_report(snapshot: Optional[Dict[str, Any]] = None, limit: int = 20) -> str:
     data = snapshot or build_global_snapshot()
     active_count = sum(1 for p in data.get("pools", []) if p.get("status") == "active")
