@@ -4633,6 +4633,8 @@ def main() -> None:
     app.add_handler(CommandHandler("diag", diagnostics_command))
     app.add_handler(CommandHandler("id", id_command))
     app.add_handler(CommandHandler("testalert", testalert_command))
+    from core.community_updates import register as register_community_updates
+    register_community_updates(app)
     app.add_handler(CallbackQueryHandler(menu_callbacks))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, greeting_handler))
 
