@@ -149,3 +149,33 @@ def test_rewards_withheld_if_duplicate_checkpoint():
          patch.object(m, "current_month_key", return_value="2026-09"):
         result = m.calculate_monthly_lp_rewards(5)
     assert result["rows"] == []
+
+
+def test_global_usd_lp_holders_do_not_require_egld_tvl():
+    pool = {"status": "active", "pair_address": "erd1pair", "name": "WOODY/EGLD"}
+    holder_data = {"ok": True, "total_supply_raw": "1000",
+                   "holders": [{"wallet": "erd1wallet", "balance_raw": "250"}]}
+    snap = {"ok": True, "woody_amount": 1000, "pair_amount": 20,
+            "pair_token": m.WEGLD}
+    with patch.object(m, "LP_POOLS", [pool]), \
+         patch.object(m, "get_egld_usd", return_value=10), \
+         patch.object(m, "get_best_price", return_value={"price_usd": 0.01}), \
+         patch.object(m, "get_lp_holders", return_value=holder_data) as holders, \
+         patch.object(m, "get_pool_snapshot", return_value=snap):
+        result = m.build_global_usd_valuation()
+    holders.assert_called_once_with(pool, require_tvl=False)
+    assert result["valuation_complete"] is True
+    assert result["holders"][0]["estimated_usd"] == 52.5
+
+
+def test_lp_holders_reject_supply_exceeded_without_tvl():
+    pool = {"status": "active", "pair_address": "erd1pair", "name": "WOODY/JEX"}
+    with patch.object(m, "discover_pool_lp_token", return_value="LP-abc"), \
+         patch.object(m, "get_lp_total_supply_raw_and_decimals", return_value=(100, 0)), \
+         patch.object(m, "get_json", return_value=[
+             {"address": "erd1wallet", "balance": "150"}]), \
+         patch.object(m, "get_pool_tvl_egld") as tvl:
+        result = m.get_lp_holders(pool, require_tvl=False)
+    assert result["ok"] is False
+    assert "exceed" in result["reason"]
+    tvl.assert_not_called()
