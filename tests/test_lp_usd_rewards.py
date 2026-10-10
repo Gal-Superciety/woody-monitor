@@ -226,3 +226,18 @@ def test_off_schedule_manual_snapshot_cannot_become_reward_checkpoint():
         result = m.save_global_usd_snapshot(force=True, snapshot_time=now)
     assert result["ok"] is False
     write.assert_not_called()
+
+
+def test_indicative_snapshot_is_rejected_even_if_marked_complete():
+    snap = {"valuation_complete": True, "indicative_only": True,
+            "total_eligible_usd": 10,
+            "pools": [{"status": "verified", "quote_price_confidence": "indicative"}],
+            "holders": [{"wallet": "erd1wallet", "estimated_usd": 10}]}
+    assert m.is_valid_global_usd_snapshot(snap) is False
+
+
+def test_indicative_pool_provenance_is_rejected_even_without_top_level_flag():
+    snap = {"valuation_complete": True, "total_eligible_usd": 10,
+            "pools": [{"status": "verified", "quote_price_confidence": "indicative"}],
+            "holders": [{"wallet": "erd1wallet", "estimated_usd": 10}]}
+    assert m.is_valid_global_usd_snapshot(snap) is False
