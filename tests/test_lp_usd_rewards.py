@@ -104,10 +104,12 @@ def test_global_usd_snapshot_never_saves_partial():
 
 def test_global_usd_snapshot_persists_verified_data():
     from datetime import datetime, timezone
+    fixed = datetime(2026, 10, 15, tzinfo=timezone.utc)
     valuation = {"valuation_complete": True, "holders": [
         {"wallet": "erd1a", "estimated_usd": 100}],
         "total_eligible_usd": 100, "pools": [{"status": "verified"}]}
-    with patch.object(m, "read_json_file", return_value={"snapshots": []}), \
+    with patch.object(m, "datetime") as clock, \
+         patch.object(m, "read_json_file", return_value={"snapshots": []}), \
          patch.object(m, "build_global_usd_valuation", return_value=valuation), \
          patch.object(m, "write_json_file", return_value=True) as write:
         clock.now.return_value = fixed
