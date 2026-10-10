@@ -247,3 +247,23 @@ def test_indicative_pool_provenance_is_rejected_even_without_top_level_flag():
             "pools": [{"status": "verified", "quote_price_confidence": "indicative"}],
             "holders": [{"wallet": "erd1wallet", "estimated_usd": 10}]}
     assert m.is_valid_global_usd_snapshot(snap) is False
+
+
+def test_pool_quote_token_mismatch_blocks_usd_valuation():
+    pool = {"status": "active", "pair_address": "erd1pair",
+            "name": "WOODY/JEX", "quote_token": "JEX-expected"}
+    holder_data = {"ok": True, "total_supply_raw": "1000",
+                   "holders": [{"wallet": "erd1wallet", "balance_raw": "250"}]}
+    snap = {"ok": True, "woody_amount": 1000, "pair_amount": 100,
+            "pair_token": "JEX-different"}
+    with patch.object(m, "LP_POOLS", [pool]), \
+         patch.object(m, "get_egld_usd", return_value=10), \
+         patch.object(m, "get_best_price", return_value={"price_usd": 0.01}), \
+         patch.object(m, "get_lp_holders", return_value=holder_data), \
+         patch.object(m, "get_pool_snapshot", return_value=snap), \
+         patch.object(m, "get_verified_quote_usd") as quote:
+        result = m.build_global_usd_valuation()
+    assert result["valuation_complete"] is False
+    assert result["total_eligible_usd"] == 0
+    assert result["pools"][0]["status"] == "unverified"
+    quote.assert_not_called()
