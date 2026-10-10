@@ -81,8 +81,9 @@ def test_exact_quote_token_metadata():
         "identifier": "JEX-abc123", "price": 0.0123
     }):
         result = m.get_verified_quote_usd("JEX-abc123", 12)
-        assert result["ok"] is False
-        assert result["indicative_usd"] == 0.0123
+        assert result["ok"] is True
+        assert result["price_usd"] == 0.0123
+        assert result["confidence"] == "indicative"
         assert m.get_verified_quote_usd("BOBER-xyz", 12)["ok"] is False
 
 
@@ -179,3 +180,23 @@ def test_lp_holders_reject_supply_exceeded_without_tvl():
     assert result["ok"] is False
     assert "exceed" in result["reason"]
     tvl.assert_not_called()
+
+
+def test_metadata_quote_produces_indicative_not_reward_eligible_valuation():
+    pool = {"status": "active", "pair_address": "erd1pair", "name": "WOODY/JEX"}
+    holder_data = {"ok": True, "total_supply_raw": "1000",
+                   "holders": [{"wallet": "erd1wallet", "balance_raw": "250"}]}
+    snap = {"ok": True, "woody_amount": 1000, "pair_amount": 100,
+            "pair_token": "JEX-abc123"}
+    with patch.object(m, "LP_POOLS", [pool]), \
+         patch.object(m, "get_egld_usd", return_value=10), \
+         patch.object(m, "get_best_price", return_value={"price_usd": 0.01}), \
+         patch.object(m, "get_lp_holders", return_value=holder_data), \
+         patch.object(m, "get_pool_snapshot", return_value=snap), \
+         patch.object(m, "get_token_metadata", return_value={
+             "identifier": "JEX-abc123", "price": 0.5}):
+        result = m.build_global_usd_valuation()
+    assert result["holders"][0]["estimated_usd"] == 15
+    assert result["indicative_only"] is True
+    assert result["valuation_complete"] is False
+    assert result["pools"][0]["quote_price_confidence"] == "indicative"
