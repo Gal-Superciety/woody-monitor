@@ -93,6 +93,12 @@ PUBLIC_HTTP_THREAD: Optional[threading.Thread] = None
 API_OK_COUNT = 0
 API_FAIL_COUNT = 0
 LAST_API_ERROR = "N/A"
+PUBLIC_POOL_RESERVES_CACHE: Optional[Tuple[List[Dict[str, Any]], float]] = None
+PUBLIC_POOL_RESERVES_CACHE_LOCK = threading.Lock()
+PUBLIC_POOL_RESERVES_CACHE_TTL_SECONDS = max(
+    30, int(os.getenv("PUBLIC_POOL_RESERVES_CACHE_TTL_SECONDS", "60"))
+)
+PUBLIC_POOL_RESERVES_CACHE_REFRESHING = False
 LAST_ALERT_SENT_AT = 0
 LAST_TX_PROCESSED = ""
 LAST_ROOT_PROCESSED_AT = 0
@@ -726,10 +732,20 @@ def get_liquidity_text() -> str:
             lines.append(f"• {label}: *${value:,.2f}*")
     total = liquidity["totalUsd"]
     total_text = f"${total:,.2f}" if total is not None else "Unavailable"
+    snapshot_ages = [
+        safe_int(pool.get("snapshotAgeSeconds"), 0)
+        for pool in liquidity["pools"]
+        if pool.get("snapshotAgeSeconds") is not None
+    ]
+    freshness_note = (
+        f"\nSnapshot age: {max(snapshot_ages)} seconds; refresh is running in background."
+        if snapshot_ages and max(snapshot_ages) > 0 else ""
+    )
     return (
         "💧 *WOODY Pool Liquidity Estimate*\n\n"
         + "\n".join(lines)
         + f"\n\nTotal: *{total_text}* across {liquidity['estimatedPoolCount']} readable pools."
+        + freshness_note
         + "\nMethod: 2 × WOODY reserve × WOODY reference price."
         + "\nValues use 2 × WOODY reserves × the WOODY reference price; quote-token prices are not independently valued. Pools with unreadable reserves are excluded."
     )
@@ -1636,8 +1652,8 @@ def get_onedex_woody_one_public_quote() -> Dict[str, Any]:
             "reserve_source": "DexScreener public indexer (indicative; not on-chain verified)"}
 
 
-def get_public_pool_reserves() -> List[Dict[str, Any]]:
-    """Publish observed on-chain reserves, never estimated TVL as verified liquidity."""
+def _fetch_public_pool_reserves() -> List[Dict[str, Any]]:
+    """Fetch observed on-chain reserves, never estimated TVL as verified liquidity."""
     pools = []
     seen = set()
     for pool in LP_POOLS:
@@ -1684,6 +1700,58 @@ def get_public_pool_reserves() -> List[Dict[str, Any]]:
             "valuation": "not_verified",
         })
     return pools
+
+
+def _pool_reserves_have_readable_data(pools: List[Dict[str, Any]]) -> bool:
+    return any(
+        safe_float(pool.get("woodyReserve")) > 0
+        and safe_float(pool.get("quoteReserve")) > 0
+        for pool in pools
+    )
+
+
+def _refresh_public_pool_reserves_cache() -> None:
+    global PUBLIC_POOL_RESERVES_CACHE, PUBLIC_POOL_RESERVES_CACHE_REFRESHING
+    try:
+        pools = _fetch_public_pool_reserves()
+        if _pool_reserves_have_readable_data(pools):
+            with PUBLIC_POOL_RESERVES_CACHE_LOCK:
+                PUBLIC_POOL_RESERVES_CACHE = (pools, time.monotonic())
+    except Exception:
+        logger.exception("Failed to refresh public pool reserves cache")
+    finally:
+        with PUBLIC_POOL_RESERVES_CACHE_LOCK:
+            PUBLIC_POOL_RESERVES_CACHE_REFRESHING = False
+
+
+def get_public_pool_reserves() -> List[Dict[str, Any]]:
+    """Return a recent pool snapshot and refresh stale data without blocking callers."""
+    global PUBLIC_POOL_RESERVES_CACHE, PUBLIC_POOL_RESERVES_CACHE_REFRESHING
+
+    with PUBLIC_POOL_RESERVES_CACHE_LOCK:
+        now = time.monotonic()
+        cached = PUBLIC_POOL_RESERVES_CACHE
+        if cached is not None:
+            pools, cached_at = cached
+            age = max(0, int(now - cached_at))
+            if age >= PUBLIC_POOL_RESERVES_CACHE_TTL_SECONDS:
+                if not PUBLIC_POOL_RESERVES_CACHE_REFRESHING:
+                    PUBLIC_POOL_RESERVES_CACHE_REFRESHING = True
+                    threading.Thread(
+                        target=_refresh_public_pool_reserves_cache,
+                        name="pool-reserves-refresh",
+                        daemon=True,
+                    ).start()
+            return [
+                {**pool, "snapshotAgeSeconds": age}
+                for pool in pools
+            ]
+
+        # There is no previous snapshot on first startup, so fetch once synchronously.
+        pools = _fetch_public_pool_reserves()
+        if _pool_reserves_have_readable_data(pools):
+            PUBLIC_POOL_RESERVES_CACHE = (pools, time.monotonic())
+        return pools
 
 
 def build_public_liquidity(woody_price: float, pools: List[Dict[str, Any]]) -> Dict[str, Any]:
