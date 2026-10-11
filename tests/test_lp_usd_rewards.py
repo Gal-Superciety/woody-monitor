@@ -425,3 +425,10 @@ def test_jex_reserves_must_not_be_mistaken_for_lp_token():
              {"identifier": "WOODY-5f9d9c", "balance": "1000"},
              {"identifier": "JEX-9040ca", "balance": "2000"}]):
         assert m.discover_pool_lp_token(pool) == ""
+
+
+def test_xexchange_usdc_uses_exact_quote_identifier():
+    from config import LP_POOLS, USDC
+    pool = next(p for p in LP_POOLS if p["dex"] == "xExchange" and p["name"] == "WOODY/USDC")
+    assert USDC == "USDC-c76f1f"
+    assert pool["quote_token"] == USDC
