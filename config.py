@@ -69,6 +69,21 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 PRIVATE_CHAT_ID = os.getenv("TELEGRAM_PRIVATE_CHAT_ID", "").strip()
 GROUP_CHAT_ID = os.getenv("TELEGRAM_GROUP_CHAT_ID", "").strip()
 
+# Public community features. The morning brief targets this group unless overridden.
+ENABLE_COMMUNITY_WELCOME = _env_bool("ENABLE_COMMUNITY_WELCOME", True)
+ENABLE_MORNING_BRIEF = _env_bool("ENABLE_MORNING_BRIEF", True)
+MORNING_BRIEF_CHAT_ID = os.getenv("MORNING_BRIEF_CHAT_ID", "").strip() or GROUP_CHAT_ID
+MORNING_BRIEF_HOUR = _env_int("MORNING_BRIEF_HOUR", 9, min_value=0, max_value=23)
+MORNING_BRIEF_TIMEZONE = os.getenv("MORNING_BRIEF_TIMEZONE", "Europe/Berlin").strip()
+COINGECKO_DAILY_MARKET_API = os.getenv(
+    "COINGECKO_DAILY_MARKET_API",
+    "https://api.coingecko.com/api/v3/simple/price?ids=elrond-erd-2,bitcoin&vs_currencies=usd&include_24hr_change=true",
+).strip()
+COINGECKO_GLOBAL_MARKET_API = os.getenv(
+    "COINGECKO_GLOBAL_MARKET_API",
+    "https://api.coingecko.com/api/v3/global",
+).strip()
+
 ENABLE_PRIVATE_ALERTS = _env_bool("ENABLE_PRIVATE_ALERTS", True)
 ENABLE_GROUP_ALERTS = _env_bool("ENABLE_GROUP_ALERTS", False)
 ADMIN_TELEGRAM_ID = os.getenv("ADMIN_TELEGRAM_ID", "").strip()

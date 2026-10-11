@@ -115,6 +115,10 @@ Toate variabilele cunoscute sunt listate în `.env.example`. Cele mai importante
 | `TELEGRAM_GROUP_CHAT_ID` | Chat ID pentru grup/supergroup. De obicei începe cu `-100`. Necesită `ENABLE_GROUP_ALERTS=true`. |
 | `ENABLE_PRIVATE_ALERTS` | Activează/dezactivează trimiterea alertelor în privat (`true`/`false`). |
 | `ENABLE_GROUP_ALERTS` | Activează/dezactivează trimiterea alertelor în grup (`true`/`false`). |
+| `ENABLE_COMMUNITY_WELCOME` | Trimite un mesaj când utilizatori noi intră într-un grup sau supergrup. |
+| `ENABLE_MORNING_BRIEF`, `MORNING_BRIEF_CHAT_ID`, `MORNING_BRIEF_HOUR`, `MORNING_BRIEF_TIMEZONE` | Raport de piață zilnic; implicit la 09:00 Europe/Berlin în `TELEGRAM_GROUP_CHAT_ID`. |
+| `COINGECKO_DAILY_MARKET_API`, `COINGECKO_GLOBAL_MARKET_API` | Sursele CoinGecko pentru variațiile pe 24h și indicatorii globali. |
+| `tzdata` | Baza IANA folosită pentru programarea corectă a orei locale și a schimbării de oră în medii Docker minimale. |
 | `MVX_API` | Endpoint REST MultiversX folosit pentru tranzacții, tokenuri, conturi și VM queries. |
 | `WS_URL` | Endpoint WebSocket MultiversX pentru evenimente live. |
 | `COINGECKO_EGLD_API`, `BINANCE_EGLD_PRICE_API`, `COINBASE_EGLD_SPOT_API` | Surse pentru prețul EGLD/USD și fallback-uri. |
