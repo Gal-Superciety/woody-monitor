@@ -2166,20 +2166,31 @@ def _lp_account_balance_raw(account: Dict[str, Any]) -> int:
 
 
 def get_lp_total_supply_raw_and_decimals(lp_token_id: str) -> Tuple[int, int]:
+    """Use exact ESDT issuance counters; API supply is rounded to whole tokens.
+
+    MultiversX /tokens/{id} exposes minted, burnt and initialMinted as
+    integer raw units, while supply/circulatingSupply can be truncated.
+    Never use the rounded supply for holder-balance reconciliation.
+    """
     data = get_token_metadata(lp_token_id)
     decimals = safe_int(data.get("decimals", 18), 18)
-    supply_raw = data.get("supply") or data.get("totalSupply") or data.get("circulatingSupply") or "0"
-    return _token_amount_to_raw(supply_raw, decimals), decimals
-
+    counters = ("minted", "burnt", "initialMinted")
+    if all(data.get(k) is not None for k in counters):
+        try:
+            minted = int(str(data["minted"]))
+            burnt = int(str(data["burnt"]))
+            initial = int(str(data["initialMinted"]))
+            exact = minted + initial - burnt
+            if minted >= 0 and burnt >= 0 and initial >= 0 and exact > 0:
+                return exact, decimals
+        except (ValueError, TypeError):
+            pass
+    supply = data.get("supply") or data.get("totalSupply") or data.get("circulatingSupply") or "0"
+    return _token_amount_to_raw(supply, decimals), decimals
 
 
 def _correct_lp_supply_raw(total_supply_raw: int, lp_decimals: int, balances_raw: List[int], lp_token_id: str) -> int:
-    max_balance = max(balances_raw, default=0)
-    if total_supply_raw > 0 and max_balance > total_supply_raw:
-        corrected = total_supply_raw * (10 ** int(lp_decimals))
-        if corrected >= max_balance:
-            logger.warning("LP supply looked decoded; converted to raw units | token=%s supply=%s corrected=%s decimals=%s", lp_token_id, total_supply_raw, corrected, lp_decimals)
-            return corrected
+    """Retain raw supply; never inflate it to bypass an ownership mismatch."""
     return total_supply_raw
 
 
