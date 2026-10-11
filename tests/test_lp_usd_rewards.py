@@ -346,7 +346,7 @@ def test_live_lp_leaderboard_never_invents_wallets_from_pool_estimates():
          patch.object(m, "build_global_usd_valuation", return_value={
              "holders": [], "pools": [{"status": "verified"}]}):
         report = m.get_lp_leaderboard_text()
-    assert "No readable wallet LP holdings" in report
+    assert "Nu există portofele cu poziții LP lizibile" in report
     assert "JEX WOODY/OLV" not in report
 
 
@@ -387,6 +387,28 @@ def test_onedex_woody_one_live_usd_uses_exact_reserves_without_pair_id():
     # Indicative live quotes may appear in the live leaderboard but remain
     # ineligible for monthly reward snapshots.
     assert result["valuation_complete"] is False
+
+
+def test_indicative_quote_metadata_is_replaced_by_exact_pool_reserve_price():
+    pool = {"status": "active", "pair_address": "erd1jexpair",
+            "name": "WOODY/JEX", "dex": "JEX",
+            "lp_token": "LP-JEX", "quote_token": "JEX-expected"}
+    holder_data = {"ok": True, "total_supply_raw": "1000",
+                   "holders": [{"wallet": "erd1wallet", "balance_raw": "500"}]}
+    snap = {"ok": True, "woody_amount": 1000, "pair_amount": 2000,
+            "pair_token": "JEX-expected"}
+    with patch.object(m, "LP_POOLS", [pool]), \
+         patch.object(m, "get_egld_usd", return_value=10), \
+         patch.object(m, "get_best_price", return_value={"price_usd": 0.02}), \
+         patch.object(m, "get_lp_holders", return_value=holder_data), \
+         patch.object(m, "get_pool_snapshot", return_value=snap), \
+         patch.object(m, "get_verified_quote_usd", return_value={
+             "ok": True, "price_usd": 999, "confidence": "indicative"}):
+        result = m.build_global_usd_valuation()
+    assert result["pools"][0]["quote_usd"] == 0.01
+    assert result["pools"][0]["pool_value_usd"] == 40
+    assert result["holders"][0]["estimated_usd"] == 20
+    assert "exact pool ratio" in result["pools"][0]["quote_price_source"].lower()
 
 
 def test_onedex_woody_one_requires_confirmed_pair_id():
