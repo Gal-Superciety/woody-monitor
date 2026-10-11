@@ -321,6 +321,38 @@ def test_onedex_woody_one_lp_ownership_active_without_pair_id():
     assert pool["lp_token"] == "WOODYONE-826f23"
 
 
+def test_onedex_woody_one_live_usd_uses_exact_reserves_without_pair_id():
+    pool = {"status": "active", "pair_address": "erd1sharedonedex",
+            "name": "WOODY/ONE", "dex": "OneDex",
+            "lp_token": "WOODYONE-826f23", "quote_token": m.ONE}
+    holder_data = {"ok": True, "total_supply_raw": "1000",
+                   "holders": [{"wallet": "erd1wallet", "balance_raw": "500"}]}
+    indexed_snap = {"ok": True, "woody_amount": 400000, "pair_amount": 1000,
+                    "pair_token": m.ONE, "pair_symbol": "ONE",
+                    "reserve_source": "DexScreener public indexer (indicative)"}
+    with patch.object(m, "LP_POOLS", [pool]), \
+         patch.object(m, "get_egld_usd", return_value=10), \
+         patch.object(m, "get_best_price", return_value={
+             "price_usd": 0.000003, "source": "test"}), \
+         patch.object(m, "get_lp_holders", return_value=holder_data), \
+         patch.object(m, "get_onedex_woody_one_pool_snapshot", return_value={
+             "ok": False, "reason": "pair ID missing"}), \
+         patch.object(m, "get_onedex_woody_one_public_quote",
+                      return_value=indexed_snap), \
+         patch.object(m, "get_verified_quote_usd", return_value={
+             "ok": True, "price_usd": 99, "confidence": "feed"}):
+        result = m.build_global_usd_valuation()
+
+    # Pool USD = $1.20 WOODY side + $1.20 reserve-implied ONE side.
+    assert result["pools"][0]["pool_value_usd"] == 2.4
+    assert result["holders"][0]["estimated_usd"] == 1.2
+    assert result["pools"][0]["quote_usd"] == 0.0012
+    assert result["pools"][0]["quote_price_confidence"] == "indicative"
+    # Indicative live quotes may appear in the live leaderboard but remain
+    # ineligible for monthly reward snapshots.
+    assert result["valuation_complete"] is False
+
+
 def test_onedex_woody_one_requires_confirmed_pair_id():
     with patch.object(m, "ONEDEX_WOODY_ONE_PAIR_ID", 0):
         snap = m.get_onedex_woody_one_pool_snapshot()
