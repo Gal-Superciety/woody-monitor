@@ -443,3 +443,34 @@ def test_jex_lp_identifiers_verified_on_chain():
     }
     actual = {p["name"]: p["lp_token"] for p in LP_POOLS if p["dex"] == "JEX"}
     assert actual == expected
+
+
+def test_live_lp_ownership_includes_unpriced_wallets():
+    from unittest.mock import patch
+    from core import multiversx as m
+    pools = [
+        {"dex": "JEX", "name": "WOODY/OLV", "status": "active", "lp_token": "LPOLVWOOD-29ac00"},
+        {"dex": "OneDex", "name": "WOODY/BOBER", "status": "excluded"},
+    ]
+    holders = {"ok": True, "lp_token_id": "LPOLVWOOD-29ac00",
+               "holders": [{"wallet": "erd1examplewallet", "lp_amount": 2.5,
+                            "balance_raw": "2500000000000000000"}]}
+    with patch.object(m, "LP_POOLS", pools), patch.object(m, "get_lp_holders", return_value=holders):
+        result = m.build_live_lp_ownership()
+    assert len(result["holders"]) == 1
+    assert result["holders"][0]["pools"][0]["lp_amount"] == 2.5
+    assert len(result["pools"]) == 1
+
+
+def test_live_leaderboard_never_uses_monthly_reward_snapshots():
+    from unittest.mock import patch
+    from core import multiversx as m
+    ownership = {"holders": [{"wallet": "erd1examplewallet", "pools": [
+        {"pool": "JEX WOODY/OLV", "lp_amount": 2.5}]}],
+        "pools": [{"label": "JEX WOODY/OLV", "status": "readable"}]}
+    with patch.object(m, "build_live_lp_ownership", return_value=ownership), \
+         patch.object(m, "build_global_usd_valuation", return_value={"holders": []}), \
+         patch.object(m, "calculate_monthly_lp_averages", side_effect=AssertionError("monthly called")):
+        output = m.get_lp_leaderboard_text()
+    assert "USD unavailable" in output
+    assert "JEX WOODY/OLV" in output
