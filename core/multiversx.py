@@ -1873,6 +1873,71 @@ def get_onedex_woody_pool_snapshot() -> Dict[str, Any]:
     }
 
 
+def get_onedex_woody_one_pool_snapshot() -> Dict[str, Any]:
+    """Read pair-specific WOODY/ONE reserves from OneDex view endpoints.
+
+    OneDex keeps many pairs in one smart contract, so account ESDT balances are
+    aggregate balances and must never be presented as a single pool's reserves.
+    """
+    pair_id = int(ONEDEX_WOODY_ONE_PAIR_ID)
+    if pair_id <= 0:
+        return {"label": "WOODY/ONE", "ok": False, "reason": "OneDex WOODY/ONE pair ID not confirmed"}
+    pair_arg = format(pair_id, "x")
+    if len(pair_arg) % 2:
+        pair_arg = "0" + pair_arg
+
+    first_id_raw = _vm_query_scalar("getPairFirstTokenId", [pair_arg])
+    second_id_raw = _vm_query_scalar("getPairSecondTokenId", [pair_arg])
+    first_reserve_raw = _vm_query_scalar("getPairFirstTokenReserve", [pair_arg])
+    second_reserve_raw = _vm_query_scalar("getPairSecondTokenReserve", [pair_arg])
+    lp_id_raw = _vm_query_scalar("getPairLpTokenId", [pair_arg])
+
+    if None in (first_id_raw, second_id_raw, first_reserve_raw, second_reserve_raw):
+        return {"label": "WOODY/ONE", "ok": False, "reason": "OneDex pair view unavailable"}
+
+    try:
+        first_id = first_id_raw.decode("utf-8")
+        second_id = second_id_raw.decode("utf-8")
+        lp_id = lp_id_raw.decode("utf-8") if lp_id_raw else ""
+        first_raw = int.from_bytes(first_reserve_raw, "big")
+        second_raw = int.from_bytes(second_reserve_raw, "big")
+    except Exception:
+        return {"label": "WOODY/ONE", "ok": False, "reason": "OneDex pair view decode failed"}
+
+    expected = {WOODY, ONE}
+    if {first_id, second_id} != expected:
+        logger.warning("OneDex pair id mismatch", extra={"pair_id": pair_id, "first": first_id, "second": second_id})
+        return {"label": "WOODY/ONE", "ok": False, "reason": "OneDex pair id/token verification failed"}
+    if lp_id != "WOODYONE-826f23":
+        return {"label": "WOODY/ONE", "ok": False, "reason": "OneDex LP token verification failed"}
+
+    metadata = {WOODY: get_token_metadata(WOODY), ONE: get_token_metadata(ONE)}
+    decimals = {
+        WOODY: safe_int(metadata[WOODY].get("decimals"), 18),
+        ONE: safe_int(metadata[ONE].get("decimals"), 18),
+    }
+    amounts = {
+        first_id: first_raw / (10 ** decimals[first_id]),
+        second_id: second_raw / (10 ** decimals[second_id]),
+    }
+    woody_amount = safe_float(amounts.get(WOODY))
+    one_amount = safe_float(amounts.get(ONE))
+    if woody_amount <= 0 or one_amount <= 0:
+        return {"label": "WOODY/ONE", "ok": False, "reason": "OneDex pair reserves are empty"}
+
+    return {
+        "label": "WOODY/ONE",
+        "ok": True,
+        "woody_amount": woody_amount,
+        "pair_token": ONE,
+        "pair_symbol": "ONE",
+        "pair_amount": one_amount,
+        "pair_id": pair_id,
+        "lp_token": lp_id,
+        "reserve_source": "OneDex viewPair storage endpoints",
+    }
+
+
 def get_pool_snapshot(pool_address: str, label: str) -> Dict[str, Any]:
     now = time.time()
     cached = POOL_SNAPSHOT_CACHE.get(pool_address)
@@ -2382,7 +2447,7 @@ def build_global_usd_valuation() -> Dict[str, Any]:
                           "reason": "Active pool missing exact quote token identifier"})
             continue
         result = get_lp_holders(pool, require_tvl=False)
-        snap = get_pool_snapshot(str(pool.get("pair_address") or ""), label)
+        snap = (get_onedex_woody_one_pool_snapshot() if str(pool.get("lp_token") or "") == "WOODYONE-826f23"\n                else get_pool_snapshot(str(pool.get("pair_address") or ""), label))
         quote_token = str(snap.get("pair_token") or "")
         expected_quote = str(pool.get("quote_token") or "")
         if expected_quote and quote_token != expected_quote:
