@@ -387,3 +387,21 @@ def test_off_schedule_snapshot_cannot_generate_rewards():
     assert result["valuation_complete"] is False
     assert result["rows"] == []
     assert "2026-09-30" in result["missing_dates"]
+
+
+def test_lp_preflight_reports_unverified_onedex_and_missing_jex_ids():
+    pools = [
+        {"dex": "OneDex", "name": "WOODY/ONE", "status": "unverified",
+         "lp_token": "WOODYONE-826f23", "pair_address": "erd1contract",
+         "quote_token": m.ONE, "pair_id": 0},
+        {"dex": "JEX", "name": "WOODY/JEX", "status": "active",
+         "lp_token": "", "pair_address": "erd1jex", "quote_token": "JEX-123"},
+        {"dex": "OneDex", "name": "WOODY/BOBER", "status": "excluded"},
+    ]
+    with patch.object(m, "LP_POOLS", pools):
+        audit = m.audit_global_lp_configuration()
+    assert audit["configuration_ready"] is False
+    assert "OneDex numeric pair ID unverified" in audit["pools"][0]["issues"]
+    assert "LP token ID missing" in audit["pools"][1]["issues"]
+    assert audit["pools"][2]["status"] == "excluded"
+    assert audit["snapshot_file"].endswith("data/lp_usd_snapshots.json")
