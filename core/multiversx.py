@@ -2558,7 +2558,7 @@ def build_global_usd_valuation() -> Dict[str, Any]:
         quote_usd = safe_float(quote_price.get("price_usd")) if quote_price.get("ok") else 0.0
         if quote_price.get("confidence") == "indicative":
             prices_indicative = True
-        # Stablecoin parity is not assumed: a verified price feed is required.
+        # Do not assume stablecoin parity; quote values above use a feed or the exact pool ratio.
         pool_usd = woody_reserve * woody_usd + quote_reserve * quote_usd
         if (not result.get("ok") or not snap.get("ok") or woody_usd <= 0
                 or quote_usd <= 0 or woody_reserve <= 0 or quote_reserve <= 0
@@ -3049,7 +3049,6 @@ def get_lp_leaderboard_text() -> str:
     valuation = build_global_usd_valuation()
     valued = {str(row.get("wallet")): row for row in valuation.get("holders", [])}
     pools = ownership.get("pools", [])
-    readable = sum(p.get("status") == "readable" for p in pools)
     all_ownership_readable = all(p.get("status") == "readable" for p in pools)
     rows = ownership.get("holders", [])
     complete_rows: List[Dict[str, Any]] = []
