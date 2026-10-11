@@ -72,7 +72,7 @@ GROUP_CHAT_ID = os.getenv("TELEGRAM_GROUP_CHAT_ID", "").strip()
 # Public community features. The morning brief targets this group unless overridden.
 ENABLE_COMMUNITY_WELCOME = _env_bool("ENABLE_COMMUNITY_WELCOME", True)
 ENABLE_MORNING_BRIEF = _env_bool("ENABLE_MORNING_BRIEF", True)
-MORNING_BRIEF_CHAT_ID = os.getenv("MORNING_BRIEF_CHAT_ID", GROUP_CHAT_ID).strip()
+MORNING_BRIEF_CHAT_ID = os.getenv("MORNING_BRIEF_CHAT_ID", "").strip() or GROUP_CHAT_ID
 MORNING_BRIEF_HOUR = _env_int("MORNING_BRIEF_HOUR", 9, min_value=0, max_value=23)
 MORNING_BRIEF_TIMEZONE = os.getenv("MORNING_BRIEF_TIMEZONE", "Europe/Berlin").strip()
 COINGECKO_DAILY_MARKET_API = os.getenv(
