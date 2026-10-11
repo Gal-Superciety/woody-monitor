@@ -335,7 +335,7 @@ def test_live_lp_leaderboard_marks_partial_values_and_does_not_rank_them():
          patch.object(m, "build_global_usd_valuation", return_value=valuation):
         report = m.get_lp_leaderboard_text()
     assert "1. `erd1complete` — *~$20.00*" in report
-    assert "Valoare parțială" in report
+    assert "Partial valuation" in report
     assert "• `erd1partial` — *≥ ~$21.00*" in report
     assert "2. `erd1partial`" not in report
 
@@ -347,7 +347,7 @@ def test_live_lp_leaderboard_never_invents_wallets_from_pool_estimates():
          patch.object(m, "build_global_usd_valuation", return_value={
              "holders": [], "pools": [{"status": "verified"}]}):
         report = m.get_lp_leaderboard_text()
-    assert "Nu există portofele cu poziții LP lizibile" in report
+    assert "No wallets with readable LP positions" in report
     assert "JEX WOODY/OLV" not in report
 
 
@@ -569,7 +569,7 @@ def test_live_leaderboard_never_uses_monthly_reward_snapshots():
          patch.object(m, "build_global_usd_valuation", return_value={"holders": []}), \
          patch.object(m, "calculate_monthly_lp_averages", side_effect=AssertionError("monthly called")):
         output = m.get_lp_leaderboard_text()
-    assert "USD indisponibil" in output
+    assert "USD value unavailable" in output
     assert "1 pool" in output
 
 
