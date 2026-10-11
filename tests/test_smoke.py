@@ -549,9 +549,9 @@ def test_public_status_missing_file_returns_fast_unavailable(monkeypatch, tmp_pa
     assert b"status_initializing" in response.body
 
 
-def test_lp_supply_decoded_integer_is_corrected_against_holder_balances(monkeypatch) -> None:
+def test_lp_supply_exact_raw_units_reconcile_against_holder_balances(monkeypatch) -> None:
     monkeypatch.setattr(main, "discover_xexchange_lp_token_id", lambda: "LP-WOODYEGLD")
-    monkeypatch.setattr(main, "get_lp_total_supply_raw_and_decimals", lambda token: (10_000, 18))
+    monkeypatch.setattr(main, "get_lp_total_supply_raw_and_decimals", lambda token: (10_000 * (10 ** 18), 18))
     monkeypatch.setattr(main, "get_xexchange_pool_value_egld", lambda: 21.64)
 
     def fake_get_json(url, params=None):
