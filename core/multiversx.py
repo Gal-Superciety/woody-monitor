@@ -2272,6 +2272,11 @@ def get_lp_holders(pool: Dict[str, Any], limit_pages: int = LP_HOLDERS_MAX_PAGES
     if not complete:
         return {"ok": False, "lp_token_id": lp_token_id, "reason": "LP holder pagination limit reached; increase LP_HOLDERS_MAX_PAGES"}
 
+    addresses = [str(a.get("wallet") or "") for a in accounts]
+    if len(addresses) != len(set(addresses)):
+        return {"ok": False, "lp_token_id": lp_token_id,
+                "reason": "Duplicate LP holder addresses in API pagination"}
+
     total_supply_raw = _correct_lp_supply_raw(total_supply_raw, lp_decimals, [safe_int(a.get("balance_raw")) for a in accounts], lp_token_id)
     if sum(safe_int(a.get("balance_raw")) for a in accounts) > total_supply_raw:
         return {"ok": False, "lp_token_id": lp_token_id, "reason": "LP balances exceed total LP supply"}
