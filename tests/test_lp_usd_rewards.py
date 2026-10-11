@@ -612,3 +612,56 @@ def test_lp_supply_zero_rounded_but_nonzero_raw_issuance():
     with patch.object(m, "get_token_metadata", return_value=metadata):
         raw, _ = m.get_lp_total_supply_raw_and_decimals("WOODYUSDC-56b519")
     assert raw == 132447234
+
+
+
+def test_onedex_woody_one_legacy_tvl_uses_its_own_pair_reserves():
+    pool = {"status": "active", "pair_address": "erd1sharedonedex",
+            "name": "WOODY/ONE", "dex": "OneDex",
+            "lp_token": "WOODYONE-826f23", "quote_token": m.ONE}
+    snap = {"ok": True, "woody_amount": 400_000, "pair_amount": 1_000,
+            "pair_token": m.ONE, "pair_symbol": "ONE"}
+    with patch.object(m, "POOL_SNAPSHOT_CACHE", {}), \
+         patch.object(m, "get_onedex_woody_one_pool_snapshot",
+                      return_value=snap), \
+         patch.object(m, "get_best_price",
+                      return_value={"price_usd": 0.000003}), \
+         patch.object(m, "get_egld_usd", return_value=4.0):
+        result = m.get_pool_tvl_egld(pool)
+
+    assert result["pair_token"] == m.ONE
+    assert result["pool_value_usd"] == 2.4
+    assert result["pool_value_egld"] == 0.6
+
+
+def test_pools_command_lists_woody_one_pool():
+    pool = {"status": "active", "pair_address": "erd1sharedonedex",
+            "name": "WOODY/ONE", "dex": "OneDex",
+            "lp_token": "WOODYONE-826f23", "quote_token": m.ONE}
+    snap = {"ok": True, "woody_amount": 400_000, "pair_amount": 1_000,
+            "pair_token": m.ONE, "pair_symbol": "ONE",
+            "pool_value_usd": 2.4}
+    with patch.object(m, "LP_POOLS", [pool]), \
+         patch.object(m, "WATCHED_POOLS", {}), \
+         patch.object(m, "get_configured_pool_snapshot", return_value=snap):
+        report = m.get_pools_text()
+
+    assert "OneDex WOODY/ONE" in report
+    assert "ONE: 1,000.000000" in report
+    assert "Total liquidity across all WOODY pools: $2.40" in report
+
+
+def test_market_context_prices_one_from_woody_one_pair():
+    pool = {"status": "active", "pair_address": "erd1sharedonedex",
+            "name": "WOODY/ONE", "dex": "OneDex",
+            "lp_token": "WOODYONE-826f23", "quote_token": m.ONE}
+    snap = {"ok": True, "woody_amount": 400_000, "pair_amount": 1_000}
+    with patch.object(m, "LP_POOLS", [pool]), \
+         patch.object(m, "get_configured_pool_snapshot", return_value=snap), \
+         patch.object(m, "get_best_price",
+                      return_value={"price_usd": 0.000003}):
+        price = m._estimate_token_context_price(m.ONE)
+
+    assert price["ok"]
+    assert price["pool"] == "OneDex WOODY/ONE"
+    assert price["price_usd"] == 0.0012
