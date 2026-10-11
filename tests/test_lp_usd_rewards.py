@@ -335,3 +335,27 @@ def test_onedex_woody_one_rejects_wrong_lp_identifier():
         snap = m.get_onedex_woody_one_pool_snapshot()
     assert snap["ok"] is False
     assert "LP token verification failed" in snap["reason"]
+
+
+def test_woody_one_public_quote_rejects_unrelated_pairs():
+    wrong = {"pairs": [{"chainId": "multiversx", "dexId": "onedex",
+                        "pairAddress": "other-pair",
+                        "baseToken": {"address": m.WOODY},
+                        "quoteToken": {"address": m.ONE},
+                        "liquidity": {"base": 100, "quote": 200}}]}
+    with patch.object(m, "get_json", return_value=wrong):
+        result = m.get_onedex_woody_one_public_quote()
+    assert not result["ok"]
+
+
+def test_woody_one_public_quote_requires_exact_lp_pair():
+    pair = {"chainId": "multiversx", "dexId": "onedex",
+            "pairAddress": m.ONEDEX_POOL_ADDRESS + "-WOODYONE-826f23",
+            "baseToken": {"address": m.WOODY},
+            "quoteToken": {"address": m.ONE},
+            "liquidity": {"base": 294583, "quote": 1481.3566}}
+    with patch.object(m, "get_json", return_value={"pairs": [pair]}):
+        result = m.get_onedex_woody_one_public_quote()
+    assert result["ok"]
+    assert result["woody_amount"] == 294583
+    assert "indicative" in result["reserve_source"]
