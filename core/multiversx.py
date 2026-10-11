@@ -108,6 +108,8 @@ PENDING_HOLDER_VALUE: Optional[int] = None
 MVX_RATE_LIMIT_LOCK = threading.Lock()
 MVX_RATE_LIMIT_TOKENS = float(MVX_API_RATE_LIMIT_BURST)
 MVX_RATE_LIMIT_UPDATED_AT = time.monotonic()
+MVX_RATE_LIMIT_COOLDOWN_UNTIL = 0.0
+MVX_RATE_LIMIT_FAILURES = 0
 
 DATA_DIR = os.getenv("DATA_DIR", "data").strip()
 LAST_ALERTS_FILE = os.getenv("LAST_ALERTS_FILE", "data/last_alerts.json").strip()
@@ -385,55 +387,108 @@ def _is_mvx_api_url(url: str) -> bool:
     return bool(url and MVX_API and url.startswith(MVX_API.rstrip("/") + "/"))
 
 
+def _register_mvx_rate_limit_backoff(retry_after: Any = None) -> float:
+    """Pause all MultiversX API requests after a 429 response."""
+    global MVX_RATE_LIMIT_COOLDOWN_UNTIL, MVX_RATE_LIMIT_FAILURES
+    global MVX_RATE_LIMIT_TOKENS, MVX_RATE_LIMIT_UPDATED_AT
+    now = time.monotonic()
+    try:
+        requested_delay = max(0.0, float(retry_after))
+    except (TypeError, ValueError, OverflowError):
+        requested_delay = 0.0
+
+    with MVX_RATE_LIMIT_LOCK:
+        MVX_RATE_LIMIT_FAILURES += 1
+        fallback_delay = min(60.0, float(2 ** min(MVX_RATE_LIMIT_FAILURES, 6)))
+        delay = min(120.0, max(requested_delay, fallback_delay))
+        MVX_RATE_LIMIT_COOLDOWN_UNTIL = max(
+            MVX_RATE_LIMIT_COOLDOWN_UNTIL, now + delay
+        )
+        MVX_RATE_LIMIT_TOKENS = 0.0
+        MVX_RATE_LIMIT_UPDATED_AT = now
+    logger.warning(
+        "MVX API rate limited | cooldown_seconds=%.1f failures=%s",
+        delay, MVX_RATE_LIMIT_FAILURES,
+    )
+    return delay
+
+
+def _mark_mvx_api_success() -> None:
+    global MVX_RATE_LIMIT_FAILURES
+    with MVX_RATE_LIMIT_LOCK:
+        MVX_RATE_LIMIT_FAILURES = 0
+
+
 def _wait_for_mvx_rate_limit() -> None:
     global MVX_RATE_LIMIT_TOKENS, MVX_RATE_LIMIT_UPDATED_AT
     while True:
         with MVX_RATE_LIMIT_LOCK:
             now = time.monotonic()
-            elapsed = max(0.0, now - MVX_RATE_LIMIT_UPDATED_AT)
-            MVX_RATE_LIMIT_TOKENS = min(
-                float(MVX_API_RATE_LIMIT_BURST),
-                MVX_RATE_LIMIT_TOKENS + (elapsed * float(MVX_API_RATE_LIMIT_PER_SECOND)),
-            )
-            MVX_RATE_LIMIT_UPDATED_AT = now
-            if MVX_RATE_LIMIT_TOKENS >= 1.0:
-                MVX_RATE_LIMIT_TOKENS -= 1.0
-                return
-            wait_seconds = (1.0 - MVX_RATE_LIMIT_TOKENS) / float(MVX_API_RATE_LIMIT_PER_SECOND)
+            if now < MVX_RATE_LIMIT_COOLDOWN_UNTIL:
+                wait_seconds = MVX_RATE_LIMIT_COOLDOWN_UNTIL - now
+            else:
+                elapsed = max(0.0, now - MVX_RATE_LIMIT_UPDATED_AT)
+                MVX_RATE_LIMIT_TOKENS = min(
+                    float(MVX_API_RATE_LIMIT_BURST),
+                    MVX_RATE_LIMIT_TOKENS
+                    + elapsed * float(MVX_API_RATE_LIMIT_PER_SECOND),
+                )
+                MVX_RATE_LIMIT_UPDATED_AT = now
+                if MVX_RATE_LIMIT_TOKENS >= 1.0:
+                    MVX_RATE_LIMIT_TOKENS -= 1.0
+                    return
+                wait_seconds = (
+                    1.0 - MVX_RATE_LIMIT_TOKENS
+                ) / float(MVX_API_RATE_LIMIT_PER_SECOND)
         logger.debug("MVX API rate limit wait", extra={"wait_seconds": wait_seconds})
         time.sleep(min(max(wait_seconds, 0.01), 1.0))
 
 
+def _record_api_failure(exc: Exception, url: str) -> None:
+    global API_FAIL_COUNT, LAST_API_ERROR
+    API_FAIL_COUNT += 1
+    LAST_API_ERROR = f"{type(exc).__name__}: {exc}"
+    response = getattr(exc, "response", None)
+    if (_is_mvx_api_url(url)
+            and getattr(response, "status_code", None) == 429):
+        headers = getattr(response, "headers", {}) or {}
+        _register_mvx_rate_limit_backoff(headers.get("Retry-After"))
+
+
 def get_json(url: str, params: Optional[dict] = None) -> Optional[Any]:
-    global API_OK_COUNT, API_FAIL_COUNT, LAST_API_ERROR
+    global API_OK_COUNT
     try:
         if _is_mvx_api_url(url):
             _wait_for_mvx_rate_limit()
         logger.debug("HTTP GET", extra={"url": url, "params": params})
         r = requests.get(url, params=params, headers=UA, timeout=API_TIMEOUT_SECONDS)
         r.raise_for_status()
+        payload = r.json()
         API_OK_COUNT += 1
-        return r.json()
+        if _is_mvx_api_url(url):
+            _mark_mvx_api_success()
+        return payload
     except Exception as exc:
-        API_FAIL_COUNT += 1
-        LAST_API_ERROR = f"{type(exc).__name__}: {exc}"
+        _record_api_failure(exc, url)
         logger.warning("GET JSON failed for %s -> %s", url, exc)
         return None
 
 
 def post_json(url: str, payload: dict) -> Optional[Any]:
-    global API_OK_COUNT, API_FAIL_COUNT, LAST_API_ERROR
+    global API_OK_COUNT
     try:
         if _is_mvx_api_url(url):
             _wait_for_mvx_rate_limit()
         logger.debug("HTTP POST", extra={"url": url})
         r = requests.post(url, json=payload, headers=UA, timeout=API_TIMEOUT_SECONDS)
         r.raise_for_status()
+        result = r.json()
         API_OK_COUNT += 1
-        return r.json()
+        if _is_mvx_api_url(url):
+            _mark_mvx_api_success()
+        return result
     except Exception as exc:
-        API_FAIL_COUNT += 1
-        LAST_API_ERROR = f"{type(exc).__name__}: {exc}"
+        _record_api_failure(exc, url)
         logger.warning("POST JSON failed for %s -> %s", url, exc)
         return None
 
@@ -665,7 +720,8 @@ def get_liquidity_text() -> str:
         label = f"{pool.get('dex', 'DEX')} · {pool.get('pair', 'WOODY pool')}"
         value = pool.get("estimatedUsd")
         if value is None:
-            lines.append(f"• {label}: unavailable")
+            reason = str(pool.get("reason") or "reserves could not be read")
+            lines.append(f"• {label}: unavailable ({reason})")
         else:
             lines.append(f"• {label}: *${value:,.2f}*")
     total = liquidity["totalUsd"]
@@ -675,7 +731,7 @@ def get_liquidity_text() -> str:
         + "\n".join(lines)
         + f"\n\nTotal: *{total_text}* across {liquidity['estimatedPoolCount']} readable pools."
         + "\nMethod: 2 × WOODY reserve × WOODY reference price."
-        + "\nQuote-token USD prices are not independently valued; unavailable pools are excluded."
+        + "\nValues use 2 × WOODY reserves × the WOODY reference price; quote-token prices are not independently valued. Pools with unreadable reserves are excluded."
     )
 
 
@@ -1609,6 +1665,14 @@ def get_public_pool_reserves() -> List[Dict[str, Any]]:
         quote_amount = safe_float(snap.get("pair_amount"))
         quote_symbol = str(snap.get("pair_symbol") or "").strip()
         if woody_amount <= 0 or quote_amount <= 0 or not quote_symbol:
+            pools.append({
+                "dex": str(pool.get("dex") or "DEX"),
+                "pair": str(pool.get("name") or "WOODY pool"),
+                "address": address,
+                "status": "unavailable",
+                "reason": "Pool reserves are incomplete or unreadable",
+                "valuation": "not_verified",
+            })
             continue
         pools.append({
             "dex": str(pool.get("dex") or "DEX"),
@@ -2117,7 +2181,12 @@ def get_pool_snapshot(pool_address: str, label: str) -> Dict[str, Any]:
 
     data = get_json(f"{MVX_API}/accounts/{pool_address}/tokens")
     if data is None:
-        result = {"label": label, "ok": False, "reason": "API unavailable / timeout"}
+        reason = (
+            "MultiversX API rate limit (HTTP 429)"
+            if "429" in str(LAST_API_ERROR)
+            else "MultiversX API unavailable / timeout"
+        )
+        result = {"label": label, "ok": False, "reason": reason}
         POOL_SNAPSHOT_CACHE[pool_address] = (result, now)
         return result
     if not isinstance(data, list):
