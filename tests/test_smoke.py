@@ -788,7 +788,7 @@ def test_global_rewards_refuse_partial_active_pool_snapshot(monkeypatch) -> None
     rewards = main.calculate_monthly_lp_rewards(5, "2026-06")
     assert rewards["rows"] == []
     assert rewards["valuation_complete"] is False
-    assert "withheld" in main.format_rewards_report(5)
+    assert "No reward allocations available" in main.get_lp_rewards_text(5)
     with pytest.raises(ValueError, match="reward export withheld"):
         main.build_lp_export_csv(5)
 
