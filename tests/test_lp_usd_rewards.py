@@ -665,3 +665,27 @@ def test_market_context_prices_one_from_woody_one_pair():
     assert price["ok"]
     assert price["pool"] == "OneDex WOODY/ONE"
     assert price["price_usd"] == 0.0012
+
+
+
+def test_onedex_woody_one_tvl_does_not_use_cached_indexer_reserves():
+    pool = {"status": "active", "pair_address": "erd1sharedonedex",
+            "name": "WOODY/ONE", "dex": "OneDex",
+            "lp_token": "WOODYONE-826f23", "quote_token": m.ONE}
+    exact = {"ok": True, "woody_amount": 400_000, "pair_amount": 1_000,
+             "pair_token": m.ONE, "pair_symbol": "ONE",
+             "reserve_source": "OneDex viewPair storage endpoints"}
+    indexed = {"ok": True, "woody_amount": 400_000, "pair_amount": 1_000,
+               "pair_token": m.ONE, "pair_symbol": "ONE",
+               "reserve_source": "DexScreener public indexer (indicative)"}
+    cache = {"erd1sharedonedex:WOODYONE-826f23": (indexed, m.time.time())}
+    with patch.object(m, "POOL_SNAPSHOT_CACHE", cache), \
+         patch.object(m, "get_onedex_woody_one_pool_snapshot",
+                      return_value=exact) as exact_reader, \
+         patch.object(m, "get_best_price",
+                      return_value={"price_usd": 0.000003}), \
+         patch.object(m, "get_egld_usd", return_value=4.0):
+        result = m.get_pool_tvl_egld(pool)
+
+    exact_reader.assert_called_once_with()
+    assert result["reserve_source"] == "OneDex viewPair storage endpoints"
