@@ -286,3 +286,30 @@ def test_duplicate_lp_holder_address_is_rejected():
         result = m.get_lp_holders(pool, require_tvl=False)
     assert result["ok"] is False
     assert "Duplicate" in result["reason"]
+
+
+def test_live_lp_leaderboard_is_labeled_estimated_and_never_promises_rewards():
+    live = {"valuation_complete": False, "indicative_only": True,
+            "holders": [{"wallet": "erd1alice", "estimated_usd": 125.50}],
+            "pools": [{"label": "WOODY/EGLD", "status": "verified"},
+                      {"label": "WOODY/ONE", "status": "unverified"}]}
+    with patch.object(m, "calculate_monthly_lp_averages",
+                      return_value={"valuation_complete": False}), \
+         patch.object(m, "build_global_usd_valuation", return_value=live):
+        report = m.get_lp_leaderboard_text()
+    assert "Live LP Leaderboard" in report
+    assert "$125.50" in report
+    assert "indicative" in report
+    assert "WOODY/ONE" in report
+    assert "rewards withheld" in report
+    assert "Estimated reward:" not in report
+
+
+def test_live_lp_leaderboard_never_invents_wallets_from_pool_estimates():
+    live = {"holders": [], "pools": [{"status": "verified"}]}
+    with patch.object(m, "calculate_monthly_lp_averages",
+                      return_value={"valuation_complete": False}), \
+         patch.object(m, "build_global_usd_valuation", return_value=live):
+        report = m.get_lp_leaderboard_text()
+    assert "No reliable wallet-level LP positions" in report
+    assert "rewards withheld" in report
