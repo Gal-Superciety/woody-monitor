@@ -3000,7 +3000,7 @@ def get_lp_leaderboard_text() -> str:
         for pool in pending:
             lines.append(f"• {pool.get('label')}: {pool.get('reason', 'price or reserves unavailable')}")
     lines.extend(["", "_No monthly reward calculations or distributions are included._"])
-    return "\\n".join(lines)
+    return "\n".join(lines)
 
 def format_lp_snapshot_confirmation(snapshot: Dict[str, Any]) -> str:
     created_at = str(snapshot.get("created_at") or "")
