@@ -289,30 +289,36 @@ def test_duplicate_lp_holder_address_is_rejected():
 
 
 def test_live_lp_leaderboard_is_labeled_estimated_and_never_promises_rewards():
-    live = {"valuation_complete": False, "indicative_only": True,
-            "holders": [{"wallet": "erd1alice", "estimated_usd": 125.50}],
-            "pools": [{"label": "WOODY/EGLD", "status": "verified"},
-                      {"label": "WOODY/ONE", "status": "unverified"}]}
-    with patch.object(m, "calculate_monthly_lp_averages",
-                      return_value={"valuation_complete": False}), \
-         patch.object(m, "build_global_usd_valuation", return_value=live):
+    ownership = {"holders": [{"wallet": "erd1alice", "pools": [
+        {"pool": "xExchange WOODY/EGLD", "lp_amount": 2.5}]}],
+        "pools": [{"label": "xExchange WOODY/EGLD", "status": "readable"}]}
+    valuation = {"holders": [{"wallet": "erd1alice", "estimated_usd": 125.50}]}
+    with patch.object(m, "build_live_lp_ownership", return_value=ownership), \
+         patch.object(m, "build_global_usd_valuation", return_value=valuation), \
+         patch.object(m, "calculate_monthly_lp_averages", side_effect=AssertionError("monthly called")):
         report = m.get_lp_leaderboard_text()
     assert "Live LP Leaderboard" in report
     assert "$125.50" in report
-    assert "indicative" in report
-    assert "WOODY/ONE" in report
-    assert "rewards withheld" in report
+    assert "xExchange WOODY/EGLD" in report
     assert "Estimated reward:" not in report
 
 
 def test_live_lp_leaderboard_never_invents_wallets_from_pool_estimates():
-    live = {"holders": [], "pools": [{"status": "verified"}]}
-    with patch.object(m, "calculate_monthly_lp_averages",
-                      return_value={"valuation_complete": False}), \
-         patch.object(m, "build_global_usd_valuation", return_value=live):
+    ownership = {"holders": [], "pools": [
+        {"label": "JEX WOODY/OLV", "status": "readable"}]}
+    with patch.object(m, "build_live_lp_ownership", return_value=ownership), \
+         patch.object(m, "build_global_usd_valuation", return_value={
+             "holders": [], "pools": [{"status": "verified"}]}):
         report = m.get_lp_leaderboard_text()
-    assert "No reliable wallet-level LP positions" in report
-    assert "rewards withheld" in report
+    assert "No readable wallet LP holdings" in report
+    assert "JEX WOODY/OLV" not in report
+
+
+def test_onedex_woody_one_lp_ownership_active_without_pair_id():
+    from config import LP_POOLS
+    pool = next(p for p in LP_POOLS if p["dex"] == "OneDex" and p["name"] == "WOODY/ONE")
+    assert pool["status"] == "active"
+    assert pool["lp_token"] == "WOODYONE-826f23"
 
 
 def test_onedex_woody_one_requires_confirmed_pair_id():
