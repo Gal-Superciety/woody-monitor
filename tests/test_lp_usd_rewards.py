@@ -42,7 +42,7 @@ def test_absent_wallet_counts_zero_across_snapshots():
     assert [round(r["average_usd"], 6) for r in result["rows"]] == [66.666667, 33.333333]
 
 
-def test_global_valuation_requires_quote_usd_price():
+def test_missing_quote_price_is_derived_from_exact_pool_reserves():
     pool = {"status": "active", "pair_address": "erd1pair", "name": "WOODY/JEX", "quote_token": "JEX-123"}
     holder_data = {"ok": True, "pool_value_egld": 20, "total_supply_raw": "1000",
                    "holders": [{"wallet": "erd1wallet", "balance_raw": "500", "estimated_egld": 10}]}
@@ -55,8 +55,9 @@ def test_global_valuation_requires_quote_usd_price():
          patch.object(m, "get_pool_snapshot", return_value=snap):
         result = m.build_global_usd_valuation()
     assert result["valuation_complete"] is False
-    assert result["pools"][0]["status"] == "unverified"
-    assert result["total_eligible_usd"] == 0
+    assert result["pools"][0]["status"] == "verified"
+    assert result["pools"][0]["quote_usd"] == 0.1
+    assert result["total_eligible_usd"] == 20
 
 
 def test_global_valuation_sums_independent_token_legs():
@@ -202,7 +203,7 @@ def test_metadata_quote_produces_indicative_not_reward_eligible_valuation():
          patch.object(m, "get_token_metadata", return_value={
              "identifier": "JEX-abc123", "price": 0.5}):
         result = m.build_global_usd_valuation()
-    assert result["holders"][0]["estimated_usd"] == 15
+    assert result["holders"][0]["estimated_usd"] == 5
     assert result["indicative_only"] is True
     assert result["valuation_complete"] is False
     assert result["pools"][0]["quote_price_confidence"] == "indicative"
@@ -568,7 +569,7 @@ def test_live_leaderboard_never_uses_monthly_reward_snapshots():
          patch.object(m, "build_global_usd_valuation", return_value={"holders": []}), \
          patch.object(m, "calculate_monthly_lp_averages", side_effect=AssertionError("monthly called")):
         output = m.get_lp_leaderboard_text()
-    assert "USD unavailable" in output
+    assert "USD indisponibil" in output
     assert "JEX WOODY/OLV" in output
 
 
