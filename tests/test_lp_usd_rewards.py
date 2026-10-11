@@ -313,3 +313,25 @@ def test_live_lp_leaderboard_never_invents_wallets_from_pool_estimates():
         report = m.get_lp_leaderboard_text()
     assert "No reliable wallet-level LP positions" in report
     assert "rewards withheld" in report
+
+
+def test_onedex_woody_one_requires_confirmed_pair_id():
+    with patch.object(m, "ONEDEX_WOODY_ONE_PAIR_ID", 0):
+        snap = m.get_onedex_woody_one_pool_snapshot()
+    assert snap["ok"] is False
+    assert "pair ID not confirmed" in snap["reason"]
+
+
+def test_onedex_woody_one_rejects_wrong_lp_identifier():
+    def vm_query(function, args):
+        mapping = {"getPairFirstTokenId": m.WOODY.encode(),
+                   "getPairSecondTokenId": m.ONE.encode(),
+                   "getPairFirstTokenReserve": (10 ** 18).to_bytes(8, "big"),
+                   "getPairSecondTokenReserve": (10 ** 18).to_bytes(8, "big"),
+                   "getPairLpTokenId": b"WRONG-abcdef"}
+        return mapping[function]
+    with patch.object(m, "ONEDEX_WOODY_ONE_PAIR_ID", 999), \
+         patch.object(m, "_vm_query_scalar", side_effect=vm_query):
+        snap = m.get_onedex_woody_one_pool_snapshot()
+    assert snap["ok"] is False
+    assert "LP token verification failed" in snap["reason"]
