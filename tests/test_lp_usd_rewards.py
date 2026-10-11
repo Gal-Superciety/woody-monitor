@@ -299,7 +299,8 @@ def test_live_lp_leaderboard_is_labeled_estimated_and_never_promises_rewards():
         report = m.get_lp_leaderboard_text()
     assert "Live LP Leaderboard" in report
     assert "$125.50" in report
-    assert "xExchange WOODY/EGLD" in report
+    assert "1 pool" in report
+    assert "xExchange WOODY/EGLD" not in report
     assert "Estimated reward:" not in report
 
 
@@ -521,3 +522,24 @@ def test_lp_supply_zero_rounded_but_nonzero_raw_issuance():
     with patch.object(m, "get_token_metadata", return_value=metadata):
         raw, _ = m.get_lp_total_supply_raw_and_decimals("WOODYUSDC-56b519")
     assert raw == 132447234
+
+
+def test_compact_lp_leaderboard_hides_pool_breakdown_and_zero_rounded_lp():
+    ownership = {"holders": [
+        {"wallet": "erd1alice", "pools": [
+            {"pool": "xExchange WOODY/USDC", "lp_amount": 0.0000000001},
+            {"pool": "JEX WOODY/JEX", "lp_amount": 40.167229}]},
+        {"wallet": "erd1bob", "pools": [{"pool": "OneDex WOODY/ONE", "lp_amount": 536.87}]}],
+        "pools": [{"label": "xExchange WOODY/USDC", "status": "readable"},
+                  {"label": "JEX WOODY/JEX", "status": "readable"}]}
+    valuation = {"holders": [{"wallet": "erd1alice", "estimated_usd": 1157.64}]}
+    with patch.object(m, "build_live_lp_ownership", return_value=ownership), \
+         patch.object(m, "build_global_usd_valuation", return_value=valuation):
+        report = m.get_lp_leaderboard_text()
+    assert "2/2" in report
+    assert "$1,157.64" in report
+    assert "2 pools" in report
+    assert "USD unavailable" in report
+    assert "0.000000 LP" not in report
+    assert "JEX WOODY/JEX" not in report
+    assert "No monthly rewards" in report

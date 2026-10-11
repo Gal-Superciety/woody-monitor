@@ -3020,7 +3020,7 @@ def build_live_lp_ownership() -> Dict[str, Any]:
 
 
 def get_lp_leaderboard_text() -> str:
-    """Live LP monitoring, without monthly snapshots or reward calculations."""
+    """Compact live LP wallet ranking; prices cover verified pools only."""
     ownership = build_live_lp_ownership()
     valuation = build_global_usd_valuation()
     valued = {str(row.get("wallet")): row for row in valuation.get("holders", [])}
@@ -3035,27 +3035,23 @@ def get_lp_leaderboard_text() -> str:
     ))
     lines = [
         "🏆 *WOODY Live LP Leaderboard*",
-        "_Current wallet LP holdings, no monthly rewards._",
-        f"Readable LP pools: *{readable}/{len(pools)}*.",
-        "USD values are estimates for priced pools only.",
-        "Wallets without USD values are shown after valued wallets.",
+        f"LP pools: *{readable}/{len(pools)}* readable",
         "",
     ]
     if not rows:
         lines.append("No readable wallet LP holdings right now.")
-    for idx, row in enumerate(rows[:20], 1):
+    for idx, row in enumerate(rows[:10], 1):
         wallet = str(row.get("wallet") or "")
         priced = valued.get(wallet)
         amount = fmt_usd(priced.get("estimated_usd")) if priced else "USD unavailable"
-        lines.append(f"{idx}. `{short_wallet(wallet)}` — *{amount}*")
-        for position in row.get("pools", []):
-            lines.append(f"   • {position.get('pool')}: {safe_float(position.get('lp_amount')):,.6f} LP")
+        count = len(row.get("pools", []))
+        lines.append(f"{idx}. `{short_wallet(wallet)}` — *{amount}* · {count} pool{'s' if count != 1 else ''}")
+    if len(rows) > 10:
+        lines.append(f"… and {len(rows) - 10} more wallets")
     pending = [p for p in pools if p.get("status") != "readable"]
     if pending:
-        lines.extend(["", "*LP ownership unavailable:*"])
-        for pool in pending:
-            lines.append(f"• {pool.get('label')}: {pool.get('reason')}")
-    lines.extend(["", "_Pool LP units are not comparable across different pairs._"])
+        lines.append(f"⚠️ {len(pending)} pool(s) unavailable for LP ownership")
+    lines.extend(["", "_USD estimates include priced pools only. No monthly rewards._"])
     return "\n".join(lines)
 
 
