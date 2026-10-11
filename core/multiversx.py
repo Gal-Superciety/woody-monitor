@@ -2957,24 +2957,26 @@ def get_lp_leaderboard_text() -> str:
         pending = [p for p in pools if p.get("status") == "unverified"]
         if not rows:
             return (
-                "🏆 *WOODY LP Leaderboard*\\n\\n"
+                "🏆 *WOODY LP Leaderboard*\n\n"
                 "No reliable wallet-level LP positions available right now. "
-                "Pool liquidity estimates do not establish wallet ownership.\\n"
+                "Pool liquidity estimates do not establish wallet ownership.\n"
                 "Monthly USD snapshots are missing or incomplete; rewards withheld."
             )
         lines = ["🏆 *WOODY Live LP Leaderboard — Estimated USD*",
                  "_Current wallet holdings, not the monthly reward ranking._",
                  f"Pool coverage: *{counted}/{len(pools)}* readable (including excluded pools in denominator).",
                  f"Pricing: *{'indicative' if live.get('indicative_only') else 'estimated'}*.",
+                 "Equity % is share of readable wallet-level USD LP value, not total project ownership.",
                  "Values and ranks cover readable pools only; missing pools may change the order.",
                  "⚠️ Monthly rewards withheld until all checkpoints are verified.", ""]
         for idx, row in enumerate(rows[:20], start=1):
             lines.append(f"{idx}. `{short_wallet(str(row.get('wallet') or ''))}` — "
-                         f"*{fmt_usd(row.get('estimated_usd'))}*")
+                         f"*{fmt_usd(row.get('estimated_usd'))}* "
+                         f"(equity *{fmt_pct(row.get('share_pct'))}* of readable LP USD)")
         if pending:
             lines.extend(["", "Unavailable pools: " +
                           ", ".join(str(p.get("label") or "?") for p in pending[:8])])
-        return "\\n".join(lines)
+        return "\n".join(lines)
     reward_pool = get_last_lp_reward_pool()
     rewards_data = calculate_monthly_lp_rewards(reward_pool)
     rewards = {str(r.get("wallet")): safe_float(r.get("reward_egld"))
