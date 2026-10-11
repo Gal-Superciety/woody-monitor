@@ -3210,12 +3210,12 @@ def get_lp_leaderboard_text() -> str:
                            for p in LP_POOLS)
     lines = [
         "🏆 *WOODY LP Leaderboard*",
-        "_Lichiditate live · valori USD estimate · fără recompense._",
-        f"Pool-uri evaluate: *{priced_pool_count}/{configured_count}*",
+        "_Live liquidity · estimated USD values · no rewards._",
+        f"Pools priced: *{priced_pool_count}/{configured_count}*",
         "",
     ]
     if not rows:
-        lines.append("Nu există portofele cu poziții LP lizibile acum.")
+        lines.append("No wallets with readable LP positions right now.")
 
     displayed = 0
     for rank, row in enumerate(complete_rows, 1):
@@ -3226,13 +3226,13 @@ def get_lp_leaderboard_text() -> str:
         pool_count = len(row.get("pools", []))
         lines.append(
             f"{rank}. `{short_wallet(wallet)}` — "
-            f"*~{fmt_usd(priced.get('estimated_usd'))}* · {pool_count} pool"
-            f"{'uri' if pool_count != 1 else ''}"
+            f"*~{fmt_usd(priced.get('estimated_usd'))}* · "
+            f"{pool_count} pool{'s' if pool_count != 1 else ''}"
         )
         displayed += 1
 
     if partial_rows and displayed < 20:
-        lines.extend(["", "*Valoare parțială · clasament incert:*"])
+        lines.extend(["", "*Partial valuation · ranking may be incomplete:*"])
         for row in partial_rows:
             if displayed >= 20:
                 break
@@ -3242,29 +3242,29 @@ def get_lp_leaderboard_text() -> str:
             lines.append(
                 f"• `{short_wallet(wallet)}` — "
                 f"*≥ ~{fmt_usd(priced.get('estimated_usd'))}* · "
-                f"{pool_count} pool{'uri' if pool_count != 1 else ''}"
+                f"{pool_count} pool{'s' if pool_count != 1 else ''}"
             )
             displayed += 1
 
     if unavailable_rows and displayed < 20:
-        lines.extend(["", "*Valoare USD indisponibilă:*"])
+        lines.extend(["", "*USD value unavailable:*"])
         for row in unavailable_rows:
             if displayed >= 20:
                 break
             wallet = str(row.get("wallet") or "")
             pool_count = len(row.get("pools", []))
             lines.append(
-                f"• `{short_wallet(wallet)}` — USD indisponibil · "
-                f"{pool_count} pool{'uri' if pool_count != 1 else ''}"
+                f"• `{short_wallet(wallet)}` — USD value unavailable · "
+                f"{pool_count} pool{'s' if pool_count != 1 else ''}"
             )
             displayed += 1
 
     pending = [p for p in pools if p.get("status") != "readable"]
     if pending:
-        labels = ", ".join(str(p.get("label") or "pool necunoscut")
+        labels = ", ".join(str(p.get("label") or "unknown pool")
                            for p in pending)
-        lines.extend(["", f"Date de ownership indisponibile: {labels}."])
-    lines.extend(["", "_~ estimare; ≥ indică o valoare parțială._"])
+        lines.extend(["", f"Ownership data unavailable for: {labels}."])
+    lines.extend(["", "_~ estimate; ≥ indicates a partial value._"])
     return "\n".join(lines)
 
 
