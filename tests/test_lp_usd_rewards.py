@@ -359,3 +359,31 @@ def test_woody_one_public_quote_requires_exact_lp_pair():
     assert result["ok"]
     assert result["woody_amount"] == 294583
     assert "indicative" in result["reserve_source"]
+
+
+def test_duplicate_monthly_checkpoint_cannot_generate_rewards():
+    base = {"valuation_complete": True, "total_eligible_usd": 100,
+            "pools": [{"status": "verified"}],
+            "holders": [{"wallet": "erd1a", "estimated_usd": 100}]}
+    dates = ("2026-09-01", "2026-09-15", "2026-09-30", "2026-09-15")
+    with patch.object(m, "get_month_lp_usd_snapshots",
+                      return_value=[dict(base, date=d) for d in dates]), \
+         patch.object(m, "current_month_key", return_value="2026-09"):
+        result = m.calculate_monthly_lp_rewards(10)
+    assert result["valuation_complete"] is False
+    assert result["rows"] == []
+    assert result["duplicate_dates"] == ["2026-09-15"]
+
+
+def test_off_schedule_snapshot_cannot_generate_rewards():
+    base = {"valuation_complete": True, "total_eligible_usd": 100,
+            "pools": [{"status": "verified"}],
+            "holders": [{"wallet": "erd1a", "estimated_usd": 100}]}
+    dates = ("2026-09-01", "2026-09-15", "2026-09-29")
+    with patch.object(m, "get_month_lp_usd_snapshots",
+                      return_value=[dict(base, date=d) for d in dates]), \
+         patch.object(m, "current_month_key", return_value="2026-09"):
+        result = m.calculate_monthly_lp_rewards(10)
+    assert result["valuation_complete"] is False
+    assert result["rows"] == []
+    assert "2026-09-30" in result["missing_dates"]
