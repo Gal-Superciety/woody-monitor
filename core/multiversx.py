@@ -2356,7 +2356,10 @@ def get_configured_pool_snapshot(
     now = time.time()
     cached = POOL_SNAPSHOT_CACHE.get(cache_key)
     if cached and now - cached[1] < POOL_SNAPSHOT_TTL_SECONDS:
-        return cached[0]
+        cached_source = str(cached[0].get("reserve_source") or "")
+        cached_is_indexer = "DexScreener" in cached_source
+        if allow_indexer_fallback or not cached_is_indexer:
+            return cached[0]
 
     snap = get_onedex_woody_one_pool_snapshot()
     if not snap.get("ok") and allow_indexer_fallback:
