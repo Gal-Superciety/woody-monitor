@@ -59,7 +59,10 @@ def test_liquidity_message_explains_rate_limited_pool(monkeypatch):
     text = m.get_liquidity_text()
 
     assert "WOODY/EGLD: unavailable (MultiversX API rate limit (HTTP 429))" in text
-    assert "across 0 readable pools" in text
+    assert text.endswith("Total: *Unavailable* across 0 readable pools.")
+    assert "Snapshot age:" not in text
+    assert "Method:" not in text
+    assert "quote-token prices are not independently valued" not in text
 
 
 def test_public_liquidity_keeps_pool_visible_when_reserves_are_incomplete(monkeypatch):
