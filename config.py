@@ -216,8 +216,8 @@ LP_POOLS: List[Dict[str, Any]] = [
     {"dex": "xExchange", "name": "WOODY/EGLD", "pair_address": XEXCHANGE_POOL_ADDRESS, "lp_token": "WOODYWEGLD-5c3558", "quote_token": WEGLD, "status": "active"},
     {"dex": "xExchange", "name": "WOODY/MEX", "pair_address": WOODY_MEX_POOL_ADDRESS, "lp_token": "WOODYMEX-12e1aa", "quote_token": MEX, "status": "active"},
     {"dex": "JEX", "name": "WOODY/BOBER", "pair_address": WOODY_BOBER_POOL_ADDRESS, "lp_token": "LPWOODBOBE-08e5f1", "quote_token": BOBER, "status": "active"},
-    {"dex": "JEX", "name": "WOODY/JEX", "pair_address": WOODY_JEX_POOL_ADDRESS, "lp_token": "", "quote_token": JEX, "status": "active"},
-    {"dex": "JEX", "name": "WOODY/OLV", "pair_address": WOODY_OLV_POOL_ADDRESS, "lp_token": "", "quote_token": OLV, "status": "active"},
+    {"dex": "JEX", "name": "WOODY/JEX", "pair_address": WOODY_JEX_POOL_ADDRESS, "lp_token": "LPWOODJEX-1ea32b", "quote_token": JEX, "status": "active"},
+    {"dex": "JEX", "name": "WOODY/OLV", "pair_address": WOODY_OLV_POOL_ADDRESS, "lp_token": "LPOLVWOOD-29ac00", "quote_token": OLV, "status": "active"},
 ]
 
 
