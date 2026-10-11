@@ -292,15 +292,51 @@ def test_live_lp_leaderboard_is_labeled_estimated_and_never_promises_rewards():
     ownership = {"holders": [{"wallet": "erd1alice", "pools": [
         {"pool": "xExchange WOODY/EGLD", "lp_amount": 2.5}]}],
         "pools": [{"label": "xExchange WOODY/EGLD", "status": "readable"}]}
-    valuation = {"holders": [{"wallet": "erd1alice", "estimated_usd": 125.50}]}
-    with patch.object(m, "build_live_lp_ownership", return_value=ownership), \
+    valuation = {"holders": [{"wallet": "erd1alice", "estimated_usd": 125.50,
+                               "pools": [{"pool": "xExchange WOODY/EGLD",
+                                          "estimated_usd": 125.50}]}],
+                "pools": [{"label": "xExchange WOODY/EGLD", "status": "verified"}]}
+    with patch.object(m, "LP_POOLS", [{"status": "active"}]), \
+         patch.object(m, "build_live_lp_ownership", return_value=ownership), \
          patch.object(m, "build_global_usd_valuation", return_value=valuation), \
          patch.object(m, "calculate_monthly_lp_averages", side_effect=AssertionError("monthly called")):
         report = m.get_lp_leaderboard_text()
-    assert "Live LP Leaderboard" in report
-    assert "$125.50" in report
-    assert "xExchange WOODY/EGLD" in report
+    assert "LP Leaderboard" in report
+    assert "~$125.50" in report
+    assert "1 pool" in report
+    assert "xExchange WOODY/EGLD:" not in report
+    assert "2.500000 LP" not in report
     assert "Estimated reward:" not in report
+
+
+def test_live_lp_leaderboard_marks_partial_values_and_does_not_rank_them():
+    ownership = {
+        "holders": [
+            {"wallet": "erd1complete", "pools": [{"pool": "JEX WOODY/OLV"}]},
+            {"wallet": "erd1partial", "pools": [
+                {"pool": "JEX WOODY/OLV"},
+                {"pool": "OneDex WOODY/ONE"}]},
+        ],
+        "pools": [{"label": "JEX WOODY/OLV", "status": "readable"},
+                  {"label": "OneDex WOODY/ONE", "status": "readable"}],
+    }
+    valuation = {
+        "holders": [
+            {"wallet": "erd1complete", "estimated_usd": 20,
+             "pools": [{"pool": "JEX WOODY/OLV", "estimated_usd": 20}]},
+            {"wallet": "erd1partial", "estimated_usd": 21,
+             "pools": [{"pool": "JEX WOODY/OLV", "estimated_usd": 21}]},
+        ],
+        "pools": [{"label": "JEX WOODY/OLV", "status": "verified"}],
+    }
+    with patch.object(m, "LP_POOLS", [{"status": "active"}, {"status": "active"}]), \
+         patch.object(m, "build_live_lp_ownership", return_value=ownership), \
+         patch.object(m, "build_global_usd_valuation", return_value=valuation):
+        report = m.get_lp_leaderboard_text()
+    assert "1. `erd1complete` — *~$20.00*" in report
+    assert "Valoare parțială" in report
+    assert "• `erd1partial` — *≥ ~$21.00*" in report
+    assert "2. `erd1partial`" not in report
 
 
 def test_live_lp_leaderboard_never_invents_wallets_from_pool_estimates():
