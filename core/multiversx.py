@@ -1089,7 +1089,7 @@ def build_morning_market_report_text() -> str:
         "🌍 *Overall market*",
         f"Global market cap, 24h: *{_format_24h_change(market_cap_change)}*",
         f"BTC price change, 24h: *{_format_24h_change(btc_change)}*",
-        f"BTC dominance: *{_format_24h_change(btc_dominance)}*",
+        f"BTC dominance: *{safe_float(btc_dominance):.2f}%*" if btc_dominance is not None else "BTC dominance: *unavailable*",
         market_readout,
         "",
         "_Sources: CoinGecko for EGLD/BTC and global market indicators; WOODY price and liquidity from monitored MultiversX pools. WOODY volume counts only swaps detected by this bot. Estimates are not investment advice._",
