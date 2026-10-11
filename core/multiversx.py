@@ -11,7 +11,8 @@ import calendar
 import csv
 import base64
 from decimal import Decimal, InvalidOperation
-from datetime import datetime, timezone
+from datetime import datetime, timezone, time as datetime_time
+from zoneinfo import ZoneInfo
 from io import BytesIO, StringIO
 from typing import Dict, Optional, Tuple, List, Any, Set
 
@@ -974,6 +975,125 @@ def _entry_side(entry: Dict[str, Any]) -> int:
             return -1
     numeric_type = safe_float(raw_type)
     return 1 if numeric_type > 0 else (-1 if numeric_type < 0 else 0)
+
+
+def _format_24h_change(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return "unavailable"
+    if not math.isfinite(number):
+        return "unavailable"
+    return f"{number:+.2f}%"
+
+
+def _market_change_direction(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return "unavailable"
+    if not math.isfinite(number):
+        return "unavailable"
+    if number > 0.5:
+        return "up"
+    if number < -0.5:
+        return "down"
+    return "mostly flat"
+
+
+def build_morning_market_report_text() -> str:
+    """Build a source-labeled daily overview from live prices and observed data."""
+    local_now = datetime.now(ZoneInfo(MORNING_BRIEF_TIMEZONE))
+    market_prices = get_json(COINGECKO_DAILY_MARKET_API)
+    if not isinstance(market_prices, dict):
+        market_prices = {}
+    global_response = get_json(COINGECKO_GLOBAL_MARKET_API)
+    if not isinstance(global_response, dict):
+        global_response = {}
+    global_data = global_response.get("data")
+    if not isinstance(global_data, dict):
+        global_data = {}
+
+    woody = get_best_price() or {}
+    woody_price = safe_float(woody.get("price_usd"))
+    egld_price = get_egld_usd()
+    egld_data = market_prices.get("elrond-erd-2")
+    if not isinstance(egld_data, dict):
+        egld_data = {}
+    bitcoin_data = market_prices.get("bitcoin")
+    if not isinstance(bitcoin_data, dict):
+        bitcoin_data = {}
+
+    trades = _recent_trades(24)
+    buys = [entry for entry in trades if _entry_side(entry) > 0]
+    sells = [entry for entry in trades if _entry_side(entry) < 0]
+    buy_usd = sum(safe_float(entry.get("usd")) for entry in buys)
+    sell_usd = sum(safe_float(entry.get("usd")) for entry in sells)
+    detected_volume = buy_usd + sell_usd
+    if not trades:
+        flow_summary = "No swaps detected by this bot in the last 24h."
+    elif buy_usd > sell_usd * 1.15:
+        flow_summary = "Detected WOODY flow leaned toward buys."
+    elif sell_usd > buy_usd * 1.15:
+        flow_summary = "Detected WOODY flow leaned toward sells."
+    else:
+        flow_summary = "Detected WOODY buy and sell flow was relatively balanced."
+
+    pools = get_public_pool_reserves()
+    liquidity = build_public_liquidity(woody_price, pools)
+    liquidity_total = liquidity.get("totalUsd")
+    estimated_pool_count = safe_int(liquidity.get("estimatedPoolCount"))
+    pool_count = len(pools)
+
+    market_cap_change = global_data.get("market_cap_change_percentage_24h_usd")
+    btc_change = bitcoin_data.get("usd_24h_change")
+    btc_dominance = None
+    dominance = global_data.get("market_cap_percentage")
+    if isinstance(dominance, dict):
+        btc_dominance = dominance.get("btc")
+
+    global_direction = _market_change_direction(market_cap_change)
+    btc_direction = _market_change_direction(btc_change)
+    if global_direction == btc_direction and global_direction in {"up", "down"}:
+        market_readout = f"Broad market capitalization and BTC were both {global_direction} over 24h."
+    elif global_direction != "unavailable" or btc_direction != "unavailable":
+        market_readout = "Broad-market signals were mixed or mostly flat over 24h."
+    else:
+        market_readout = "Broad-market change data was unavailable."
+
+    lines = [
+        "🌅 *WOODY Morning Market Brief*",
+        f"{local_now.strftime('%A, %d %B %Y · %H:%M %Z')}",
+        "",
+        "🪶 *WOODY · MultiversX*",
+        f"Reference price: *${woody_price:.10f}* ({woody.get('source', 'source unavailable')})"
+        if woody_price > 0 else "Reference price: *unavailable*",
+        f"Bot-observed swaps, 24h: *{len(trades)}* · buys {len(buys)} / sells {len(sells)}",
+        f"Bot-observed volume: *${detected_volume:,.2f}* · buys ${buy_usd:,.2f} / sells ${sell_usd:,.2f}",
+        flow_summary,
+        (
+            f"Estimated visible LP liquidity: *${safe_float(liquidity_total):,.2f}* "
+            f"({estimated_pool_count}/{pool_count} readable pools)."
+            if liquidity_total is not None else
+            f"Estimated visible LP liquidity: *unavailable* ({estimated_pool_count}/{pool_count} readable pools)."
+        ),
+        "",
+        "⚡ *EGLD*",
+        (
+            f"Price: *${egld_price:,.4f}* · 24h: *{_format_24h_change(egld_data.get('usd_24h_change'))}*"
+            if egld_price > 0 else
+            f"Price: *unavailable* · CoinGecko 24h: *{_format_24h_change(egld_data.get('usd_24h_change'))}*"
+        ),
+        "",
+        "🌍 *Overall market*",
+        f"Global market cap, 24h: *{_format_24h_change(market_cap_change)}*",
+        f"BTC price change, 24h: *{_format_24h_change(btc_change)}*",
+        f"BTC dominance: *{_format_24h_change(btc_dominance)}*",
+        market_readout,
+        "",
+        "_Sources: CoinGecko for EGLD/BTC and global market indicators; WOODY price and liquidity from monitored MultiversX pools. WOODY volume counts only swaps detected by this bot. Estimates are not investment advice._",
+    ]
+    return "\n".join(lines)
 
 
 def get_market_summary_text(hours: int = 24) -> str:
@@ -5022,6 +5142,75 @@ async def menu_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.warning("Unhandled callback_data=%s", query.data)
 
 
+async def community_welcome_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not ENABLE_COMMUNITY_WELCOME:
+        return
+    chat = update.effective_chat
+    message = update.effective_message
+    if not chat or chat.type not in {"group", "supergroup"} or not message:
+        return
+    new_members = [
+        member for member in (message.new_chat_members or [])
+        if not member.is_bot
+    ]
+    if not new_members:
+        return
+
+    names = [member.full_name.strip() or "new member" for member in new_members]
+    shown_names = names[:10]
+    if len(names) > len(shown_names):
+        shown_names.append(f"and {len(names) - len(shown_names)} more")
+    joined = ", ".join(shown_names)
+    verb = "has joined" if len(names) == 1 else "have joined"
+    await message.reply_text(
+        f"🎉 Welcome to the WOODY community, {joined} {verb}! 🌲\n"
+        "Use /start to explore the bot's live WOODY tools and updates."
+    )
+
+
+async def morning_market_brief_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not ENABLE_MORNING_BRIEF or not MORNING_BRIEF_CHAT_ID:
+        logger.info("MORNING_MARKET_BRIEF_SKIPPED | disabled or group chat ID missing")
+        return
+    try:
+        report = await asyncio.to_thread(build_morning_market_report_text)
+        await context.bot.send_message(
+            chat_id=MORNING_BRIEF_CHAT_ID,
+            text=report,
+            parse_mode=ParseMode.MARKDOWN,
+            disable_web_page_preview=True,
+        )
+        logger.info("MORNING_MARKET_BRIEF_SENT | chat=%s", MORNING_BRIEF_CHAT_ID)
+    except Exception:
+        logger.exception("MORNING_MARKET_BRIEF_FAILED")
+
+
+def register_morning_market_brief(job_queue: Any) -> bool:
+    if not ENABLE_MORNING_BRIEF:
+        logger.info("MORNING_MARKET_BRIEF_DISABLED")
+        return False
+    if not MORNING_BRIEF_CHAT_ID:
+        logger.warning("MORNING_MARKET_BRIEF_NOT_SCHEDULED | group chat ID missing")
+        return False
+    try:
+        tz = ZoneInfo(MORNING_BRIEF_TIMEZONE)
+    except Exception:
+        logger.exception("MORNING_MARKET_BRIEF_NOT_SCHEDULED | invalid timezone")
+        return False
+    send_at = datetime_time(hour=MORNING_BRIEF_HOUR, minute=0, tzinfo=tz)
+    job_queue.run_daily(
+        morning_market_brief_job,
+        time=send_at,
+        days=tuple(range(7)),
+        name="morning_market_brief",
+    )
+    logger.info(
+        "MORNING_MARKET_BRIEF_SCHEDULED | hour=%s timezone=%s chat=%s",
+        MORNING_BRIEF_HOUR, MORNING_BRIEF_TIMEZONE, MORNING_BRIEF_CHAT_ID,
+    )
+    return True
+
+
 async def greeting_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.text:
         return
@@ -5137,6 +5326,7 @@ def main() -> None:
     app.add_handler(CommandHandler("fakepump", fakepump_command))
     app.add_handler(CommandHandler("diag", diagnostics_command))
     app.add_handler(CommandHandler("id", id_command))
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, community_welcome_handler))
     app.add_handler(CommandHandler("testalert", testalert_command))
     from core.community_updates import register as register_community_updates
     register_community_updates(app)
@@ -5146,6 +5336,7 @@ def main() -> None:
     if app.job_queue is None:
         raise RuntimeError("JobQueue missing. Install python-telegram-bot[job-queue].")
 
+    register_morning_market_brief(app.job_queue)
     app.job_queue.run_repeating(check_holders, interval=CHECK_HOLDERS_INTERVAL, first=20)
     app.job_queue.run_repeating(process_pending_roots, interval=3, first=5)
     app.job_queue.run_repeating(dashboard_status_job, interval=PUBLIC_STATUS_INTERVAL, first=10)
