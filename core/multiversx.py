@@ -779,6 +779,26 @@ def get_price_text() -> str:
 
 
 def _estimate_token_context_price(token_id: str) -> Dict[str, Any]:
+    if token_id == ONE:
+        one_pool = next(
+            (pool for pool in LP_POOLS
+             if str(pool.get("lp_token") or "") == "WOODYONE-826f23"
+             and str(pool.get("status") or "") == "active"),
+            None,
+        )
+        if one_pool:
+            snap = get_configured_pool_snapshot(one_pool)
+            woody_price = safe_float((get_best_price() or {}).get("price_usd"))
+            woody_reserve = safe_float(snap.get("woody_amount"))
+            one_reserve = safe_float(snap.get("pair_amount"))
+            if snap.get("ok") and woody_price > 0 and woody_reserve > 0 and one_reserve > 0:
+                return {
+                    "ok": True,
+                    "price_usd": woody_reserve * woody_price / one_reserve,
+                    "pool": _pool_label(one_pool),
+                    "pool_status": "active",
+                }
+
     for addr, label in WATCHED_POOLS.items():
         if addr == ONEDEX_POOL_ADDRESS:
             snap = get_pool_snapshot(addr, label)
@@ -1226,7 +1246,7 @@ def get_ai_analysis_text(hours: int = 24) -> str:
     bullets.append(f"• buy volume ${buy_volume:,.2f} vs sell volume ${sell_volume:,.2f}")
     confidence = max(35, min(92, int(55 + (buy_volume - sell_volume) / max(1.0, buy_volume + sell_volume) * 40)))
     outlook = "NEUTRAL-BULLISH" if confidence >= 60 else ("NEUTRAL" if confidence >= 48 else "DEFENSIVE")
-    bullets.append(f"• liquidity behavior: {'stable across major pools' if len(WATCHED_POOLS) > 1 else 'limited data'}")
+    bullets.append(f"• liquidity behavior: {'stable across major pools' if sum(str(p.get('status') or '') == 'active' for p in LP_POOLS) > 1 else 'limited data'}")
     bullets.append(f"• holders trend: {'stable' if (PENDING_HOLDER_VALUE or 0) >= (LAST_HOLDERS_COUNT or 0) else 'soft decline'}")
     logger.info("AI ANALYSIS GENERATED")
     return "🧠 *WOODY AI Analysis*\n\n" + "\n".join(bullets) + f"\n\nAI Confidence: *{confidence}/100*\nShort-term outlook: *{outlook}*"
@@ -1241,7 +1261,7 @@ def build_risk_radar(hours: int = 24) -> Dict[str, Any]:
     total_volume = buy_volume + sell_volume
 
     whale_sell = max((safe_float(x.get("usd")) for x in sells), default=0.0) >= WHALE_ALERT_USD
-    pool_snapshots = [get_pool_snapshot(addr, label) for addr, label in WATCHED_POOLS.items()]
+    pool_snapshots = get_active_lp_pool_snapshots()
     readable_pools = sum(1 for snap in pool_snapshots if snap.get("ok"))
     missing_readable_pools = readable_pools == 0
     partial_liquidity = 0 < readable_pools < len(pool_snapshots)
@@ -1359,7 +1379,7 @@ def get_accumulation_detection_text(hours: int = 24) -> str:
     if LAST_HOLDERS_COUNT is not None and PENDING_HOLDER_VALUE is not None:
         holder_growth = PENDING_HOLDER_VALUE - LAST_HOLDERS_COUNT
 
-    pool_snapshots = [get_pool_snapshot(addr, label) for addr, label in WATCHED_POOLS.items()]
+    pool_snapshots = get_active_lp_pool_snapshots()
     readable_pools = [snap for snap in pool_snapshots if snap.get("ok")]
     stable_liquidity = len(readable_pools) >= max(1, len(pool_snapshots) // 2)
 
@@ -1431,7 +1451,7 @@ def build_market_pulse(hours: int = 24) -> Dict[str, Any]:
     sell_volume = sum(safe_float(x.get("usd")) for x in sells)
     total_volume = buy_volume + sell_volume
 
-    pool_snapshots = [get_pool_snapshot(addr, label) for addr, label in WATCHED_POOLS.items()]
+    pool_snapshots = get_active_lp_pool_snapshots()
     readable_pools = sum(1 for snap in pool_snapshots if snap.get("ok"))
     whales_buy = max((safe_float(x.get("usd")) for x in buys), default=0.0) >= WHALE_ALERT_USD
 
@@ -1508,7 +1528,7 @@ def get_fake_pump_detection_text(hours: int = 24) -> str:
     buy_pressure_ratio = buy_volume / max(1.0, sell_volume)
     aggressive_buy_pressure = buy_pressure_ratio >= 1.8 and buy_volume >= BIG_ALERT_USD
 
-    pool_snapshots = [get_pool_snapshot(addr, label) for addr, label in WATCHED_POOLS.items()]
+    pool_snapshots = get_active_lp_pool_snapshots()
     readable_pools = [snap for snap in pool_snapshots if snap.get("ok")]
     weak_or_partial_liquidity = len(readable_pools) < len(pool_snapshots) or sum(safe_float(s.get("pool_value_usd")) for s in readable_pools) < BIG_ALERT_USD * 4
 
@@ -1659,18 +1679,11 @@ def _fetch_public_pool_reserves() -> List[Dict[str, Any]]:
     for pool in LP_POOLS:
         address = str(pool.get("pair_address") or "").strip()
         lp_id = str(pool.get("lp_token") or "")
-        if lp_id == "WOODYONE-826f23":
-            # OneDex is a shared contract: distinguish pools by LP identifier.
-            snap = get_onedex_woody_one_pool_snapshot()
-            if not snap.get("ok"):
-                snap = get_onedex_woody_one_public_quote()
-            key = "onedex:WOODYONE-826f23"
-        else:
-            if str(pool.get("status") or "") != "active" or not address:
-                continue
-            key = address
-            snap = (get_onedex_woody_pool_snapshot() if lp_id == "WOODYWEGLD-9832b2"
-                    else get_pool_snapshot(address, str(pool.get("name") or "WOODY pool")))
+        if str(pool.get("status") or "") != "active" or not address:
+            continue
+        key = (f"{address}:WOODYONE-826f23"
+               if lp_id == "WOODYONE-826f23" else address)
+        snap = get_configured_pool_snapshot(pool)
         if key in seen:
             continue
         seen.add(key)
@@ -1867,7 +1880,7 @@ def build_ai_recommendation() -> Dict[str, Any]:
     top_wallets.sort(key=lambda x: x[1], reverse=True)
     top_wallets = top_wallets[:3]
 
-    liquidity_snapshots = [get_pool_snapshot(addr, label) for addr, label in WATCHED_POOLS.items()]
+    liquidity_snapshots = get_active_lp_pool_snapshots()
     liquidity_ok = sum(1 for s in liquidity_snapshots if s.get("ok"))
     total_liquidity_usd = sum(safe_float(s.get("pool_value_usd")) for s in liquidity_snapshots if s.get("ok"))
 
@@ -2326,6 +2339,56 @@ def get_pool_snapshot(pool_address: str, label: str) -> Dict[str, Any]:
     return result
 
 
+def get_configured_pool_snapshot(
+    pool: Dict[str, Any],
+    allow_indexer_fallback: bool = True,
+) -> Dict[str, Any]:
+    """Read reserves for a configured LP pair, including shared OneDex contracts."""
+    label = _pool_label(pool)
+    pool_address = str(pool.get("pair_address") or "").strip()
+    lp_token = str(pool.get("lp_token") or "").strip()
+    if lp_token != "WOODYONE-826f23":
+        if not pool_address:
+            return {"label": label, "ok": False, "reason": "pair address missing"}
+        return get_pool_snapshot(pool_address, label)
+
+    cache_key = f"{pool_address}:WOODYONE-826f23"
+    now = time.time()
+    cached = POOL_SNAPSHOT_CACHE.get(cache_key)
+    if cached and now - cached[1] < POOL_SNAPSHOT_TTL_SECONDS:
+        cached_source = str(cached[0].get("reserve_source") or "")
+        cached_is_indexer = "DexScreener" in cached_source
+        if allow_indexer_fallback or not cached_is_indexer:
+            return cached[0]
+
+    snap = get_onedex_woody_one_pool_snapshot()
+    if not snap.get("ok") and allow_indexer_fallback:
+        snap = get_onedex_woody_one_public_quote()
+    snap = dict(snap)
+    snap["label"] = label
+    if snap.get("ok"):
+        woody_price = safe_float((get_best_price() or {}).get("price_usd"))
+        woody_amount = safe_float(snap.get("woody_amount"))
+        snap["pool_value_usd"] = (
+            2 * woody_amount * woody_price
+            if woody_amount > 0 and woody_price > 0 else 0.0
+        )
+        snap["value_reason"] = (
+            "" if snap["pool_value_usd"] > 0
+            else "WOODY USD reference price unavailable"
+        )
+    POOL_SNAPSHOT_CACHE[cache_key] = (snap, now)
+    return snap
+
+
+def get_active_lp_pool_snapshots() -> List[Dict[str, Any]]:
+    """Read every active configured LP pair, not just unique smart contracts."""
+    return [
+        get_configured_pool_snapshot(pool)
+        for pool in LP_POOLS
+        if str(pool.get("status") or "") == "active"
+    ]
+
 
 def _extract_vm_return_data(payload: Any) -> List[str]:
     if not isinstance(payload, dict):
@@ -2594,7 +2657,7 @@ def get_pool_tvl_egld(pool: Dict[str, Any]) -> Dict[str, Any]:
     pair_address = str(pool.get("pair_address") or "").strip()
     if not pair_address:
         return {"ok": False, "pool_value_egld": 0.0, "reason": "pair address missing"}
-    snap = get_pool_snapshot(pair_address, _pool_label(pool))
+    snap = get_configured_pool_snapshot(pool, allow_indexer_fallback=False)
     if not snap.get("ok"):
         return {"ok": False, "pool_value_egld": 0.0, "reason": snap.get("reason", "Pool unavailable / error")}
     pair_token = str(snap.get("pair_token") or "")
@@ -2777,15 +2840,8 @@ def build_global_usd_valuation() -> Dict[str, Any]:
             continue
         result = get_lp_holders(pool, require_tvl=False)
         is_onedex_woody_one = str(pool.get("lp_token") or "") == "WOODYONE-826f23"
-        snap = (get_onedex_woody_one_pool_snapshot() if is_onedex_woody_one
-                else get_pool_snapshot(str(pool.get("pair_address") or ""), label))
-        # OneDex uses a shared contract. If its numeric pair ID is not configured,
-        # use the already exact-pair-validated public indexer as a live-only
-        # reserve fallback. Its indicative provenance keeps reward snapshots gated.
-        if is_onedex_woody_one and not snap.get("ok"):
-            indexed_snap = get_onedex_woody_one_public_quote()
-            if indexed_snap.get("ok"):
-                snap = indexed_snap
+        # Dispatch by configured LP pair: OneDex shares a contract across pairs.
+        snap = get_configured_pool_snapshot(pool)
         quote_token = str(snap.get("pair_token") or "")
         expected_quote = str(pool.get("quote_token") or "")
         if expected_quote and quote_token != expected_quote:
@@ -3493,8 +3549,13 @@ def get_pools_text(title: str = "📦 *WOODY Pools*") -> str:
     blocks: List[str] = []
     total_usd = 0.0
 
-    for idx, (addr, label) in enumerate(WATCHED_POOLS.items(), start=1):
-        snap = get_pool_snapshot(addr, label)
+    active_pools = [
+        pool for pool in LP_POOLS
+        if str(pool.get("status") or "") == "active"
+    ]
+    for idx, pool in enumerate(active_pools, start=1):
+        label = _pool_label(pool)
+        snap = get_configured_pool_snapshot(pool)
         if not snap.get("ok"):
             blocks.append(f"{idx}. *{label}*\nWOODY pool read error: {snap.get('reason')}")
             continue
@@ -3573,7 +3634,7 @@ def get_ai_status_text(is_public: bool = False) -> str:
         "",
         f"Core engine: *{'🟢 ONLINE' if WS_TASK and not WS_TASK.done() else '🔴 OFFLINE'}*",
         f"WebSocket health: *{'Healthy' if WS_CONNECTED else 'Degraded'}*",
-        f"Subscribed pools: *{len(WATCHED_POOLS)}*",
+        f"Subscribed pool contracts: *{len(WATCHED_POOLS)}*",
         f"Pending roots queue: *{len(ROOT_PENDING)}*",
         f"Last processed root: *{_format_ts(LAST_ROOT_PROCESSED_AT)}*",
         f"Last alert time: *{_format_ts(LAST_ALERT_SENT_AT)}*",
@@ -5401,7 +5462,7 @@ def log_startup_settings() -> None:
         "public_status_port": PUBLIC_STATUS_PORT,
         "public_status_interval": PUBLIC_STATUS_INTERVAL,
         "root_processing_concurrency": ROOT_PROCESSING_CONCURRENCY,
-        "watched_pools": len(WATCHED_POOLS),
+        "watched_pool_contracts": len(WATCHED_POOLS),
     }
     logger.info("Startup settings loaded | %s", json.dumps(safe_settings, sort_keys=True))
 
