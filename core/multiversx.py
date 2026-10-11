@@ -1432,6 +1432,33 @@ def get_fake_pump_detection_payload(hours: int = 24) -> Dict[str, Any]:
     return {"status": status, "confidence": confidence, "riskScore": confidence, "sampleCount": len(_recent_trades(hours))}
 
 
+def get_onedex_woody_one_public_quote() -> Dict[str, Any]:
+    """Independent DEX indexer quote for public estimates only, never rewards."""
+    url = "https://api.dexscreener.com/latest/dex/search"
+    data = get_json(url, params={"q": "WOODY ONE"})
+    if not isinstance(data, dict):
+        return {"ok": False, "reason": "DexScreener unavailable"}
+    expected_pair = ONEDEX_POOL_ADDRESS + "-WOODYONE-826f23"
+    matches = [
+        p for p in data.get("pairs", []) if isinstance(p, dict)
+        and p.get("chainId") == "multiversx"
+        and p.get("dexId") == "onedex"
+        and p.get("pairAddress", "").lower() == expected_pair.lower()
+        and (p.get("baseToken") or {}).get("address") == WOODY
+        and (p.get("quoteToken") or {}).get("address") == ONE
+    ]
+    if len(matches) != 1:
+        return {"ok": False, "reason": "Exact WOODY/ONE pair not uniquely verified"}
+    liq = matches[0].get("liquidity") or {}
+    woody = safe_float(liq.get("base"))
+    one = safe_float(liq.get("quote"))
+    if woody <= 0 or one <= 0:
+        return {"ok": False, "reason": "WOODY/ONE indexer reserves unavailable"}
+    return {"ok": True, "woody_amount": woody, "pair_amount": one,
+            "pair_symbol": "ONE", "pair_token": ONE,
+            "reserve_source": "DexScreener public indexer (indicative; not on-chain verified)"}
+
+
 def get_public_pool_reserves() -> List[Dict[str, Any]]:
     """Publish observed on-chain reserves, never estimated TVL as verified liquidity."""
     pools = []
@@ -1442,6 +1469,8 @@ def get_public_pool_reserves() -> List[Dict[str, Any]]:
         if lp_id == "WOODYONE-826f23":
             # OneDex is a shared contract: distinguish pools by LP identifier.
             snap = get_onedex_woody_one_pool_snapshot()
+            if not snap.get("ok"):
+                snap = get_onedex_woody_one_public_quote()
             key = "onedex:WOODYONE-826f23"
         else:
             if str(pool.get("status") or "") != "active" or not address:
