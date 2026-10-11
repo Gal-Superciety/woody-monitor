@@ -2518,8 +2518,16 @@ def build_global_usd_valuation() -> Dict[str, Any]:
                           "reason": "Active pool missing exact quote token identifier"})
             continue
         result = get_lp_holders(pool, require_tvl=False)
-        snap = (get_onedex_woody_one_pool_snapshot() if str(pool.get("lp_token") or "") == "WOODYONE-826f23"
+        is_onedex_woody_one = str(pool.get("lp_token") or "") == "WOODYONE-826f23"
+        snap = (get_onedex_woody_one_pool_snapshot() if is_onedex_woody_one
                 else get_pool_snapshot(str(pool.get("pair_address") or ""), label))
+        # OneDex uses a shared contract. If its numeric pair ID is not configured,
+        # use the already exact-pair-validated public indexer as a live-only
+        # reserve fallback. Its indicative provenance keeps reward snapshots gated.
+        if is_onedex_woody_one and not snap.get("ok"):
+            indexed_snap = get_onedex_woody_one_public_quote()
+            if indexed_snap.get("ok"):
+                snap = indexed_snap
         quote_token = str(snap.get("pair_token") or "")
         expected_quote = str(pool.get("quote_token") or "")
         if expected_quote and quote_token != expected_quote:
@@ -2529,6 +2537,19 @@ def build_global_usd_valuation() -> Dict[str, Any]:
             continue
         quote_symbol = symbol(quote_token).upper() if quote_token else ""
         quote_price = get_verified_quote_usd(quote_token, egld_usd)
+        # Value the OneDex WOODY/ONE quote leg from this exact pool's reserve
+        # ratio and the WOODY USD reference. Token metadata can lag the live
+        # pool. Treat the result as indicative, so it appears in the live
+        # leaderboard but can never qualify a monthly reward snapshot.
+        if (is_onedex_woody_one and expected_quote == ONE and woody_usd > 0
+                and woody_reserve > 0 and quote_reserve > 0):
+            implied_one_usd = woody_reserve * woody_usd / quote_reserve
+            quote_price = {
+                "ok": implied_one_usd > 0,
+                "price_usd": implied_one_usd,
+                "source": "Exact OneDex WOODY/ONE reserve ratio × WOODY USD reference",
+                "confidence": "indicative",
+            }
         quote_usd = safe_float(quote_price.get("price_usd")) if quote_price.get("ok") else 0.0
         if quote_price.get("confidence") == "indicative":
             prices_indicative = True
