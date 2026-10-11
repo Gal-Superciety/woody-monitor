@@ -2546,7 +2546,7 @@ def build_global_usd_valuation() -> Dict[str, Any]:
         # sides internally consistent and avoids pricing ONE/MEX/etc. from
         # unrelated markets. Reserve-derived prices remain indicative and are
         # excluded from monthly reward snapshots.
-        if (quote_price.get("confidence") != "feed"
+        if ((is_onedex_woody_one or quote_price.get("confidence") != "feed")
                 and woody_usd > 0 and woody_reserve > 0 and quote_reserve > 0):
             implied_quote_usd = woody_reserve * woody_usd / quote_reserve
             quote_price = {
