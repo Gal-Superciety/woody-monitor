@@ -139,3 +139,30 @@ def test_morning_job_sends_the_generated_report_to_configured_group():
     bot.send_message.assert_awaited_once()
     assert bot.send_message.await_args.kwargs["chat_id"] == "-1001234567890"
     assert bot.send_message.await_args.kwargs["text"] == report
+
+def test_lp_leaderboard_public_messages_are_english():
+    wallet = "erd1234567890abcdef"
+    pool_name = "xExchange WOODY/EGLD"
+    ownership = {
+        "pools": [{"status": "readable", "label": pool_name}],
+        "holders": [{"wallet": wallet, "pools": [{"pool": pool_name}]}],
+    }
+    valuation = {
+        "holders": [{
+            "wallet": wallet,
+            "estimated_usd": 21.15,
+            "pools": [{"pool": pool_name, "estimated_usd": 21.15}],
+        }],
+        "pools": [{"status": "verified"}],
+    }
+    with patch.object(m, "build_live_lp_ownership", return_value=ownership), \
+         patch.object(m, "build_global_usd_valuation", return_value=valuation), \
+         patch.object(m, "LP_POOLS", [{"status": "active"}]):
+        report = m.get_lp_leaderboard_text()
+
+    assert "Live liquidity" in report
+    assert "Pools priced: *1/1*" in report
+    assert "1 pool" in report
+    assert "Lichiditate" not in report
+    assert "Pool-uri" not in report
+    assert "parțială" not in report
