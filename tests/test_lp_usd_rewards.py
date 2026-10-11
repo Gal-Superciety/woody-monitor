@@ -42,7 +42,7 @@ def test_absent_wallet_counts_zero_across_snapshots():
     assert [round(r["average_usd"], 6) for r in result["rows"]] == [66.666667, 33.333333]
 
 
-def test_global_valuation_requires_quote_usd_price():
+def test_missing_quote_price_is_derived_from_exact_pool_reserves():
     pool = {"status": "active", "pair_address": "erd1pair", "name": "WOODY/JEX", "quote_token": "JEX-123"}
     holder_data = {"ok": True, "pool_value_egld": 20, "total_supply_raw": "1000",
                    "holders": [{"wallet": "erd1wallet", "balance_raw": "500", "estimated_egld": 10}]}
@@ -55,8 +55,9 @@ def test_global_valuation_requires_quote_usd_price():
          patch.object(m, "get_pool_snapshot", return_value=snap):
         result = m.build_global_usd_valuation()
     assert result["valuation_complete"] is False
-    assert result["pools"][0]["status"] == "unverified"
-    assert result["total_eligible_usd"] == 0
+    assert result["pools"][0]["status"] == "verified"
+    assert result["pools"][0]["quote_usd"] == 0.1
+    assert result["total_eligible_usd"] == 10
 
 
 def test_global_valuation_sums_independent_token_legs():
@@ -202,7 +203,7 @@ def test_metadata_quote_produces_indicative_not_reward_eligible_valuation():
          patch.object(m, "get_token_metadata", return_value={
              "identifier": "JEX-abc123", "price": 0.5}):
         result = m.build_global_usd_valuation()
-    assert result["holders"][0]["estimated_usd"] == 15
+    assert result["holders"][0]["estimated_usd"] == 5
     assert result["indicative_only"] is True
     assert result["valuation_complete"] is False
     assert result["pools"][0]["quote_price_confidence"] == "indicative"
@@ -292,15 +293,51 @@ def test_live_lp_leaderboard_is_labeled_estimated_and_never_promises_rewards():
     ownership = {"holders": [{"wallet": "erd1alice", "pools": [
         {"pool": "xExchange WOODY/EGLD", "lp_amount": 2.5}]}],
         "pools": [{"label": "xExchange WOODY/EGLD", "status": "readable"}]}
-    valuation = {"holders": [{"wallet": "erd1alice", "estimated_usd": 125.50}]}
-    with patch.object(m, "build_live_lp_ownership", return_value=ownership), \
+    valuation = {"holders": [{"wallet": "erd1alice", "estimated_usd": 125.50,
+                               "pools": [{"pool": "xExchange WOODY/EGLD",
+                                          "estimated_usd": 125.50}]}],
+                "pools": [{"label": "xExchange WOODY/EGLD", "status": "verified"}]}
+    with patch.object(m, "LP_POOLS", [{"status": "active"}]), \
+         patch.object(m, "build_live_lp_ownership", return_value=ownership), \
          patch.object(m, "build_global_usd_valuation", return_value=valuation), \
          patch.object(m, "calculate_monthly_lp_averages", side_effect=AssertionError("monthly called")):
         report = m.get_lp_leaderboard_text()
-    assert "Live LP Leaderboard" in report
-    assert "$125.50" in report
-    assert "xExchange WOODY/EGLD" in report
+    assert "LP Leaderboard" in report
+    assert "~$125.50" in report
+    assert "1 pool" in report
+    assert "xExchange WOODY/EGLD:" not in report
+    assert "2.500000 LP" not in report
     assert "Estimated reward:" not in report
+
+
+def test_live_lp_leaderboard_marks_partial_values_and_does_not_rank_them():
+    ownership = {
+        "holders": [
+            {"wallet": "erd1complete", "pools": [{"pool": "JEX WOODY/OLV"}]},
+            {"wallet": "erd1partial", "pools": [
+                {"pool": "JEX WOODY/OLV"},
+                {"pool": "OneDex WOODY/ONE"}]},
+        ],
+        "pools": [{"label": "JEX WOODY/OLV", "status": "readable"},
+                  {"label": "OneDex WOODY/ONE", "status": "readable"}],
+    }
+    valuation = {
+        "holders": [
+            {"wallet": "erd1complete", "estimated_usd": 20,
+             "pools": [{"pool": "JEX WOODY/OLV", "estimated_usd": 20}]},
+            {"wallet": "erd1partial", "estimated_usd": 21,
+             "pools": [{"pool": "JEX WOODY/OLV", "estimated_usd": 21}]},
+        ],
+        "pools": [{"label": "JEX WOODY/OLV", "status": "verified"}],
+    }
+    with patch.object(m, "LP_POOLS", [{"status": "active"}, {"status": "active"}]), \
+         patch.object(m, "build_live_lp_ownership", return_value=ownership), \
+         patch.object(m, "build_global_usd_valuation", return_value=valuation):
+        report = m.get_lp_leaderboard_text()
+    assert "1. `erd1complete` — *~$20.00*" in report
+    assert "Valoare parțială" in report
+    assert "• `erd1partial` — *≥ ~$21.00*" in report
+    assert "2. `erd1partial`" not in report
 
 
 def test_live_lp_leaderboard_never_invents_wallets_from_pool_estimates():
@@ -310,7 +347,7 @@ def test_live_lp_leaderboard_never_invents_wallets_from_pool_estimates():
          patch.object(m, "build_global_usd_valuation", return_value={
              "holders": [], "pools": [{"status": "verified"}]}):
         report = m.get_lp_leaderboard_text()
-    assert "No readable wallet LP holdings" in report
+    assert "Nu există portofele cu poziții LP lizibile" in report
     assert "JEX WOODY/OLV" not in report
 
 
@@ -319,6 +356,60 @@ def test_onedex_woody_one_lp_ownership_active_without_pair_id():
     pool = next(p for p in LP_POOLS if p["dex"] == "OneDex" and p["name"] == "WOODY/ONE")
     assert pool["status"] == "active"
     assert pool["lp_token"] == "WOODYONE-826f23"
+
+
+def test_onedex_woody_one_live_usd_uses_exact_reserves_without_pair_id():
+    pool = {"status": "active", "pair_address": "erd1sharedonedex",
+            "name": "WOODY/ONE", "dex": "OneDex",
+            "lp_token": "WOODYONE-826f23", "quote_token": m.ONE}
+    holder_data = {"ok": True, "total_supply_raw": "1000",
+                   "holders": [{"wallet": "erd1wallet", "balance_raw": "500"}]}
+    indexed_snap = {"ok": True, "woody_amount": 400000, "pair_amount": 1000,
+                    "pair_token": m.ONE, "pair_symbol": "ONE",
+                    "reserve_source": "DexScreener public indexer (indicative)"}
+    with patch.object(m, "LP_POOLS", [pool]), \
+         patch.object(m, "get_egld_usd", return_value=10), \
+         patch.object(m, "get_best_price", return_value={
+             "price_usd": 0.000003, "source": "test"}), \
+         patch.object(m, "get_lp_holders", return_value=holder_data), \
+         patch.object(m, "get_onedex_woody_one_pool_snapshot", return_value={
+             "ok": False, "reason": "pair ID missing"}), \
+         patch.object(m, "get_onedex_woody_one_public_quote",
+                      return_value=indexed_snap), \
+         patch.object(m, "get_verified_quote_usd", return_value={
+             "ok": True, "price_usd": 99, "confidence": "feed"}):
+        result = m.build_global_usd_valuation()
+
+    # Pool USD = $1.20 WOODY side + $1.20 reserve-implied ONE side.
+    assert result["pools"][0]["pool_value_usd"] == 2.4
+    assert result["holders"][0]["estimated_usd"] == 1.2
+    assert result["pools"][0]["quote_usd"] == 0.0012
+    assert result["pools"][0]["quote_price_confidence"] == "indicative"
+    # Indicative live quotes may appear in the live leaderboard but remain
+    # ineligible for monthly reward snapshots.
+    assert result["valuation_complete"] is False
+
+
+def test_indicative_quote_metadata_is_replaced_by_exact_pool_reserve_price():
+    pool = {"status": "active", "pair_address": "erd1jexpair",
+            "name": "WOODY/JEX", "dex": "JEX",
+            "lp_token": "LP-JEX", "quote_token": "JEX-expected"}
+    holder_data = {"ok": True, "total_supply_raw": "1000",
+                   "holders": [{"wallet": "erd1wallet", "balance_raw": "500"}]}
+    snap = {"ok": True, "woody_amount": 1000, "pair_amount": 2000,
+            "pair_token": "JEX-expected"}
+    with patch.object(m, "LP_POOLS", [pool]), \
+         patch.object(m, "get_egld_usd", return_value=10), \
+         patch.object(m, "get_best_price", return_value={"price_usd": 0.02}), \
+         patch.object(m, "get_lp_holders", return_value=holder_data), \
+         patch.object(m, "get_pool_snapshot", return_value=snap), \
+         patch.object(m, "get_verified_quote_usd", return_value={
+             "ok": True, "price_usd": 999, "confidence": "indicative"}):
+        result = m.build_global_usd_valuation()
+    assert result["pools"][0]["quote_usd"] == 0.01
+    assert result["pools"][0]["pool_value_usd"] == 40
+    assert result["holders"][0]["estimated_usd"] == 20
+    assert "reserve ratio" in result["pools"][0]["quote_price_source"].lower()
 
 
 def test_onedex_woody_one_requires_confirmed_pair_id():
@@ -478,8 +569,8 @@ def test_live_leaderboard_never_uses_monthly_reward_snapshots():
          patch.object(m, "build_global_usd_valuation", return_value={"holders": []}), \
          patch.object(m, "calculate_monthly_lp_averages", side_effect=AssertionError("monthly called")):
         output = m.get_lp_leaderboard_text()
-    assert "USD unavailable" in output
-    assert "JEX WOODY/OLV" in output
+    assert "USD indisponibil" in output
+    assert "1 pool" in output
 
 
 def test_lp_supply_uses_exact_raw_issuance_counters():

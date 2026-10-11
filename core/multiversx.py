@@ -2518,8 +2518,16 @@ def build_global_usd_valuation() -> Dict[str, Any]:
                           "reason": "Active pool missing exact quote token identifier"})
             continue
         result = get_lp_holders(pool, require_tvl=False)
-        snap = (get_onedex_woody_one_pool_snapshot() if str(pool.get("lp_token") or "") == "WOODYONE-826f23"
+        is_onedex_woody_one = str(pool.get("lp_token") or "") == "WOODYONE-826f23"
+        snap = (get_onedex_woody_one_pool_snapshot() if is_onedex_woody_one
                 else get_pool_snapshot(str(pool.get("pair_address") or ""), label))
+        # OneDex uses a shared contract. If its numeric pair ID is not configured,
+        # use the already exact-pair-validated public indexer as a live-only
+        # reserve fallback. Its indicative provenance keeps reward snapshots gated.
+        if is_onedex_woody_one and not snap.get("ok"):
+            indexed_snap = get_onedex_woody_one_public_quote()
+            if indexed_snap.get("ok"):
+                snap = indexed_snap
         quote_token = str(snap.get("pair_token") or "")
         expected_quote = str(pool.get("quote_token") or "")
         if expected_quote and quote_token != expected_quote:
@@ -2528,13 +2536,29 @@ def build_global_usd_valuation() -> Dict[str, Any]:
                           "reason": "Pool quote token does not match configured token identifier"})
             continue
         quote_symbol = symbol(quote_token).upper() if quote_token else ""
+        woody_reserve = safe_float(snap.get("woody_amount"))
+        quote_reserve = safe_float(snap.get("pair_amount"))
         quote_price = get_verified_quote_usd(quote_token, egld_usd)
+        # Use an independently priced quote asset only when its source is a
+        # real price feed (currently EGLD). Token metadata can lag or be stale;
+        # for every other pair, infer the quote price from this exact pool's
+        # reserves and the WOODY USD reference. This keeps each pool's two
+        # sides internally consistent and avoids pricing ONE/MEX/etc. from
+        # unrelated markets. Reserve-derived prices remain indicative and are
+        # excluded from monthly reward snapshots.
+        if ((is_onedex_woody_one or quote_price.get("confidence") != "feed")
+                and woody_usd > 0 and woody_reserve > 0 and quote_reserve > 0):
+            implied_quote_usd = woody_reserve * woody_usd / quote_reserve
+            quote_price = {
+                "ok": implied_quote_usd > 0,
+                "price_usd": implied_quote_usd,
+                "source": f"Exact {label} reserve ratio × WOODY USD reference",
+                "confidence": "indicative",
+            }
         quote_usd = safe_float(quote_price.get("price_usd")) if quote_price.get("ok") else 0.0
         if quote_price.get("confidence") == "indicative":
             prices_indicative = True
-        # Stablecoin parity is not assumed: a verified price feed is required.
-        woody_reserve = safe_float(snap.get("woody_amount"))
-        quote_reserve = safe_float(snap.get("pair_amount"))
+        # Do not assume stablecoin parity; quote values above use a feed or the exact pool ratio.
         pool_usd = woody_reserve * woody_usd + quote_reserve * quote_usd
         if (not result.get("ok") or not snap.get("ok") or woody_usd <= 0
                 or quote_usd <= 0 or woody_reserve <= 0 or quote_reserve <= 0
@@ -3020,42 +3044,106 @@ def build_live_lp_ownership() -> Dict[str, Any]:
 
 
 def get_lp_leaderboard_text() -> str:
-    """Live LP monitoring, without monthly snapshots or reward calculations."""
+    """Compact live LP leaderboard with explicit valuation coverage."""
     ownership = build_live_lp_ownership()
     valuation = build_global_usd_valuation()
     valued = {str(row.get("wallet")): row for row in valuation.get("holders", [])}
     pools = ownership.get("pools", [])
-    readable = sum(p.get("status") == "readable" for p in pools)
+    all_ownership_readable = all(p.get("status") == "readable" for p in pools)
     rows = ownership.get("holders", [])
-    rows.sort(key=lambda row: (
-        str(row.get("wallet")) not in valued,
+    complete_rows: List[Dict[str, Any]] = []
+    partial_rows: List[Dict[str, Any]] = []
+    unavailable_rows: List[Dict[str, Any]] = []
+
+    for row in rows:
+        wallet = str(row.get("wallet") or "")
+        priced = valued.get(wallet)
+        if not priced:
+            unavailable_rows.append(row)
+            continue
+        valued_pool_names = {
+            str(item.get("pool") or "")
+            for item in priced.get("pools", [])
+        }
+        wallet_pool_names = {
+            str(item.get("pool") or "")
+            for item in row.get("pools", [])
+        }
+        fully_valued = (all_ownership_readable
+                        and wallet_pool_names.issubset(valued_pool_names))
+        (complete_rows if fully_valued else partial_rows).append(row)
+
+    complete_rows.sort(key=lambda row: (
         -safe_float(valued.get(str(row.get("wallet")), {}).get("estimated_usd")),
-        -len(row.get("pools", [])),
         str(row.get("wallet")),
     ))
+    partial_rows.sort(key=lambda row: (
+        -safe_float(valued.get(str(row.get("wallet")), {}).get("estimated_usd")),
+        str(row.get("wallet")),
+    ))
+    unavailable_rows.sort(key=lambda row: str(row.get("wallet")))
+
+    priced_pool_count = sum(p.get("status") == "verified"
+                            for p in valuation.get("pools", []))
+    configured_count = sum(str(p.get("status") or "") == "active"
+                           for p in LP_POOLS)
     lines = [
-        "🏆 *WOODY Live LP Leaderboard*",
-        "_Current wallet LP holdings, no monthly rewards._",
-        f"Readable LP pools: *{readable}/{len(pools)}*.",
-        "USD values are estimates for priced pools only.",
-        "Wallets without USD values are shown after valued wallets.",
+        "🏆 *WOODY LP Leaderboard*",
+        "_Lichiditate live · valori USD estimate · fără recompense._",
+        f"Pool-uri evaluate: *{priced_pool_count}/{configured_count}*",
         "",
     ]
     if not rows:
-        lines.append("No readable wallet LP holdings right now.")
-    for idx, row in enumerate(rows[:20], 1):
+        lines.append("Nu există portofele cu poziții LP lizibile acum.")
+
+    displayed = 0
+    for rank, row in enumerate(complete_rows, 1):
+        if displayed >= 20:
+            break
         wallet = str(row.get("wallet") or "")
-        priced = valued.get(wallet)
-        amount = fmt_usd(priced.get("estimated_usd")) if priced else "USD unavailable"
-        lines.append(f"{idx}. `{short_wallet(wallet)}` — *{amount}*")
-        for position in row.get("pools", []):
-            lines.append(f"   • {position.get('pool')}: {safe_float(position.get('lp_amount')):,.6f} LP")
+        priced = valued[wallet]
+        pool_count = len(row.get("pools", []))
+        lines.append(
+            f"{rank}. `{short_wallet(wallet)}` — "
+            f"*~{fmt_usd(priced.get('estimated_usd'))}* · {pool_count} pool"
+            f"{'uri' if pool_count != 1 else ''}"
+        )
+        displayed += 1
+
+    if partial_rows and displayed < 20:
+        lines.extend(["", "*Valoare parțială · clasament incert:*"])
+        for row in partial_rows:
+            if displayed >= 20:
+                break
+            wallet = str(row.get("wallet") or "")
+            priced = valued[wallet]
+            pool_count = len(row.get("pools", []))
+            lines.append(
+                f"• `{short_wallet(wallet)}` — "
+                f"*≥ ~{fmt_usd(priced.get('estimated_usd'))}* · "
+                f"{pool_count} pool{'uri' if pool_count != 1 else ''}"
+            )
+            displayed += 1
+
+    if unavailable_rows and displayed < 20:
+        lines.extend(["", "*Valoare USD indisponibilă:*"])
+        for row in unavailable_rows:
+            if displayed >= 20:
+                break
+            wallet = str(row.get("wallet") or "")
+            pool_count = len(row.get("pools", []))
+            lines.append(
+                f"• `{short_wallet(wallet)}` — USD indisponibil · "
+                f"{pool_count} pool{'uri' if pool_count != 1 else ''}"
+            )
+            displayed += 1
+
     pending = [p for p in pools if p.get("status") != "readable"]
     if pending:
-        lines.extend(["", "*LP ownership unavailable:*"])
-        for pool in pending:
-            lines.append(f"• {pool.get('label')}: {pool.get('reason')}")
-    lines.extend(["", "_Pool LP units are not comparable across different pairs._"])
+        labels = ", ".join(str(p.get("label") or "pool necunoscut")
+                           for p in pending)
+        lines.extend(["", f"Date de ownership indisponibile: {labels}."])
+    lines.extend(["", "_~ estimare; ≥ indică o valoare parțială._"])
     return "\n".join(lines)
 
 
