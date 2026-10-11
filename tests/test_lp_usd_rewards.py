@@ -648,7 +648,7 @@ def test_pools_command_lists_woody_one_pool():
 
     assert "OneDex WOODY/ONE" in report
     assert "ONE: 1,000.000000" in report
-    assert "Total liquidity across all WOODY pools: $2.40" in report
+    assert "*Total liquidity across all WOODY pools:* `$2.40`" in report
 
 
 def test_market_context_prices_one_from_woody_one_pair():
