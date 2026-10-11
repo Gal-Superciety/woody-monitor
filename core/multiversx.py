@@ -2457,6 +2457,32 @@ def get_verified_quote_usd(token_id: str, egld_usd: float) -> Dict[str, Any]:
     return {"ok": False, "reason": f"USD quote unavailable for exact token {token_id}"}
 
 
+def audit_global_lp_configuration() -> Dict[str, Any]:
+    """Read-only preflight: report missing inputs before any reward snapshot."""
+    rows = []
+    for pool in LP_POOLS:
+        status = str(pool.get("status") or "")
+        if status == "excluded":
+            rows.append({"pool": _pool_label(pool), "status": "excluded", "issues": []})
+            continue
+        issues = []
+        if status != "active":
+            issues.append("pool is not verified active")
+        if not str(pool.get("lp_token") or ""):
+            issues.append("LP token ID missing")
+        if not str(pool.get("quote_token") or ""):
+            issues.append("exact quote token ID missing")
+        if not str(pool.get("pair_address") or ""):
+            issues.append("pair contract address missing")
+        if str(pool.get("lp_token") or "") == "WOODYONE-826f23" and safe_int(pool.get("pair_id")) <= 0:
+            issues.append("OneDex numeric pair ID unverified")
+        rows.append({"pool": _pool_label(pool), "status": "ready_for_live_validation" if not issues else "blocked",
+                     "issues": issues})
+    return {"configuration_ready": all(row["status"] != "blocked" for row in rows),
+            "pools": rows, "snapshot_file": data_path("data/lp_usd_snapshots.json"),
+            "data_directory": data_path("data")}
+
+
 def build_global_usd_valuation() -> Dict[str, Any]:
     """Independent reserve-based USD valuation; fail closed for missing inputs.
 
