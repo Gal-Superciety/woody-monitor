@@ -2970,37 +2970,83 @@ def get_lp_holders_text(limit: Optional[int] = None) -> str:
     return "\n".join(lines)
 
 
+def build_live_lp_ownership() -> Dict[str, Any]:
+    """Read wallet LP balances without requiring any price or reserve feed."""
+    wallets: Dict[str, Dict[str, Any]] = {}
+    pools: List[Dict[str, Any]] = []
+    for pool in LP_POOLS:
+        label = _pool_label(pool)
+        status = str(pool.get("status") or "")
+        if status == "excluded":
+            continue
+        if status != "active":
+            pools.append({"label": label, "status": "unverified",
+                          "reason": str(pool.get("reason") or "Pool not active")})
+            continue
+        result = get_lp_holders(pool, require_tvl=False)
+        if not result.get("ok"):
+            pools.append({"label": label, "status": "unverified",
+                          "reason": str(result.get("reason") or "LP holders unavailable")})
+            continue
+        holders = result.get("holders", [])
+        pools.append({"label": label, "status": "readable",
+                      "lp_token_id": result.get("lp_token_id"),
+                      "holder_count": len(holders)})
+        for holder in holders:
+            wallet = str(holder.get("wallet") or "")
+            if not wallet:
+                continue
+            row = wallets.setdefault(wallet, {"wallet": wallet, "pools": []})
+            row["pools"].append({
+                "pool": label,
+                "lp_token_id": result.get("lp_token_id"),
+                "lp_amount": holder.get("lp_amount"),
+                "balance_raw": holder.get("balance_raw"),
+            })
+    return {"holders": sorted(wallets.values(),
+                              key=lambda x: (-len(x["pools"]), x["wallet"])),
+            "pools": pools}
+
+
 def get_lp_leaderboard_text() -> str:
-    """Live LP ownership leaderboard; independent of monthly reward snapshots."""
-    live = build_global_usd_valuation()
-    rows = live.get("holders", [])
-    pools = live.get("pools", [])
-    active = [p for p in pools if p.get("status") != "excluded"]
-    counted = sum(p.get("status") == "verified" for p in active)
-    pending = [p for p in active if p.get("status") != "verified"]
+    """Live LP monitoring, without monthly snapshots or reward calculations."""
+    ownership = build_live_lp_ownership()
+    valuation = build_global_usd_valuation()
+    valued = {str(row.get("wallet")): row for row in valuation.get("holders", [])}
+    pools = ownership.get("pools", [])
+    readable = sum(p.get("status") == "readable" for p in pools)
+    rows = ownership.get("holders", [])
+    rows.sort(key=lambda row: (
+        str(row.get("wallet")) not in valued,
+        -safe_float(valued.get(str(row.get("wallet")), {}).get("estimated_usd")),
+        -len(row.get("pools", [])),
+        str(row.get("wallet")),
+    ))
     lines = [
         "🏆 *WOODY Live LP Leaderboard*",
-        "_Current on-chain LP holdings; not a reward report._",
-        f"USD-valued pools: *{counted}/{len(active)}*.",
-        "USD values are estimates; missing prices or pool reserves may affect ranking.",
+        "_Current wallet LP holdings, no monthly rewards._",
+        f"Readable LP pools: *{readable}/{len(pools)}*.",
+        "USD values are estimates for priced pools only.",
+        "Wallets without USD values are shown after valued wallets.",
         "",
     ]
-    if rows:
-        for idx, row in enumerate(rows[:20], start=1):
-            lines.append(
-                f"{idx}. `{short_wallet(str(row.get('wallet') or ''))}` — "
-                f"*{fmt_usd(row.get('estimated_usd'))}* "
-                f"({fmt_pct(row.get('share_pct'))} of currently valued wallet LP)"
-            )
-    else:
-        lines.append("No USD-valued LP positions available right now.")
-    # Ownership is still observable even when USD valuation is unavailable.
+    if not rows:
+        lines.append("No readable wallet LP holdings right now.")
+    for idx, row in enumerate(rows[:20], 1):
+        wallet = str(row.get("wallet") or "")
+        priced = valued.get(wallet)
+        amount = fmt_usd(priced.get("estimated_usd")) if priced else "USD unavailable"
+        lines.append(f"{idx}. `{short_wallet(wallet)}` — *{amount}*")
+        for position in row.get("pools", []):
+            lines.append(f"   • {position.get('pool')}: {safe_float(position.get('lp_amount')):,.6f} LP")
+    pending = [p for p in pools if p.get("status") != "readable"]
     if pending:
-        lines.extend(["", "*Pools without verified USD valuation:*"])
+        lines.extend(["", "*LP ownership unavailable:*"])
         for pool in pending:
-            lines.append(f"• {pool.get('label')}: {pool.get('reason', 'price or reserves unavailable')}")
-    lines.extend(["", "_No monthly reward calculations or distributions are included._"])
+            lines.append(f"• {pool.get('label')}: {pool.get('reason')}")
+    lines.extend(["", "_Pool LP units are not comparable across different pairs._"])
     return "\n".join(lines)
+
 
 def format_lp_snapshot_confirmation(snapshot: Dict[str, Any]) -> str:
     created_at = str(snapshot.get("created_at") or "")
