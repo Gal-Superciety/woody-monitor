@@ -2457,7 +2457,8 @@ def build_global_usd_valuation() -> Dict[str, Any]:
                           "reason": "Active pool missing exact quote token identifier"})
             continue
         result = get_lp_holders(pool, require_tvl=False)
-        snap = (get_onedex_woody_one_pool_snapshot() if str(pool.get("lp_token") or "") == "WOODYONE-826f23"\n                else get_pool_snapshot(str(pool.get("pair_address") or ""), label))
+        snap = (get_onedex_woody_one_pool_snapshot() if str(pool.get("lp_token") or "") == "WOODYONE-826f23"
+                else get_pool_snapshot(str(pool.get("pair_address") or ""), label))
         quote_token = str(snap.get("pair_token") or "")
         expected_quote = str(pool.get("quote_token") or "")
         if expected_quote and quote_token != expected_quote:
