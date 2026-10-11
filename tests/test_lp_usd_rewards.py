@@ -480,3 +480,44 @@ def test_live_leaderboard_never_uses_monthly_reward_snapshots():
         output = m.get_lp_leaderboard_text()
     assert "USD unavailable" in output
     assert "JEX WOODY/OLV" in output
+
+
+def test_lp_supply_uses_exact_raw_issuance_counters():
+    from unittest.mock import patch
+    from core import multiversx as m
+    metadata = {"decimals": 18, "supply": "105",
+                "minted": "642472408715406878251",
+                "burnt": "537403391901139078994",
+                "initialMinted": "1000"}
+    with patch.object(m, "get_token_metadata", return_value=metadata):
+        raw, decimals = m.get_lp_total_supply_raw_and_decimals("LPWOODBOBE-08e5f1")
+    assert raw == 105069016814267800257
+    assert decimals == 18
+
+
+def test_lp_supply_does_not_reject_fractional_lp_above_rounded_supply():
+    from unittest.mock import patch
+    from core import multiversx as m
+    pool = {"status": "active", "name": "WOODY/BOBER", "lp_token": "LPWOODBOBE-08e5f1"}
+    metadata = {"decimals": 18, "supply": "105",
+                "minted": "642472408715406878251",
+                "burnt": "537403391901139078994",
+                "initialMinted": "1000"}
+    with patch.object(m, "get_token_metadata", return_value=metadata), \
+         patch.object(m, "discover_pool_lp_token", return_value="LPWOODBOBE-08e5f1"), \
+         patch.object(m, "get_json", return_value=[
+             {"address": "erd15zjkqzf54xhl5sd5dvshjwh43fe5ztvnapsjuvvsm3xuvqvtzlvqcph7yz",
+              "balance": "105069016814267800257"}]):
+        result = m.get_lp_holders(pool, require_tvl=False)
+    assert result["ok"] is True
+    assert len(result["holders"]) == 1
+
+
+def test_lp_supply_zero_rounded_but_nonzero_raw_issuance():
+    from unittest.mock import patch
+    from core import multiversx as m
+    metadata = {"decimals": 18, "supply": "0", "minted": "437196234",
+                "burnt": "304750000", "initialMinted": "1000"}
+    with patch.object(m, "get_token_metadata", return_value=metadata):
+        raw, _ = m.get_lp_total_supply_raw_and_decimals("WOODYUSDC-56b519")
+    assert raw == 132447234
