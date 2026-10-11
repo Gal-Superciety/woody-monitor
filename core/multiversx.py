@@ -732,22 +732,10 @@ def get_liquidity_text() -> str:
             lines.append(f"• {label}: *${value:,.2f}*")
     total = liquidity["totalUsd"]
     total_text = f"${total:,.2f}" if total is not None else "Unavailable"
-    snapshot_ages = [
-        safe_int(pool.get("snapshotAgeSeconds"), 0)
-        for pool in liquidity["pools"]
-        if pool.get("snapshotAgeSeconds") is not None
-    ]
-    freshness_note = (
-        f"\nSnapshot age: {max(snapshot_ages)} seconds; refresh is running in background."
-        if snapshot_ages and max(snapshot_ages) > 0 else ""
-    )
     return (
         "💧 *WOODY Pool Liquidity Estimate*\n\n"
         + "\n".join(lines)
         + f"\n\nTotal: *{total_text}* across {liquidity['estimatedPoolCount']} readable pools."
-        + freshness_note
-        + "\nMethod: 2 × WOODY reserve × WOODY reference price."
-        + "\nValues use 2 × WOODY reserves × the WOODY reference price; quote-token prices are not independently valued. Pools with unreadable reserves are excluded."
     )
 
 
