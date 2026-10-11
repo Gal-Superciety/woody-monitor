@@ -2837,7 +2837,10 @@ def calculate_monthly_lp_averages(month_key: Optional[str] = None) -> Dict[str, 
     eligible = [s for s in snapshots if is_valid_global_usd_snapshot(s)]
     required = required_month_lp_snapshot_dates(month_key or current_month_key())
     found_dates = [str(s.get("date") or "") for s in eligible]
-    checkpoints_complete = (len(required) == 3 and sorted(found_dates) == sorted(required))
+    # Require one and only one verified record per scheduled date.
+    # Never turn duplicate/misdated snapshots into extra voting weight.
+    checkpoints_complete = (len(required) == 3 and sorted(found_dates) == sorted(required)
+                            and len(snapshots) == 3)
     sums: Dict[str, Dict[str, float]] = {}
     for snap in eligible:
         for holder in snap.get("holders", []):
@@ -2869,6 +2872,7 @@ def calculate_monthly_lp_averages(month_key: Optional[str] = None) -> Dict[str, 
         "total_average_usd": total_average_usd,
         "total_average_lp": 0.0,
         "excluded_snapshots": len(snapshots) - len(eligible),
+        "duplicate_dates": sorted({d for d in found_dates if found_dates.count(d) > 1}),
         "valuation_complete": checkpoints_complete and len(eligible) == len(snapshots),
         "required_dates": required,
         "missing_dates": [date for date in required if date not in found_dates],
