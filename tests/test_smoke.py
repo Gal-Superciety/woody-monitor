@@ -375,30 +375,15 @@ def test_lp_snapshot_days_include_1_15_and_last_day() -> None:
 
 
 def test_lp_rewards_are_proportional_to_monthly_average(monkeypatch) -> None:
-    snapshots = [
-        {
-            "date": "2026-06-01",
-            "holders": [
-                {"wallet": "erd1alice", "lp_amount": 10, "estimated_egld": 1},
-                {"wallet": "erd1bob", "lp_amount": 30, "estimated_egld": 3},
-            ],
-        },
-        {
-            "date": "2026-06-15",
-            "holders": [
-                {"wallet": "erd1alice", "lp_amount": 30, "estimated_egld": 3},
-                {"wallet": "erd1bob", "lp_amount": 30, "estimated_egld": 3},
-            ],
-        },
-    ]
-    monkeypatch.setattr(main, "get_month_lp_snapshots", lambda month_key=None: snapshots)
-
-    result = main.calculate_lp_rewards(5, "2026-06")
+    snapshots = [_verified_usd_checkpoint(date, alice, bob) for date, alice, bob in
+                 [("2026-06-01", 100, 300), ("2026-06-15", 300, 300),
+                  ("2026-06-30", 200, 300)]]
+    monkeypatch.setattr(main, "get_month_lp_usd_snapshots", lambda month_key=None: snapshots)
+    result = main.calculate_monthly_lp_rewards(5, "2026-06")
     rewards = {row["wallet"]: row["reward_egld"] for row in result["rows"]}
-
-    assert rewards["erd1alice"] == 2.0
-    assert rewards["erd1bob"] == 3.0
-
+    assert result["valuation_complete"] is True
+    assert abs(rewards["erd1alice"] - 2.0) < 1e-10
+    assert abs(rewards["erd1bob"] - 3.0) < 1e-10
 
 def test_lp_holder_values_use_lp_token_decimals_and_raw_share(monkeypatch) -> None:
     monkeypatch.setattr(main, "discover_xexchange_lp_token_id", lambda: "LP-WOODYEGLD")
@@ -427,36 +412,27 @@ def test_lp_holder_values_use_lp_token_decimals_and_raw_share(monkeypatch) -> No
 
 
 def test_monthly_average_uses_all_available_snapshots(monkeypatch) -> None:
-    snapshots = [
-        {"date": "2026-06-01", "holders": [{"wallet": "erd1alice", "lp_amount": 10}, {"wallet": "erd1bob", "lp_amount": 30}]},
-        {"date": "2026-06-15", "holders": [{"wallet": "erd1alice", "lp_amount": 20}, {"wallet": "erd1bob", "lp_amount": 20}]},
-        {"date": "2026-06-30", "holders": [{"wallet": "erd1alice", "lp_amount": 30}, {"wallet": "erd1bob", "lp_amount": 10}]},
-    ]
-    monkeypatch.setattr(main, "get_month_lp_snapshots", lambda month_key=None: snapshots)
-
-    result = main.calculate_lp_rewards(8, "2026-06")
+    snapshots = [_verified_usd_checkpoint(date, alice, bob) for date, alice, bob in
+                 [("2026-06-01", 100, 300), ("2026-06-15", 200, 200),
+                  ("2026-06-30", 300, 100)]]
+    monkeypatch.setattr(main, "get_month_lp_usd_snapshots", lambda month_key=None: snapshots)
+    result = main.calculate_monthly_lp_rewards(8, "2026-06")
     rewards = {row["wallet"]: row["reward_egld"] for row in result["rows"]}
-
     assert len(result["snapshots"]) == 3
-    assert result["total_average_lp"] == 40.0
+    assert result["total_average_usd"] == 400.0
     assert rewards["erd1alice"] == 4.0
     assert rewards["erd1bob"] == 4.0
 
-
 def test_snapshot_average_egld_is_recomputed_from_pool_value(monkeypatch) -> None:
-    snapshots = [
-        {
-            "date": "2026-06-01",
-            "pool_value_egld": 21.64,
-            "total_lp_supply": 10_000,
-            "holders": [{"wallet": "erd1alice", "lp_amount": 250, "estimated_egld": 999_999_999}],
-        }
-    ]
-    monkeypatch.setattr(main, "get_month_lp_snapshots", lambda month_key=None: snapshots)
-
+    # Legacy EGLD snapshots must never be used to manufacture historical USD values.
+    snapshots = [{"date": "2026-06-01", "pool_value_egld": 21.64,
+                  "total_lp_supply": 10000,
+                  "holders": [{"wallet": "erd1alice", "lp_amount": 250,
+                               "estimated_egld": 999999999}]}]
+    monkeypatch.setattr(main, "get_month_lp_usd_snapshots", lambda month_key=None: snapshots)
     result = main.calculate_monthly_lp_averages("2026-06")
-
-    assert abs(result["rows"][0]["average_egld"] - 0.541) < 1e-12
+    assert result["valuation_complete"] is False
+    assert result["rows"] == []
 
 def _keyboard_labels(markup):
     return [button.text for row in markup.inline_keyboard for button in row]
@@ -486,58 +462,28 @@ def test_lp_rewards_submenu_contains_lp_tools() -> None:
 
 def test_lp_snapshots_text_lists_current_month_snapshots(monkeypatch) -> None:
     monkeypatch.setattr(main, "current_month_key", lambda now=None: "2026-06")
-    monkeypatch.setattr(
-        main,
-        "get_month_lp_snapshots",
-        lambda month_key=None: [
-            {
-                "date": "2026-06-01",
-                "lp_token_id": "LP-WOODYEGLD",
-                "pool_value_egld": 42,
-                "holders": [{"wallet": "erd1alice", "lp_amount": 10}],
-            }
-        ],
-    )
-
+    monkeypatch.setattr(main, "get_month_lp_usd_snapshots",
+                        lambda month_key=None: [_verified_usd_checkpoint("2026-06-01", 100, 300)])
     text = main.get_lp_snapshots_text()
-
-    assert "📸 *LP Snapshots*" in text
-    assert "day 1, day 15 and the final day" in text
+    assert "WOODY Global LP USD Snapshots" in text
+    assert "day 1, 15 and last day" in text
     assert "2026-06-01" in text
-    assert "LP-WOODYEGLD" in text
-
+    assert "$400.00" in text
 
 def test_lp_export_csv_contains_manual_reward_distribution(monkeypatch) -> None:
     monkeypatch.setattr(main, "current_month_key", lambda now=None: "2026-06")
-    monkeypatch.setattr(
-        main,
-        "calculate_lp_rewards",
-        lambda reward_pool_egld: {
-            "rows": [
-                {
-                    "wallet": "erd1alice",
-                    "average_lp": 20,
-                    "share_pct": 40,
-                    "reward_egld": 2,
-                },
-                {
-                    "wallet": "erd1bob",
-                    "average_lp": 30,
-                    "share_pct": 60,
-                    "reward_egld": 3,
-                },
-            ]
-        },
-    )
-
+    monkeypatch.setattr(main, "calculate_monthly_lp_rewards",
+                        lambda reward_pool_egld: {"valuation_complete": True, "rows": [
+                            {"wallet": "erd1alice", "average_usd": 200,
+                             "share_pct": 40, "reward_egld": 2},
+                            {"wallet": "erd1bob", "average_usd": 300,
+                             "share_pct": 60, "reward_egld": 3}]})
     content, filename = main.build_lp_export_csv(5)
     csv_text = content.decode("utf-8")
-
     assert filename == "woody_lp_rewards_2026-06.csv"
-    assert "wallet_address,average_lp,percent_of_total,reward_egld" in csv_text
-    assert "erd1alice,20.000000000000000000,40.00000000,2.000000000000000000" in csv_text
-    assert "erd1bob,30.000000000000000000,60.00000000,3.000000000000000000" in csv_text
-
+    assert "wallet_address,average_usd,percent_of_total,reward_egld" in csv_text
+    assert "erd1alice,200.00000000,40.00000000,2.000000000000000000" in csv_text
+    assert "erd1bob,300.00000000,60.00000000,3.000000000000000000" in csv_text
 
 def test_manual_lp_snapshot_can_save_same_day_and_includes_holder_percent(monkeypatch, tmp_path) -> None:
     snapshot_file = tmp_path / "lp_snapshots.json"
@@ -832,20 +778,19 @@ def test_vm_query_uses_gateway_when_api_returns_no_values(monkeypatch) -> None:
 
 
 def test_global_rewards_refuse_partial_active_pool_snapshot(monkeypatch) -> None:
-    partial = {
-        "pools": [{"status": "active", "ok": False, "label": "OneDex WOODY/WEGLD"}],
-        "rows": [{"wallet": "erd1alice", "total_egld": 2}],
-        "total_eligible_egld": 2,
-        "complete": False,
-    }
-    monkeypatch.setattr(main, "build_global_snapshot", lambda: partial)
-    rewards = main.calculate_lp_rewards(5)
-    assert rewards["rows"] == []
-    assert "withheld" in main.format_rewards_report(5)
     import pytest
-    with pytest.raises(ValueError, match="cannot be verified"):
+    partial = {"date": "2026-06-01", "valuation_complete": False,
+               "pools": [{"status": "unverified", "label": "OneDex WOODY/WEGLD"}],
+               "holders": [{"wallet": "erd1alice", "estimated_usd": 20}],
+               "total_eligible_usd": 20}
+    monkeypatch.setattr(main, "get_month_lp_usd_snapshots",
+                        lambda month_key=None: [partial])
+    rewards = main.calculate_monthly_lp_rewards(5, "2026-06")
+    assert rewards["rows"] == []
+    assert rewards["valuation_complete"] is False
+    assert "withheld" in main.format_rewards_report(5)
+    with pytest.raises(ValueError, match="reward export withheld"):
         main.build_lp_export_csv(5)
-
 
 def test_broken_onedex_bober_pool_is_not_eligible() -> None:
     bober = next(pool for pool in main.LP_POOLS if pool.get("lp_token") == "WOODYBOBER-1a1703")
@@ -914,3 +859,10 @@ def test_bot_liquidity_uses_same_public_pool_valuation(monkeypatch) -> None:
     assert "*$960.00*" in main.get_liquidity_text()
     assert "unavailable" in main.get_liquidity_text()
     assert main.build_public_liquidity(0, pools)["totalUsd"] is None
+
+def _verified_usd_checkpoint(date, alice_usd, bob_usd):
+    return {"date": date, "valuation_complete": True,
+            "total_eligible_usd": alice_usd + bob_usd,
+            "pools": [{"status": "verified"}],
+            "holders": [{"wallet": "erd1alice", "estimated_usd": alice_usd},
+                        {"wallet": "erd1bob", "estimated_usd": bob_usd}]}
