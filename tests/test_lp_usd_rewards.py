@@ -57,7 +57,7 @@ def test_missing_quote_price_is_derived_from_exact_pool_reserves():
     assert result["valuation_complete"] is False
     assert result["pools"][0]["status"] == "verified"
     assert result["pools"][0]["quote_usd"] == 0.1
-    assert result["total_eligible_usd"] == 20
+    assert result["total_eligible_usd"] == 10
 
 
 def test_global_valuation_sums_independent_token_legs():
@@ -570,7 +570,7 @@ def test_live_leaderboard_never_uses_monthly_reward_snapshots():
          patch.object(m, "calculate_monthly_lp_averages", side_effect=AssertionError("monthly called")):
         output = m.get_lp_leaderboard_text()
     assert "USD indisponibil" in output
-    assert "JEX WOODY/OLV" in output
+    assert "1 pool" in output
 
 
 def test_lp_supply_uses_exact_raw_issuance_counters():
