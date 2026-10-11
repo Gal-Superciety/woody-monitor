@@ -408,7 +408,7 @@ def test_indicative_quote_metadata_is_replaced_by_exact_pool_reserve_price():
     assert result["pools"][0]["quote_usd"] == 0.01
     assert result["pools"][0]["pool_value_usd"] == 40
     assert result["holders"][0]["estimated_usd"] == 20
-    assert "exact pool ratio" in result["pools"][0]["quote_price_source"].lower()
+    assert "reserve ratio" in result["pools"][0]["quote_price_source"].lower()
 
 
 def test_onedex_woody_one_requires_confirmed_pair_id():
