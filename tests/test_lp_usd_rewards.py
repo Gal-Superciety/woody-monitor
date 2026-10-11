@@ -405,3 +405,12 @@ def test_lp_preflight_reports_unverified_onedex_and_missing_jex_ids():
     assert "LP token ID missing" in audit["pools"][1]["issues"]
     assert audit["pools"][2]["status"] == "excluded"
     assert audit["snapshot_file"].endswith("data/lp_usd_snapshots.json")
+
+
+def test_jex_olv_has_exact_verified_quote_token_configured():
+    from config import LP_POOLS, OLV
+    pool = next(p for p in LP_POOLS if p["dex"] == "JEX" and p["name"] == "WOODY/OLV")
+    assert OLV == "OLV-aa679c"
+    assert pool["quote_token"] == OLV
+    # JEX pool contract holdings do not prove fungible LP ownership.
+    assert pool["lp_token"] == ""
