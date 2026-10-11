@@ -2843,13 +2843,33 @@ def get_lp_holders_text(limit: Optional[int] = None) -> str:
 def get_lp_leaderboard_text() -> str:
     data = calculate_monthly_lp_averages()
     if not data.get("valuation_complete"):
-        return (
-            "🏆 *Monthly LP Leaderboard*\n\n"
-            "⚠️ USD valuation snapshots are missing or incomplete. "
-            "Rewards are withheld until all active pools and historical "
-            "token prices can be verified. Older EGLD-only snapshots "
-            "cannot be safely compared across different LP tokens."
-        )
+        # Display current on-chain LP ownership separately from reward eligibility.
+        # Indicative prices and incomplete pool coverage must never generate rewards.
+        live = build_global_usd_valuation()
+        rows = live.get("holders", [])
+        pools = live.get("pools", [])
+        counted = sum(p.get("status") == "verified" for p in pools)
+        pending = [p for p in pools if p.get("status") == "unverified"]
+        if not rows:
+            return (
+                "🏆 *WOODY LP Leaderboard*\\n\\n"
+                "No reliable wallet-level LP positions available right now. "
+                "Pool liquidity estimates do not establish wallet ownership.\\n"
+                "Monthly USD snapshots are missing or incomplete; rewards withheld."
+            )
+        lines = ["🏆 *WOODY Live LP Leaderboard — Estimated USD*",
+                 "_Current wallet holdings, not the monthly reward ranking._",
+                 f"Pool coverage: *{counted}/{len(pools)}* readable (including excluded pools in denominator).",
+                 f"Pricing: *{'indicative' if live.get('indicative_only') else 'estimated'}*.",
+                 "Values and ranks cover readable pools only; missing pools may change the order.",
+                 "⚠️ Monthly rewards withheld until all checkpoints are verified.", ""]
+        for idx, row in enumerate(rows[:20], start=1):
+            lines.append(f"{idx}. `{short_wallet(str(row.get('wallet') or ''))}` — "
+                         f"*{fmt_usd(row.get('estimated_usd'))}*")
+        if pending:
+            lines.extend(["", "Unavailable pools: " +
+                          ", ".join(str(p.get("label") or "?") for p in pending[:8])])
+        return "\\n".join(lines)
     reward_pool = get_last_lp_reward_pool()
     rewards_data = calculate_monthly_lp_rewards(reward_pool)
     rewards = {str(r.get("wallet")): safe_float(r.get("reward_egld"))
