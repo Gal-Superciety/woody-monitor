@@ -1432,16 +1432,55 @@ def get_fake_pump_detection_payload(hours: int = 24) -> Dict[str, Any]:
     return {"status": status, "confidence": confidence, "riskScore": confidence, "sampleCount": len(_recent_trades(hours))}
 
 
+def get_onedex_woody_one_public_quote() -> Dict[str, Any]:
+    """Independent DEX indexer quote for public estimates only, never rewards."""
+    url = "https://api.dexscreener.com/latest/dex/search"
+    data = get_json(url, params={"q": "WOODY ONE"})
+    if not isinstance(data, dict):
+        return {"ok": False, "reason": "DexScreener unavailable"}
+    expected_pair = ONEDEX_POOL_ADDRESS + "-WOODYONE-826f23"
+    matches = [
+        p for p in data.get("pairs", []) if isinstance(p, dict)
+        and p.get("chainId") == "multiversx"
+        and p.get("dexId") == "onedex"
+        and p.get("pairAddress", "").lower() == expected_pair.lower()
+        and (p.get("baseToken") or {}).get("address") == WOODY
+        and (p.get("quoteToken") or {}).get("address") == ONE
+    ]
+    if len(matches) != 1:
+        return {"ok": False, "reason": "Exact WOODY/ONE pair not uniquely verified"}
+    liq = matches[0].get("liquidity") or {}
+    woody = safe_float(liq.get("base"))
+    one = safe_float(liq.get("quote"))
+    if woody <= 0 or one <= 0:
+        return {"ok": False, "reason": "WOODY/ONE indexer reserves unavailable"}
+    return {"ok": True, "woody_amount": woody, "pair_amount": one,
+            "pair_symbol": "ONE", "pair_token": ONE,
+            "reserve_source": "DexScreener public indexer (indicative; not on-chain verified)"}
+
+
 def get_public_pool_reserves() -> List[Dict[str, Any]]:
     """Publish observed on-chain reserves, never estimated TVL as verified liquidity."""
     pools = []
     seen = set()
     for pool in LP_POOLS:
         address = str(pool.get("pair_address") or "").strip()
-        if not address or address in seen:
+        lp_id = str(pool.get("lp_token") or "")
+        if lp_id == "WOODYONE-826f23":
+            # OneDex is a shared contract: distinguish pools by LP identifier.
+            snap = get_onedex_woody_one_pool_snapshot()
+            if not snap.get("ok"):
+                snap = get_onedex_woody_one_public_quote()
+            key = "onedex:WOODYONE-826f23"
+        else:
+            if str(pool.get("status") or "") != "active" or not address:
+                continue
+            key = address
+            snap = (get_onedex_woody_pool_snapshot() if lp_id == "WOODYWEGLD-9832b2"
+                    else get_pool_snapshot(address, str(pool.get("name") or "WOODY pool")))
+        if key in seen:
             continue
-        seen.add(address)
-        snap = get_onedex_woody_pool_snapshot() if str(pool.get("dex") or "").lower() == "onedex" and str(pool.get("lp_token") or "") == "WOODYWEGLD-9832b2" else get_pool_snapshot(address, str(pool.get("name") or "WOODY pool"))
+        seen.add(key)
         if not snap.get("ok"):
             pools.append({"dex": str(pool.get("dex") or "DEX"), "pair": str(pool.get("name") or "WOODY pool"), "address": address, "status": "unavailable", "reason": str(snap.get("reason") or "pool data unavailable"), "valuation": "not_verified"})
             continue
@@ -1873,6 +1912,71 @@ def get_onedex_woody_pool_snapshot() -> Dict[str, Any]:
     }
 
 
+def get_onedex_woody_one_pool_snapshot() -> Dict[str, Any]:
+    """Read pair-specific WOODY/ONE reserves from OneDex view endpoints.
+
+    OneDex keeps many pairs in one smart contract, so account ESDT balances are
+    aggregate balances and must never be presented as a single pool's reserves.
+    """
+    pair_id = int(ONEDEX_WOODY_ONE_PAIR_ID)
+    if pair_id <= 0:
+        return {"label": "WOODY/ONE", "ok": False, "reason": "OneDex WOODY/ONE pair ID not confirmed"}
+    pair_arg = format(pair_id, "x")
+    if len(pair_arg) % 2:
+        pair_arg = "0" + pair_arg
+
+    first_id_raw = _vm_query_scalar("getPairFirstTokenId", [pair_arg])
+    second_id_raw = _vm_query_scalar("getPairSecondTokenId", [pair_arg])
+    first_reserve_raw = _vm_query_scalar("getPairFirstTokenReserve", [pair_arg])
+    second_reserve_raw = _vm_query_scalar("getPairSecondTokenReserve", [pair_arg])
+    lp_id_raw = _vm_query_scalar("getPairLpTokenId", [pair_arg])
+
+    if None in (first_id_raw, second_id_raw, first_reserve_raw, second_reserve_raw):
+        return {"label": "WOODY/ONE", "ok": False, "reason": "OneDex pair view unavailable"}
+
+    try:
+        first_id = first_id_raw.decode("utf-8")
+        second_id = second_id_raw.decode("utf-8")
+        lp_id = lp_id_raw.decode("utf-8") if lp_id_raw else ""
+        first_raw = int.from_bytes(first_reserve_raw, "big")
+        second_raw = int.from_bytes(second_reserve_raw, "big")
+    except Exception:
+        return {"label": "WOODY/ONE", "ok": False, "reason": "OneDex pair view decode failed"}
+
+    expected = {WOODY, ONE}
+    if {first_id, second_id} != expected:
+        logger.warning("OneDex pair id mismatch", extra={"pair_id": pair_id, "first": first_id, "second": second_id})
+        return {"label": "WOODY/ONE", "ok": False, "reason": "OneDex pair id/token verification failed"}
+    if lp_id != "WOODYONE-826f23":
+        return {"label": "WOODY/ONE", "ok": False, "reason": "OneDex LP token verification failed"}
+
+    metadata = {WOODY: get_token_metadata(WOODY), ONE: get_token_metadata(ONE)}
+    decimals = {
+        WOODY: safe_int(metadata[WOODY].get("decimals"), 18),
+        ONE: safe_int(metadata[ONE].get("decimals"), 18),
+    }
+    amounts = {
+        first_id: first_raw / (10 ** decimals[first_id]),
+        second_id: second_raw / (10 ** decimals[second_id]),
+    }
+    woody_amount = safe_float(amounts.get(WOODY))
+    one_amount = safe_float(amounts.get(ONE))
+    if woody_amount <= 0 or one_amount <= 0:
+        return {"label": "WOODY/ONE", "ok": False, "reason": "OneDex pair reserves are empty"}
+
+    return {
+        "label": "WOODY/ONE",
+        "ok": True,
+        "woody_amount": woody_amount,
+        "pair_token": ONE,
+        "pair_symbol": "ONE",
+        "pair_amount": one_amount,
+        "pair_id": pair_id,
+        "lp_token": lp_id,
+        "reserve_source": "OneDex viewPair storage endpoints",
+    }
+
+
 def get_pool_snapshot(pool_address: str, label: str) -> Dict[str, Any]:
     now = time.time()
     cached = POOL_SNAPSHOT_CACHE.get(pool_address)
@@ -2150,6 +2254,11 @@ def fetch_lp_holders(limit_pages: int = LP_HOLDERS_MAX_PAGES) -> Dict[str, Any]:
     if not complete:
         return {"ok": False, "reason": "LP holder pagination limit reached; increase LP_HOLDERS_MAX_PAGES", "lp_token_id": lp_token_id}
 
+    addresses = [str(a.get("wallet") or "") for a in accounts]
+    if len(addresses) != len(set(addresses)):
+        return {"ok": False, "lp_token_id": lp_token_id,
+                "reason": "Duplicate LP holder addresses in API pagination"}
+
     total_supply_raw = _correct_lp_supply_raw(total_supply_raw, lp_decimals, [safe_int(a.get("balance_raw")) for a in accounts], lp_token_id)
     total_supply = amount_from_raw(total_supply_raw, lp_decimals)
     holders: List[Dict[str, Any]] = []
@@ -2205,14 +2314,9 @@ def discover_pool_lp_token(pool: Dict[str, Any], force_refresh: bool = False) ->
                 PRICE_CACHE[cache_key] = (decoded, now)
                 return decoded
 
-    data = get_json(f"{MVX_API}/accounts/{pair_address}/tokens")
-    if isinstance(data, list):
-        reserve_ids = {str(x.get("identifier") or "") for x in data}
-        candidates = [t for t in reserve_ids if t and t != WOODY and "WOODY" in t.upper()]
-        if candidates:
-            token = sorted(candidates, key=len)[0]
-            PRICE_CACHE[cache_key] = (token, now)
-            return token
+    # Reserve balances are not proof of LP ownership. A pool's token holdings
+    # may contain WOODY or another WOODY-named asset; never guess an LP ID.
+    # Only explicit configuration or a verified contract view can identify LP.
     PRICE_CACHE[cache_key] = ("", now)
     return ""
 
@@ -2233,16 +2337,16 @@ def get_pool_tvl_egld(pool: Dict[str, Any]) -> Dict[str, Any]:
     return {**snap, "pool_value_egld": (pool_usd / egld_usd) if egld_usd > 0 and pool_usd > 0 else 0.0}
 
 
-def get_lp_holders(pool: Dict[str, Any], limit_pages: int = LP_HOLDERS_MAX_PAGES) -> Dict[str, Any]:
+def get_lp_holders(pool: Dict[str, Any], limit_pages: int = LP_HOLDERS_MAX_PAGES, require_tvl: bool = True) -> Dict[str, Any]:
     if str(pool.get("status")) != "active":
         return {"ok": False, "excluded": True, "reason": pool.get("reason", "not verified")}
     lp_token_id = discover_pool_lp_token(pool)
     if not lp_token_id:
         return {"ok": False, "reason": "LP token missing"}
     total_supply_raw, lp_decimals = get_lp_total_supply_raw_and_decimals(lp_token_id)
-    tvl = get_pool_tvl_egld(pool)
+    tvl = get_pool_tvl_egld(pool) if require_tvl else {"ok": True, "pool_value_egld": 0.0}
     pool_value_egld = safe_float(tvl.get("pool_value_egld"))
-    if not tvl.get("ok") or total_supply_raw <= 0 or pool_value_egld <= 0:
+    if total_supply_raw <= 0 or (require_tvl and (not tvl.get("ok") or pool_value_egld <= 0)):
         return {"ok": False, "lp_token_id": lp_token_id, "reason": str(tvl.get("reason") or "LP supply or verified pool value unavailable")}
     accounts: List[Dict[str, Any]] = []
     complete = False
@@ -2267,7 +2371,14 @@ def get_lp_holders(pool: Dict[str, Any], limit_pages: int = LP_HOLDERS_MAX_PAGES
     if not complete:
         return {"ok": False, "lp_token_id": lp_token_id, "reason": "LP holder pagination limit reached; increase LP_HOLDERS_MAX_PAGES"}
 
+    addresses = [str(a.get("wallet") or "") for a in accounts]
+    if len(addresses) != len(set(addresses)):
+        return {"ok": False, "lp_token_id": lp_token_id,
+                "reason": "Duplicate LP holder addresses in API pagination"}
+
     total_supply_raw = _correct_lp_supply_raw(total_supply_raw, lp_decimals, [safe_int(a.get("balance_raw")) for a in accounts], lp_token_id)
+    if sum(safe_int(a.get("balance_raw")) for a in accounts) > total_supply_raw:
+        return {"ok": False, "lp_token_id": lp_token_id, "reason": "LP balances exceed total LP supply"}
     holders: List[Dict[str, Any]] = []
     all_estimated: List[Dict[str, Any]] = []
     for account in accounts:
@@ -2275,13 +2386,13 @@ def get_lp_holders(pool: Dict[str, Any], limit_pages: int = LP_HOLDERS_MAX_PAGES
         balance_raw = safe_int(account.get("balance_raw"))
         lp_amount = amount_from_raw(balance_raw, lp_decimals)
         estimated_egld = (balance_raw / total_supply_raw * pool_value_egld) if total_supply_raw > 0 and pool_value_egld > 0 else 0.0
-        row = {"wallet": address, "lp_amount": lp_amount, "estimated_egld": estimated_egld}
+        row = {"wallet": address, "lp_amount": lp_amount, "balance_raw": str(balance_raw), "estimated_egld": estimated_egld}
         all_estimated.append(row)
-        if not is_real_wallet(address) or estimated_egld <= GLOBAL_LP_DUST_EGLD:
+        if not is_real_wallet(address) or (require_tvl and estimated_egld <= GLOBAL_LP_DUST_EGLD):
             continue
         holders.append(row)
 
-    if not _lp_sanity_ok(all_estimated, pool_value_egld, _pool_label(pool)):
+    if require_tvl and not _lp_sanity_ok(all_estimated, pool_value_egld, _pool_label(pool)):
         return {"ok": False, "lp_token_id": lp_token_id, "reason": "LP valuation sanity check failed; refusing to publish incorrect values"}
 
     return {"ok": True, "lp_token_id": lp_token_id, "total_supply_raw": str(total_supply_raw), "lp_decimals": lp_decimals, "pool_value_egld": pool_value_egld, "holders": holders, "pool_ok": bool(tvl.get("ok")), "pool_reason": tvl.get("reason", "")}
@@ -2313,6 +2424,184 @@ def build_global_snapshot() -> Dict[str, Any]:
         row["share_pct"] = safe_float(row.get("total_egld")) / total * 100 if total > 0 else 0.0
     complete = all(p.get("ok") for p in pools if p.get("status") == "active")
     return {"pools": pools, "rows": rows, "total_eligible_egld": total, "eligible_wallets": len(rows), "complete": complete}
+
+
+def get_verified_quote_usd(token_id: str, egld_usd: float) -> Dict[str, Any]:
+    """Price a quote token from its exact MultiversX token metadata.
+
+    API prices are indicative unless an independent freshness/liquidity
+    attestation is available. Record provenance so reports can distinguish
+    estimates from verified financial inputs.
+    """
+    from math import isfinite
+    if token_id == WEGLD and isfinite(egld_usd) and egld_usd > 0:
+        return {"ok": True, "price_usd": egld_usd, "source": "EGLD USD feed",
+                "confidence": "feed"}
+    if not token_id:
+        return {"ok": False, "reason": "missing quote token"}
+    metadata = get_token_metadata(token_id)
+    try:
+        value = float(metadata.get("price") or 0)
+    except (ValueError, TypeError, OverflowError):
+        value = 0.0
+    if (isfinite(value) and value > 0 and
+            str(metadata.get("identifier") or "") == token_id):
+        return {"ok": True, "price_usd": value,
+                "source": f"MultiversX token metadata: {token_id}",
+                "confidence": "indicative"}
+    return {"ok": False, "reason": f"USD quote unavailable for exact token {token_id}"}
+
+
+def audit_global_lp_configuration() -> Dict[str, Any]:
+    """Read-only preflight: report missing inputs before any reward snapshot."""
+    rows = []
+    for pool in LP_POOLS:
+        status = str(pool.get("status") or "")
+        if status == "excluded":
+            rows.append({"pool": _pool_label(pool), "status": "excluded", "issues": []})
+            continue
+        issues = []
+        if status != "active":
+            issues.append("pool is not verified active")
+        if not str(pool.get("lp_token") or ""):
+            issues.append("LP token ID missing")
+        if not str(pool.get("quote_token") or ""):
+            issues.append("exact quote token ID missing")
+        if not str(pool.get("pair_address") or ""):
+            issues.append("pair contract address missing")
+        if str(pool.get("lp_token") or "") == "WOODYONE-826f23" and safe_int(pool.get("pair_id")) <= 0:
+            issues.append("OneDex numeric pair ID unverified")
+        rows.append({"pool": _pool_label(pool), "status": "ready_for_live_validation" if not issues else "blocked",
+                     "issues": issues})
+    return {"configuration_ready": all(row["status"] != "blocked" for row in rows),
+            "pools": rows, "snapshot_file": data_path("data/lp_usd_snapshots.json"),
+            "data_directory": data_path("data")}
+
+
+def build_global_usd_valuation() -> Dict[str, Any]:
+    """Independent reserve-based USD valuation; fail closed for missing inputs.
+
+    Never infer a quote token price from an unrelated WOODY pool or add
+    different LP token denominations together.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    egld_usd = get_egld_usd()
+    best = get_best_price() or {}
+    woody_usd = safe_float(best.get("price_usd"))
+    wallets: Dict[str, Dict[str, Any]] = {}
+    pools: List[Dict[str, Any]] = []
+    complete = True
+    prices_indicative = False
+    for pool in LP_POOLS:
+        label = _pool_label(pool)
+        pool_status = str(pool.get("status") or "")
+        if pool_status != "active":
+            if pool_status != "excluded":
+                complete = False
+            pools.append({"label": label, "status": "excluded" if pool_status == "excluded" else "unverified",
+                          "reason": pool.get("reason", "Pool not verified")})
+            continue
+        if not str(pool.get("quote_token") or ""):
+            complete = False
+            pools.append({"label": label, "status": "unverified",
+                          "reason": "Active pool missing exact quote token identifier"})
+            continue
+        result = get_lp_holders(pool, require_tvl=False)
+        snap = (get_onedex_woody_one_pool_snapshot() if str(pool.get("lp_token") or "") == "WOODYONE-826f23"
+                else get_pool_snapshot(str(pool.get("pair_address") or ""), label))
+        quote_token = str(snap.get("pair_token") or "")
+        expected_quote = str(pool.get("quote_token") or "")
+        if expected_quote and quote_token != expected_quote:
+            complete = False
+            pools.append({"label": label, "status": "unverified", "quote_token": quote_token,
+                          "reason": "Pool quote token does not match configured token identifier"})
+            continue
+        quote_symbol = symbol(quote_token).upper() if quote_token else ""
+        quote_price = get_verified_quote_usd(quote_token, egld_usd)
+        quote_usd = safe_float(quote_price.get("price_usd")) if quote_price.get("ok") else 0.0
+        if quote_price.get("confidence") == "indicative":
+            prices_indicative = True
+        # Stablecoin parity is not assumed: a verified price feed is required.
+        woody_reserve = safe_float(snap.get("woody_amount"))
+        quote_reserve = safe_float(snap.get("pair_amount"))
+        pool_usd = woody_reserve * woody_usd + quote_reserve * quote_usd
+        if (not result.get("ok") or not snap.get("ok") or woody_usd <= 0
+                or quote_usd <= 0 or woody_reserve <= 0 or quote_reserve <= 0
+                or safe_int(result.get("total_supply_raw")) <= 0):
+            complete = False
+            pools.append({"label": label, "status": "unverified",
+                          "quote_token": quote_token,
+                          "reason": result.get("reason") or quote_price.get("reason") or "Quote USD price or reserves unavailable"})
+            continue
+        # Derive ownership from exact raw LP balances and raw supply.
+        # Do not reuse the EGLD valuation as an ownership proxy.
+        supply_raw = safe_int(result.get("total_supply_raw"))
+        if supply_raw <= 0:
+            complete = False
+            pools.append({"label": label, "status": "unverified", "reason": "LP supply unavailable"})
+            continue
+        for holder in result.get("holders", []):
+            wallet = str(holder.get("wallet") or "")
+            if not wallet:
+                continue
+            fraction = safe_int(holder.get("balance_raw")) / supply_raw
+            if not 0 < fraction <= 1:
+                complete = False
+                continue
+            value = pool_usd * fraction
+            entry = wallets.setdefault(wallet, {"wallet": wallet, "estimated_usd": 0.0, "pools": []})
+            entry["estimated_usd"] += value
+            entry["pools"].append({"pool": label, "estimated_usd": value})
+        pools.append({"label": label, "status": "verified", "pool_value_usd": pool_usd,
+                      "woody_reserve": woody_reserve, "woody_usd": woody_usd,
+                      "quote_token": quote_token, "quote_reserve": quote_reserve,
+                      "quote_usd": quote_usd, "quote_price_source": quote_price.get("source"),
+                      "quote_price_confidence": quote_price.get("confidence"),
+                      "source": best.get("source", "unknown")})
+    rows = sorted(wallets.values(), key=lambda row: row["estimated_usd"], reverse=True)
+    total = sum(row["estimated_usd"] for row in rows)
+    for row in rows:
+        row["share_pct"] = row["estimated_usd"] / total * 100 if total > 0 else 0.0
+    return {"created_at": now, "valuation_complete": complete and bool(rows) and not prices_indicative,
+            "indicative_only": prices_indicative,
+            "total_eligible_usd": total, "holders": rows, "pools": pools,
+            "pricing": {"egld_usd": egld_usd, "woody_usd": woody_usd,
+                        "woody_source": best.get("source", "unavailable")}}
+
+
+def save_global_usd_snapshot(force: bool = False,
+                             snapshot_time: Optional[datetime] = None) -> Dict[str, Any]:
+    """Persist only complete valuations; legacy LP snapshots stay untouched."""
+    now = datetime.now(timezone.utc)
+    dt = snapshot_time or now
+    if dt.tzinfo is None:
+        return {"ok": False, "reason": "snapshot time must be timezone-aware UTC"}
+    dt = dt.astimezone(timezone.utc)
+    if dt.date() != now.date():
+        return {"ok": False, "reason": "historical or future snapshots cannot use live balances"}
+    date_key = dt.strftime("%Y-%m-%d")
+    if not force and not is_lp_snapshot_day(dt):
+        return {"ok": False, "reason": "not a scheduled snapshot day"}
+    path = "data/lp_usd_snapshots.json"
+    store = read_json_file(path, {"snapshots": []})
+    if not isinstance(store, dict) or not isinstance(store.get("snapshots"), list):
+        return {"ok": False, "reason": "invalid USD snapshot store"}
+    if any(x.get("date") == date_key for x in store["snapshots"]):
+        return {"ok": True, "skipped": True, "date": date_key}
+    data = build_global_usd_valuation()
+    if not is_valid_global_usd_snapshot(data):
+        return {"ok": False, "reason": "some pool prices, LP holders or USD totals are unverified",
+                "pools": data.get("pools", [])}
+    data["date"] = date_key
+    data["scheduled_checkpoint"] = is_lp_snapshot_day(dt)
+    if not data["scheduled_checkpoint"]:
+        return {"ok": False, "reason": "manual off-schedule valuations cannot be stored as monthly reward checkpoints"}
+    store["snapshots"].append(data)
+    store["snapshots"] = sorted(store["snapshots"],
+                                key=lambda x: str(x.get("date", "")))[-120:]
+    if not write_json_file(path, store):
+        return {"ok": False, "reason": "persistent USD snapshot write failed"}
+    return {"ok": True, "snapshot": data}
 
 
 def format_snapshot_report(snapshot: Optional[Dict[str, Any]] = None, limit: int = 20) -> str:
@@ -2501,45 +2790,126 @@ def _snapshot_holder_estimated_egld(holder: Dict[str, Any], snap: Dict[str, Any]
     return safe_float(holder.get("estimated_egld"))
 
 
+def is_valid_global_usd_snapshot(snap: Dict[str, Any]) -> bool:
+    """Reject corrupt, duplicated or internally inconsistent reward inputs."""
+    from math import isfinite
+    if snap.get("valuation_complete") is not True or snap.get("indicative_only") is True:
+        return False
+    holders = snap.get("holders")
+    pools = snap.get("pools")
+    if not isinstance(holders, list) or not holders or not isinstance(pools, list) or not pools:
+        return False
+    if any(not isinstance(p, dict) or p.get("status") not in {"verified", "excluded"}
+           or p.get("quote_price_confidence") == "indicative" for p in pools):
+        return False
+    if not any(isinstance(p, dict) and p.get("status") == "verified" for p in pools):
+        return False
+    seen = set()
+    total = 0.0
+    for holder in holders:
+        if not isinstance(holder, dict):
+            return False
+        wallet = str(holder.get("wallet") or "")
+        try:
+            value = float(holder.get("estimated_usd"))
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if not wallet or wallet in seen or not isfinite(value) or value <= 0:
+            return False
+        seen.add(wallet)
+        total += value
+    try:
+        reported = float(snap.get("total_eligible_usd"))
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return (isfinite(reported) and reported > 0 and
+            abs(total - reported) <= max(0.01, reported * 0.000001))
+
+
+def get_month_lp_usd_snapshots(month_key: Optional[str] = None) -> List[Dict[str, Any]]:
+    key = month_key or current_month_key()
+    store = read_json_file("data/lp_usd_snapshots.json", {"snapshots": []})
+    if not isinstance(store, dict) or not isinstance(store.get("snapshots"), list):
+        return []
+    return sorted([snap for snap in store["snapshots"]
+                   if isinstance(snap, dict) and str(snap.get("date", "")).startswith(key)],
+                  key=lambda snap: str(snap.get("date", "")))
+
+
+def required_month_lp_snapshot_dates(month_key: str) -> List[str]:
+    """Three calendar checkpoints; rewards require all three."""
+    try:
+        year, month = (int(x) for x in month_key.split("-"))
+        last_day = calendar.monthrange(year, month)[1]
+        if not 1 <= month <= 12:
+            return []
+        return [f"{year:04d}-{month:02d}-{day:02d}" for day in (1, 15, last_day)]
+    except (ValueError, TypeError):
+        return []
+
+
 def calculate_monthly_lp_averages(month_key: Optional[str] = None) -> Dict[str, Any]:
-    snapshots = get_month_lp_snapshots(month_key)
+    """Rank only independently valued, complete snapshots by USD.
+
+    Legacy single-pool EGLD snapshots have no reliable historical USD
+    conversion; keep them visible but never silently mix LP units across pools.
+    """
+    snapshots = get_month_lp_usd_snapshots(month_key)
+    eligible = [s for s in snapshots if is_valid_global_usd_snapshot(s)]
+    required = required_month_lp_snapshot_dates(month_key or current_month_key())
+    found_dates = [str(s.get("date") or "") for s in eligible]
+    # Require one and only one verified record per scheduled date.
+    # Never turn duplicate/misdated snapshots into extra voting weight.
+    checkpoints_complete = (len(required) == 3 and sorted(found_dates) == sorted(required)
+                            and len(snapshots) == 3)
     sums: Dict[str, Dict[str, float]] = {}
-    snapshot_total_lp_sum = 0.0
-    for snap in snapshots:
-        snapshot_total_lp_sum += _snapshot_total_lp(snap)
+    for snap in eligible:
         for holder in snap.get("holders", []):
             wallet = str(holder.get("wallet") or "")
             if not wallet:
                 continue
-            bucket = sums.setdefault(wallet, {"lp": 0.0, "egld": 0.0})
-            bucket["lp"] += safe_float(holder.get("lp_amount"))
-            bucket["egld"] += _snapshot_holder_estimated_egld(holder, snap)
+            value = safe_float(holder.get("estimated_usd"))
+            if value < 0:
+                continue
+            bucket = sums.setdefault(wallet, {"usd": 0.0})
+            bucket["usd"] += value
 
-    sample_count = len(snapshots)
+    sample_count = len(eligible)
     rows: List[Dict[str, Any]] = []
     for wallet, values in sums.items():
         rows.append({
             "wallet": wallet,
-            "average_lp": values["lp"] / sample_count if sample_count else 0.0,
-            "average_egld": values["egld"] / sample_count if sample_count else 0.0,
+            "average_usd": values["usd"] / sample_count if sample_count else 0.0,
         })
-    rows.sort(key=lambda x: safe_float(x.get("average_lp")), reverse=True)
-    total_average_lp = snapshot_total_lp_sum / sample_count if sample_count else 0.0
-    if total_average_lp <= 0:
-        total_average_lp = sum(safe_float(r.get("average_lp")) for r in rows)
+    rows.sort(key=lambda x: safe_float(x.get("average_usd")), reverse=True)
+    total_average_usd = sum(safe_float(r.get("average_usd")) for r in rows)
     for row in rows:
-        row["share_pct"] = (safe_float(row.get("average_lp")) / total_average_lp * 100) if total_average_lp > 0 else 0.0
-    return {"snapshots": snapshots, "rows": rows, "total_average_lp": total_average_lp}
+        row["share_pct"] = (
+            safe_float(row.get("average_usd")) / total_average_usd * 100
+            if total_average_usd > 0 else 0.0
+        )
+    return {
+        "snapshots": eligible, "rows": rows,
+        "total_average_usd": total_average_usd,
+        "total_average_lp": 0.0,
+        "excluded_snapshots": len(snapshots) - len(eligible),
+        "duplicate_dates": sorted({d for d in found_dates if found_dates.count(d) > 1}),
+        "valuation_complete": checkpoints_complete and len(eligible) == len(snapshots),
+        "required_dates": required,
+        "missing_dates": [date for date in required if date not in found_dates],
+    }
 
 
 def calculate_monthly_lp_rewards(reward_pool_egld: float, month_key: Optional[str] = None) -> Dict[str, Any]:
     averages = calculate_monthly_lp_averages(month_key)
-    total = safe_float(averages.get("total_average_lp"))
+    total = safe_float(averages.get("total_average_usd"))
+    if not averages.get("valuation_complete") or total <= 0:
+        return {**averages, "rows": [], "reward_pool_egld": reward_pool_egld,
+                "reason": "Historical USD valuations missing or incomplete; rewards withheld"}
     rows: List[Dict[str, Any]] = []
     for row in averages.get("rows", []):
-        share = (safe_float(row.get("average_lp")) / total) if total > 0 else 0.0
-        reward = share * max(0.0, reward_pool_egld)
-        rows.append({**row, "reward_egld": reward})
+        share = safe_float(row.get("average_usd")) / total
+        rows.append({**row, "reward_egld": share * max(0.0, reward_pool_egld)})
     return {**averages, "rows": rows, "reward_pool_egld": reward_pool_egld}
 
 
@@ -2600,40 +2970,81 @@ def get_lp_holders_text(limit: Optional[int] = None) -> str:
     return "\n".join(lines)
 
 
+def build_live_lp_ownership() -> Dict[str, Any]:
+    """Read wallet LP balances without requiring any price or reserve feed."""
+    wallets: Dict[str, Dict[str, Any]] = {}
+    pools: List[Dict[str, Any]] = []
+    for pool in LP_POOLS:
+        label = _pool_label(pool)
+        status = str(pool.get("status") or "")
+        if status == "excluded":
+            continue
+        if status != "active":
+            pools.append({"label": label, "status": "unverified",
+                          "reason": str(pool.get("reason") or "Pool not active")})
+            continue
+        result = get_lp_holders(pool, require_tvl=False)
+        if not result.get("ok"):
+            pools.append({"label": label, "status": "unverified",
+                          "reason": str(result.get("reason") or "LP holders unavailable")})
+            continue
+        holders = result.get("holders", [])
+        pools.append({"label": label, "status": "readable",
+                      "lp_token_id": result.get("lp_token_id"),
+                      "holder_count": len(holders)})
+        for holder in holders:
+            wallet = str(holder.get("wallet") or "")
+            if not wallet:
+                continue
+            row = wallets.setdefault(wallet, {"wallet": wallet, "pools": []})
+            row["pools"].append({
+                "pool": label,
+                "lp_token_id": result.get("lp_token_id"),
+                "lp_amount": holder.get("lp_amount"),
+                "balance_raw": holder.get("balance_raw"),
+            })
+    return {"holders": sorted(wallets.values(),
+                              key=lambda x: (-len(x["pools"]), x["wallet"])),
+            "pools": pools}
+
+
 def get_lp_leaderboard_text() -> str:
-    data = calculate_monthly_lp_averages()
-    snapshots = data.get("snapshots", [])
-    if not snapshots:
-        return "🏆 *Monthly LP Leaderboard*\n\nNo LP snapshots for the current month yet. Snapshots are saved on day 1, day 15 and the final day of each month."
-    reward_pool = get_last_lp_reward_pool()
-    reward_data = calculate_monthly_lp_rewards(reward_pool) if reward_pool > 0 else {"rows": data.get("rows", [])}
-    rewards = {str(r.get("wallet")): safe_float(r.get("reward_egld")) for r in reward_data.get("rows", [])}
-    egld_usd = get_egld_usd()
+    """Live LP monitoring, without monthly snapshots or reward calculations."""
+    ownership = build_live_lp_ownership()
+    valuation = build_global_usd_valuation()
+    valued = {str(row.get("wallet")): row for row in valuation.get("holders", [])}
+    pools = ownership.get("pools", [])
+    readable = sum(p.get("status") == "readable" for p in pools)
+    rows = ownership.get("holders", [])
+    rows.sort(key=lambda row: (
+        str(row.get("wallet")) not in valued,
+        -safe_float(valued.get(str(row.get("wallet")), {}).get("estimated_usd")),
+        -len(row.get("pools", [])),
+        str(row.get("wallet")),
+    ))
     lines = [
-        "🏆 *Monthly LP Leaderboard*",
-        f"Month: *{current_month_key()}*",
-        f"Snapshots used: *{len(snapshots)}* ({', '.join(str(s.get('date')) for s in snapshots)})",
+        "🏆 *WOODY Live LP Leaderboard*",
+        "_Current wallet LP holdings, no monthly rewards._",
+        f"Readable LP pools: *{readable}/{len(pools)}*.",
+        "USD values are estimates for priced pools only.",
+        "Wallets without USD values are shown after valued wallets.",
         "",
     ]
-    for idx, row in enumerate(data.get("rows", []), start=1):
-        avg_value = safe_float(row.get("average_egld"))
-        lines.extend([
-            f"{rank_emoji(idx)} *Wallet*",
-            f"`{short_wallet(str(row.get('wallet')))}`",
-            "",
-            "Average LP:",
-            f"*{fmt_lp(row.get('average_lp'))}*",
-            "",
-            "Average LP Value:",
-            f"*{fmt_egld(avg_value)}*",
-            f"≈ *{fmt_usd(avg_value * egld_usd)}*",
-            "",
-            "Average Share:",
-            f"*{fmt_pct(row.get('share_pct'))}*",
-        ])
-        if reward_pool > 0:
-            lines.extend(["", "Estimated Monthly Reward:", f"*{fmt_egld(rewards.get(str(row.get('wallet')), 0.0))}*"])
-        lines.append("")
+    if not rows:
+        lines.append("No readable wallet LP holdings right now.")
+    for idx, row in enumerate(rows[:20], 1):
+        wallet = str(row.get("wallet") or "")
+        priced = valued.get(wallet)
+        amount = fmt_usd(priced.get("estimated_usd")) if priced else "USD unavailable"
+        lines.append(f"{idx}. `{short_wallet(wallet)}` — *{amount}*")
+        for position in row.get("pools", []):
+            lines.append(f"   • {position.get('pool')}: {safe_float(position.get('lp_amount')):,.6f} LP")
+    pending = [p for p in pools if p.get("status") != "readable"]
+    if pending:
+        lines.extend(["", "*LP ownership unavailable:*"])
+        for pool in pending:
+            lines.append(f"• {pool.get('label')}: {pool.get('reason')}")
+    lines.extend(["", "_Pool LP units are not comparable across different pairs._"])
     return "\n".join(lines)
 
 
@@ -2657,27 +3068,15 @@ def format_lp_snapshot_confirmation(snapshot: Dict[str, Any]) -> str:
 
 
 def get_lp_snapshots_text() -> str:
-    snapshots = get_month_lp_snapshots()
-    schedule_line = "Automatic snapshots: day 1, day 15 and the final day of each month."
-    lines = [
-        "📸 *LP Snapshots*",
-        f"Month: *{current_month_key()}*",
-        f"Pool: `{XEXCHANGE_POOL_ADDRESS}`",
-        schedule_line,
-        "",
-    ]
+    snapshots = get_month_lp_usd_snapshots()
+    lines = ["📸 *WOODY Global LP USD Snapshots*",
+             f"Month: *{current_month_key()}*",
+             "Schedule: day 1, 15 and last day of month", ""]
     if not snapshots:
-        lines.append("No LP snapshots saved for the current month yet.")
-        return "\n".join(lines)
-
-    for idx, snapshot in enumerate(snapshots, start=1):
-        holders = snapshot.get("holders", []) if isinstance(snapshot.get("holders"), list) else []
-        lines.append(
-            f"{idx}. *{snapshot.get('date')}*\n"
-            f"   Holders: *{len(holders)}*\n"
-            f"   LP token: `{snapshot.get('lp_token_id', 'N/A')}`\n"
-            f"   Pool value: *{safe_float(snapshot.get('pool_value_egld')):,.6f} EGLD*"
-        )
+        return "\n".join(lines + ["No verified global USD snapshots saved yet."])
+    for snap in snapshots:
+        lines.append(f"• {snap.get('date')}: {fmt_usd(snap.get('total_eligible_usd'))} "
+                     f"({len(snap.get('holders', []))} wallets)")
     return "\n".join(lines)
 
 
@@ -2685,10 +3084,10 @@ def get_lp_rewards_help_text() -> str:
     saved_pool = get_last_lp_reward_pool()
     lines = [
         "🎁 *LP Rewards*",
-        "Monthly EGLD rewards are calculated proportionally by average LP held.",
+        "Monthly EGLD rewards are calculated proportionally by verified average LP value in USD.",
         "",
         "Formula:",
-        "`Reward = User average LP / Total average LP * Monthly EGLD reward pool`",
+        "`Reward = Wallet average USD / Total average USD * Monthly EGLD reward pool`",
         "",
         "Use command:",
         "`/lp_rewards X`",
@@ -2704,26 +3103,33 @@ def get_lp_rewards_help_text() -> str:
 
 
 def get_lp_rewards_text(reward_pool_egld: float) -> str:
-    return format_rewards_report(reward_pool_egld)
+    data = calculate_monthly_lp_rewards(reward_pool_egld)
+    if not data.get("valuation_complete") or not data.get("rows"):
+        return "⚠️ *LP Rewards*\n\nVerified USD snapshots missing or incomplete. No reward allocations available."
+    lines = ["🎁 *WOODY LP Rewards — Monthly USD-weighted*",
+             f"Reward pool: *{reward_pool_egld:,.6f} EGLD*", ""]
+    for row in data["rows"]:
+        lines.append(f"`{short_wallet(str(row.get('wallet')))}` "
+                     f"{fmt_usd(row.get('average_usd'))} | "
+                     f"{fmt_pct(row.get('share_pct'))} | "
+                     f"{fmt_egld(row.get('reward_egld'))}")
+    return "\n".join(lines)
 
 
 def build_lp_export_csv(reward_pool_egld: Optional[float] = None) -> Tuple[bytes, str]:
     pool = get_last_lp_reward_pool() if reward_pool_egld is None else safe_float(reward_pool_egld)
-    data = calculate_lp_rewards(pool)
-    if data.get("complete") is False:
-        raise ValueError("Some active LP pools are unavailable; reward CSV cannot be verified")
+    data = calculate_monthly_lp_rewards(pool)
+    if not data.get("valuation_complete") or not data.get("rows"):
+        raise ValueError("Verified USD snapshots missing or incomplete; reward export withheld")
     output = StringIO()
     writer = csv.writer(output)
-    writer.writerow(["wallet_address", "average_lp", "percent_of_total", "reward_egld"])
-    for row in data.get("rows", []):
-        writer.writerow([
-            row.get("wallet"),
-            f"{safe_float(row.get('total_egld') if row.get('total_egld') is not None else row.get('average_lp')):.18f}",
-            f"{safe_float(row.get('share_pct')):.8f}",
-            f"{safe_float(row.get('reward_egld')):.18f}",
-        ])
-    filename = f"woody_lp_rewards_{current_month_key()}.csv"
-    return output.getvalue().encode("utf-8"), filename
+    writer.writerow(["wallet_address", "average_usd", "percent_of_total", "reward_egld"])
+    for row in data["rows"]:
+        writer.writerow([row.get("wallet"),
+                         f"{safe_float(row.get('average_usd')):.8f}",
+                         f"{safe_float(row.get('share_pct')):.8f}",
+                         f"{safe_float(row.get('reward_egld')):.18f}"])
+    return output.getvalue().encode("utf-8"), f"woody_lp_rewards_{current_month_key()}.csv"
 
 
 def get_pools_text(title: str = "📦 *WOODY Pools*") -> str:
@@ -4293,12 +4699,12 @@ async def lp_snapshot_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.info("LP_SNAPSHOT_DENIED | user=%s chat=%s", user_id or "?", update.effective_chat.id if update.effective_chat else "?")
         return
 
-    result = await asyncio.to_thread(save_lp_snapshot, True)
+    result = await asyncio.to_thread(save_global_usd_snapshot, True)
     if not result.get("ok"):
         await update.message.reply_text(f"⚠️ LP snapshot could not be saved: {result.get('reason', 'unknown error')}")
         return
 
-    await update.message.reply_text(format_lp_snapshot_confirmation(result.get("snapshot", {})))
+    await update.message.reply_text(f"📸 Global USD snapshot saved: {fmt_usd(result.get('snapshot', {}).get('total_eligible_usd'))}")
 
 
 async def lp_rewards_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4543,7 +4949,7 @@ async def dashboard_status_job(_: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def lp_snapshot_job(_: ContextTypes.DEFAULT_TYPE) -> None:
     try:
-        result = await asyncio.to_thread(save_lp_snapshot)
+        result = await asyncio.to_thread(save_global_usd_snapshot)
         if result.get("ok") and not result.get("skipped"):
             snapshot = result.get("snapshot", {})
             logger.info("LP snapshot job saved %s holders=%s", snapshot.get("date"), len(snapshot.get("holders", [])))
