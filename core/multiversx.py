@@ -2536,6 +2536,8 @@ def build_global_usd_valuation() -> Dict[str, Any]:
                           "reason": "Pool quote token does not match configured token identifier"})
             continue
         quote_symbol = symbol(quote_token).upper() if quote_token else ""
+        woody_reserve = safe_float(snap.get("woody_amount"))
+        quote_reserve = safe_float(snap.get("pair_amount"))
         quote_price = get_verified_quote_usd(quote_token, egld_usd)
         # Value the OneDex WOODY/ONE quote leg from this exact pool's reserve
         # ratio and the WOODY USD reference. Token metadata can lag the live
@@ -2554,8 +2556,6 @@ def build_global_usd_valuation() -> Dict[str, Any]:
         if quote_price.get("confidence") == "indicative":
             prices_indicative = True
         # Stablecoin parity is not assumed: a verified price feed is required.
-        woody_reserve = safe_float(snap.get("woody_amount"))
-        quote_reserve = safe_float(snap.get("pair_amount"))
         pool_usd = woody_reserve * woody_usd + quote_reserve * quote_usd
         if (not result.get("ok") or not snap.get("ok") or woody_usd <= 0
                 or quote_usd <= 0 or woody_reserve <= 0 or quote_reserve <= 0
