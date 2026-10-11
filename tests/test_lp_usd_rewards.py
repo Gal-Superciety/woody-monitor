@@ -274,3 +274,15 @@ def test_unverified_pool_is_not_eligible():
         result = m.build_global_usd_valuation()
     assert result["valuation_complete"] is False
     assert result["pools"][0]["status"] == "unverified"
+
+
+def test_duplicate_lp_holder_address_is_rejected():
+    pool = {"status": "active", "pair_address": "erd1pair", "name": "WOODY/EGLD"}
+    with patch.object(m, "discover_pool_lp_token", return_value="LP-abc"), \
+         patch.object(m, "get_lp_total_supply_raw_and_decimals", return_value=(1000, 0)), \
+         patch.object(m, "get_json", return_value=[
+             {"address": "erd1wallet", "balance": "100"},
+             {"address": "erd1wallet", "balance": "100"}]):
+        result = m.get_lp_holders(pool, require_tvl=False)
+    assert result["ok"] is False
+    assert "Duplicate" in result["reason"]
