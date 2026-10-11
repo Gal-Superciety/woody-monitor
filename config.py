@@ -114,6 +114,7 @@ ONEDEX_POOL_ADDRESS = os.getenv(
 ).strip()
 # Pair 559 was created on-chain for WOODY-5f9d9c / WEGLD-bd4d79 (OneDex createPair event).
 ONEDEX_WOODY_PAIR_ID = _env_int("ONEDEX_WOODY_PAIR_ID", 559, min_value=1)
+ONEDEX_WOODY_ONE_PAIR_ID = _env_int("ONEDEX_WOODY_ONE_PAIR_ID", 0, min_value=0)
 WOODY_USDC_POOL_ADDRESS = os.getenv(
     "WOODY_USDC_POOL_ADDRESS",
     "erd1qqqqqqqqqqqqqpgqjhy8hut0d9rzwqlz37e5nsmlj2rch6vd2jpss7a69j",
@@ -207,7 +208,7 @@ GLOBAL_LP_DUST_EGLD = _env_float("GLOBAL_LP_DUST_EGLD", 0.000001, min_value=0)
 LP_POOLS: List[Dict[str, Any]] = [
     {"dex": "OneDex", "name": "WOODY/WEGLD", "pair_address": ONEDEX_POOL_ADDRESS, "lp_token": "WOODYWEGLD-9832b2", "quote_token": WEGLD, "status": "active"},
     {"dex": "OneDex", "name": "WOODY/BOBER", "pair_address": "", "lp_token": "WOODYBOBER-1a1703", "quote_token": BOBER, "status": "excluded", "reason": "broken pool; excluded from rewards"},
-    {"dex": "OneDex", "name": "WOODY/ONE", "pair_address": "", "lp_token": "WOODYONE-826f23", "quote_token": ONE, "status": "unverified", "reason": "pair id and reserves not verified"},
+    {"dex": "OneDex", "name": "WOODY/ONE", "pair_address": ONEDEX_POOL_ADDRESS, "pair_id": ONEDEX_WOODY_ONE_PAIR_ID, "lp_token": "WOODYONE-826f23", "quote_token": ONE, "status": "active" if ONEDEX_WOODY_ONE_PAIR_ID > 0 else "unverified", "reason": "LP token confirmed on MultiversX; OneDex pair ID and reserves pending verification" if ONEDEX_WOODY_ONE_PAIR_ID <= 0 else ""},
     {"dex": "xExchange", "name": "WOODY/USDC", "pair_address": WOODY_USDC_POOL_ADDRESS, "lp_token": "WOODYUSDC-56b519", "quote_token": USDC_HINT, "status": "active"},
     {"dex": "xExchange", "name": "WOODY/EGLD", "pair_address": XEXCHANGE_POOL_ADDRESS, "lp_token": "WOODYWEGLD-5c3558", "quote_token": WEGLD, "status": "active"},
     {"dex": "xExchange", "name": "WOODY/MEX", "pair_address": WOODY_MEX_POOL_ADDRESS, "lp_token": "WOODYMEX-12e1aa", "quote_token": MEX, "status": "active"},
