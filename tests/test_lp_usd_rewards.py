@@ -414,3 +414,14 @@ def test_jex_olv_has_exact_verified_quote_token_configured():
     assert pool["quote_token"] == OLV
     # JEX pool contract holdings do not prove fungible LP ownership.
     assert pool["lp_token"] == ""
+
+
+def test_jex_reserves_must_not_be_mistaken_for_lp_token():
+    pool = {"dex": "JEX", "name": "WOODY/JEX",
+            "pair_address": "erd1testjexpair", "lp_token": "", "status": "active"}
+    with patch.object(m, "PRICE_CACHE", {}), \
+         patch.object(m, "post_json", return_value=None), \
+         patch.object(m, "get_json", return_value=[
+             {"identifier": "WOODY-5f9d9c", "balance": "1000"},
+             {"identifier": "JEX-9040ca", "balance": "2000"}]):
+        assert m.discover_pool_lp_token(pool) == ""
