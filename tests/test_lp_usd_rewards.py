@@ -413,7 +413,7 @@ def test_jex_olv_has_exact_verified_quote_token_configured():
     assert OLV == "OLV-aa679c"
     assert pool["quote_token"] == OLV
     # JEX pool contract holdings do not prove fungible LP ownership.
-    assert pool["lp_token"] == ""
+    assert pool["lp_token"] == "LPOLVWOOD-29ac00"
 
 
 def test_jex_reserves_must_not_be_mistaken_for_lp_token():
@@ -432,3 +432,14 @@ def test_xexchange_usdc_uses_exact_quote_identifier():
     pool = next(p for p in LP_POOLS if p["dex"] == "xExchange" and p["name"] == "WOODY/USDC")
     assert USDC == "USDC-c76f1f"
     assert pool["quote_token"] == USDC
+
+
+def test_jex_lp_identifiers_verified_on_chain():
+    from config import LP_POOLS
+    expected = {
+        "WOODY/BOBER": "LPWOODBOBE-08e5f1",
+        "WOODY/JEX": "LPWOODJEX-1ea32b",
+        "WOODY/OLV": "LPOLVWOOD-29ac00",
+    }
+    actual = {p["name"]: p["lp_token"] for p in LP_POOLS if p["dex"] == "JEX"}
+    assert actual == expected
