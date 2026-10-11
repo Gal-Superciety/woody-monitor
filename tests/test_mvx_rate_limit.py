@@ -80,3 +80,29 @@ def test_public_liquidity_keeps_pool_visible_when_reserves_are_incomplete(monkey
     assert result[0]["pair"] == "WOODY/OLV"
     assert result[0]["status"] == "unavailable"
     assert "incomplete" in result[0]["reason"]
+
+
+
+def test_public_pool_reserves_returns_recent_cache_without_api_calls(monkeypatch):
+    snapshot = [{
+        "dex": "xExchange",
+        "pair": "WOODY/EGLD",
+        "woodyReserve": 100.0,
+        "quoteReserve": 1.0,
+        "quoteSymbol": "EGLD",
+    }]
+    monkeypatch.setattr(
+        m, "PUBLIC_POOL_RESERVES_CACHE",
+        (snapshot, m.time.monotonic()),
+    )
+    monkeypatch.setattr(m, "PUBLIC_POOL_RESERVES_CACHE_REFRESHING", False)
+
+    def fail_if_fetched():
+        raise AssertionError("a fresh pool snapshot should be served from cache")
+
+    monkeypatch.setattr(m, "_fetch_public_pool_reserves", fail_if_fetched)
+
+    result = m.get_public_pool_reserves()
+
+    assert result[0]["pair"] == "WOODY/EGLD"
+    assert result[0]["snapshotAgeSeconds"] == 0
