@@ -43,7 +43,7 @@ def test_absent_wallet_counts_zero_across_snapshots():
 
 
 def test_global_valuation_requires_quote_usd_price():
-    pool = {"status": "active", "pair_address": "erd1pair", "name": "WOODY/JEX"}
+    pool = {"status": "active", "pair_address": "erd1pair", "name": "WOODY/JEX", "quote_token": "JEX-123"}
     holder_data = {"ok": True, "pool_value_egld": 20, "total_supply_raw": "1000",
                    "holders": [{"wallet": "erd1wallet", "balance_raw": "500", "estimated_egld": 10}]}
     snap = {"ok": True, "woody_amount": 1000, "pair_amount": 100,
@@ -60,7 +60,7 @@ def test_global_valuation_requires_quote_usd_price():
 
 
 def test_global_valuation_sums_independent_token_legs():
-    pool = {"status": "active", "pair_address": "erd1pair", "name": "WOODY/EGLD"}
+    pool = {"status": "active", "pair_address": "erd1pair", "name": "WOODY/EGLD", "quote_token": m.WEGLD}
     holder_data = {"ok": True, "pool_value_egld": 40, "total_supply_raw": "1000",
                    "holders": [{"wallet": "erd1wallet", "balance_raw": "250", "estimated_egld": 10}]}
     snap = {"ok": True, "woody_amount": 1000, "pair_amount": 20,
@@ -159,7 +159,7 @@ def test_rewards_withheld_if_duplicate_checkpoint():
 
 
 def test_global_usd_lp_holders_do_not_require_egld_tvl():
-    pool = {"status": "active", "pair_address": "erd1pair", "name": "WOODY/EGLD"}
+    pool = {"status": "active", "pair_address": "erd1pair", "name": "WOODY/EGLD", "quote_token": m.WEGLD}
     holder_data = {"ok": True, "total_supply_raw": "1000",
                    "holders": [{"wallet": "erd1wallet", "balance_raw": "250"}]}
     snap = {"ok": True, "woody_amount": 1000, "pair_amount": 20,
@@ -176,7 +176,7 @@ def test_global_usd_lp_holders_do_not_require_egld_tvl():
 
 
 def test_lp_holders_reject_supply_exceeded_without_tvl():
-    pool = {"status": "active", "pair_address": "erd1pair", "name": "WOODY/JEX"}
+    pool = {"status": "active", "pair_address": "erd1pair", "name": "WOODY/JEX", "quote_token": "JEX-123"}
     with patch.object(m, "discover_pool_lp_token", return_value="LP-abc"), \
          patch.object(m, "get_lp_total_supply_raw_and_decimals", return_value=(100, 0)), \
          patch.object(m, "get_json", return_value=[
@@ -189,7 +189,7 @@ def test_lp_holders_reject_supply_exceeded_without_tvl():
 
 
 def test_metadata_quote_produces_indicative_not_reward_eligible_valuation():
-    pool = {"status": "active", "pair_address": "erd1pair", "name": "WOODY/JEX"}
+    pool = {"status": "active", "pair_address": "erd1pair", "name": "WOODY/JEX", "quote_token": "JEX-abc123"}
     holder_data = {"ok": True, "total_supply_raw": "1000",
                    "holders": [{"wallet": "erd1wallet", "balance_raw": "250"}]}
     snap = {"ok": True, "woody_amount": 1000, "pair_amount": 100,
