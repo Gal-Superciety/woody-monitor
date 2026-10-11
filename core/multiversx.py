@@ -2314,14 +2314,9 @@ def discover_pool_lp_token(pool: Dict[str, Any], force_refresh: bool = False) ->
                 PRICE_CACHE[cache_key] = (decoded, now)
                 return decoded
 
-    data = get_json(f"{MVX_API}/accounts/{pair_address}/tokens")
-    if isinstance(data, list):
-        reserve_ids = {str(x.get("identifier") or "") for x in data}
-        candidates = [t for t in reserve_ids if t and t != WOODY and "WOODY" in t.upper()]
-        if candidates:
-            token = sorted(candidates, key=len)[0]
-            PRICE_CACHE[cache_key] = (token, now)
-            return token
+    # Reserve balances are not proof of LP ownership. A pool's token holdings
+    # may contain WOODY or another WOODY-named asset; never guess an LP ID.
+    # Only explicit configuration or a verified contract view can identify LP.
     PRICE_CACHE[cache_key] = ("", now)
     return ""
 
