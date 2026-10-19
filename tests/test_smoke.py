@@ -233,7 +233,7 @@ def test_liquidity_invalid_sides_returns_none() -> None:
     assert main.classify_tx(tx_remove_missing_woody) is None
 
 
-def test_woody_only_transfer_is_classified_from_net_woody_delta() -> None:
+def test_woody_only_transfer_is_not_classified_as_a_trade() -> None:
     tx = {
         "txHash": "hash-woody-transfer",
         "operations": [
@@ -246,10 +246,55 @@ def test_woody_only_transfer_is_classified_from_net_woody_delta() -> None:
             },
         ],
     }
+    assert main.classify_tx(tx) is None
+
+
+def test_same_direction_woody_and_quote_transfer_is_not_a_trade() -> None:
+    tx = {
+        "txHash": "hash-multi-token-wallet-transfer",
+        "operations": [
+            {
+                "identifier": main.WOODY,
+                "value": str(150 * (10 ** 18)),
+                "decimals": 18,
+                "sender": "erd1alice",
+                "receiver": "erd1bob",
+            },
+            {
+                "identifier": "USDC-c76f1f",
+                "value": str(50 * (10 ** 6)),
+                "decimals": 6,
+                "sender": "erd1alice",
+                "receiver": "erd1bob",
+            },
+        ],
+    }
+
+    assert main.classify_tx(tx) is None
+
+
+def test_router_routed_sell_without_quote_is_still_detected(monkeypatch) -> None:
+    wallet = "erd1router_sell_wallet"
+    monkeypatch.setattr(main, "ROUTER_ADDRESS", "erd1router")
+    monkeypatch.setattr(main, "recover_quote_received_from_full_tx", lambda *args: ({}, wallet))
+    tx = {
+        "txHash": "hash-router-sell-no-quote",
+        "operations": [
+            {
+                "identifier": main.WOODY,
+                "value": str(500 * (10 ** 18)),
+                "decimals": 18,
+                "sender": wallet,
+                "receiver": main.ROUTER_ADDRESS,
+            }
+        ],
+    }
+
     parsed = main.classify_tx(tx)
+
     assert parsed is not None
-    assert parsed["type"] in {"BUY", "SELL"}
-    assert parsed["woody_amount"] == 150
+    assert parsed["type"] == "SELL"
+    assert parsed["dex"] == "Router"
 
 
 def test_xexchange_real_hash_style_wrap_and_swap_is_buy() -> None:

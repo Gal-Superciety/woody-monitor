@@ -3905,6 +3905,12 @@ def detect_pool_dex(tx: dict) -> str:
         if pool_addr in addresses:
             return label
 
+    # Routed swaps may expose only the wallet-to-router leg when quote-side
+    # transfers are missing from the API response.
+    router_address = str(ROUTER_ADDRESS or "").strip()
+    if router_address and router_address in addresses:
+        return "Router"
+
     for lp_token, label in LP_TOKEN_LABELS.items():
         if tx_contains_token(tx, lp_token):
             return label
@@ -4491,6 +4497,19 @@ def classify_tx(tx: dict) -> Optional[Dict[str, Any]]:
     quote_sent_total = sum(quote_sent.values())
     quote_received_total = sum(quote_received.values())
     net_quote = quote_received_total - quote_sent_total
+
+    # A WOODY balance change alone is not proof of a trade. Require a quote
+    # flow in the opposite direction, or evidence of a monitored DEX/router.
+    has_opposing_quote_flow = (
+        quote_sent_total > 0 if net_woody > 0 else quote_received_total > 0
+    )
+    if not has_opposing_quote_flow and dex == "Unknown":
+        logger.info(
+            "TX DEBUG | root=%s CLASSIFIED_AS=NONE "
+            "SKIP_REASON=WOODY_TRANSFER_WITHOUT_QUOTE_OR_DEX",
+            root_hash,
+        )
+        return None
 
     detected: Optional[Dict[str, Any]] = None
 
