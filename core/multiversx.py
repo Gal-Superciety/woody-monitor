@@ -3905,6 +3905,12 @@ def detect_pool_dex(tx: dict) -> str:
         if pool_addr in addresses:
             return label
 
+    # Routed swaps may expose only the wallet-to-router leg when quote-side
+    # transfers are missing from the API response.
+    router_address = str(ROUTER_ADDRESS or "").strip()
+    if router_address and router_address in addresses:
+        return "Router"
+
     for lp_token, label in LP_TOKEN_LABELS.items():
         if tx_contains_token(tx, lp_token):
             return label
