@@ -249,6 +249,30 @@ def test_woody_only_transfer_is_not_classified_as_a_trade() -> None:
     assert main.classify_tx(tx) is None
 
 
+def test_same_direction_woody_and_quote_transfer_is_not_a_trade() -> None:
+    tx = {
+        "txHash": "hash-multi-token-wallet-transfer",
+        "operations": [
+            {
+                "identifier": main.WOODY,
+                "value": str(150 * (10 ** 18)),
+                "decimals": 18,
+                "sender": "erd1alice",
+                "receiver": "erd1bob",
+            },
+            {
+                "identifier": "USDC-c76f1f",
+                "value": str(50 * (10 ** 6)),
+                "decimals": 6,
+                "sender": "erd1alice",
+                "receiver": "erd1bob",
+            },
+        ],
+    }
+
+    assert main.classify_tx(tx) is None
+
+
 def test_router_routed_sell_without_quote_is_still_detected(monkeypatch) -> None:
     wallet = "erd1router_sell_wallet"
     monkeypatch.setattr(main, "ROUTER_ADDRESS", "erd1router")
