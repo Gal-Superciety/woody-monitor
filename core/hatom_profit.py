@@ -123,6 +123,65 @@ class MarketData:
         symbol = str(payload.get("ticker") or token.split("-")[0])[:20]
         return Asset(token, symbol, d, price, now)
 
+    def dex_quote(self, token_in: str, token_out: str, amount_in_raw: int) -> dict[str, Any]:
+        """Get a bounded exact-input read-only XOXNO route quote."""
+
+        def canonical(token: str) -> str:
+            result = "WEGLD-bd4d79" if token == "EGLD" else token
+            if not _ESDT.fullmatch(result):
+                raise QuoteUnavailable("Unsupported swap token")
+            return result
+
+        source = canonical(token_in)
+        dest = canonical(token_out)
+        quantity = _nonnegative_int(amount_in_raw)
+        if source == dest:
+            return {
+                "amount_out_min_raw": quantity,
+                "amount_out_raw": quantity,
+                "route_count": 0,
+                "quote_received_at": time.time(),
+                "provider": "same-underlying (no swap)",
+            }
+        if quantity <= 0:
+            raise QuoteUnavailable("DEX amount is zero")
+        try:
+            response = self.session.get(
+                "https://swap.xoxno.com/api/v1/quote",
+                params={
+                    "from": source, "to": dest, "amountIn": str(quantity),
+                    "includePaths": "true", "strict": "true",
+                },
+                timeout=self.timeout, allow_redirects=False,
+                headers={"Accept": "application/json"},
+            )
+            response.raise_for_status()
+            if len(response.content) > 500_000:
+                raise QuoteUnavailable("DEX quote too large")
+            data = response.json()
+        except (requests.RequestException, ValueError) as exc:
+            raise QuoteUnavailable("DEX routing quote unavailable") from exc
+        if not isinstance(data, dict):
+            raise QuoteUnavailable("DEX quote not an object")
+        if data.get("from") != source or data.get("to") != dest:
+            raise QuoteUnavailable("DEX route token IDs mismatch")
+        if str(data.get("amountIn")) != str(quantity):
+            raise QuoteUnavailable("DEX route input quantity mismatch")
+        output = _nonnegative_int(data.get("amountOut"))
+        minimum = _nonnegative_int(data.get("amountOutMin"))
+        paths = data.get("paths")
+        if output <= 0 or minimum <= 0 or minimum > output:
+            raise QuoteUnavailable("DEX output quote invalid")
+        if not isinstance(paths, list) or not paths or len(paths) > 20:
+            raise QuoteUnavailable("DEX has no usable route paths")
+        return {
+            "amount_out_min_raw": minimum,
+            "amount_out_raw": output,
+            "route_count": len(paths),
+            "quote_received_at": time.time(),
+            "provider": "XOXNO MultiversX public quote",
+        }
+
     def gas_price(self) -> int:
         response = self._json(GATEWAY + "/network/config", max_age=180)
         config = response.get("data")
