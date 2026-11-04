@@ -12,7 +12,6 @@ import logging
 import os
 import re
 import time
-from decimal import Decimal
 from typing import Any
 
 import requests
