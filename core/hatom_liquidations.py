@@ -510,7 +510,7 @@ async def dryrun_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("Hatom Watch is paused or not in on-chain mode.")
         return
     from core.hatom_digest import state_snapshot
-    from core.hatom_dryrun import dryrun, format_report, DryRunUnavailable
+    from core.hatom_dryrun import dryrun, format_report
     requested = _profit_requested_borrowers(update, context)
     if requested:
         wallets = requested[:1]
