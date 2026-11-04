@@ -309,9 +309,9 @@ def _amount(number: Decimal) -> str:
 
 
 def format_scenario(result: dict[str, Any]) -> list[str]:
-    """Never describe an assumption-based scenario as realized or verified profit."""
+    """Format indicative pricing and executable-route snapshot separately."""
     sign = "+" if result["scenario_net_usd"] >= 0 else ""
-    return [
+    lines = [
         f"   Repay: {_amount(result['repay_units'])} {result['repay_symbol']} "
         f"({_money(result['repay_usd'])})",
         f"   Recover: {_amount(result['collateral_units'])} {result['collateral_symbol']} "
@@ -320,9 +320,21 @@ def format_scenario(result: dict[str, Any]) -> list[str]:
         f"   Assumed swap loss ({result['assumed_slippage_bps']/100:.2f}%): "
         f"{_money(result['assumed_swap_cost_usd'])}",
         f"   Assumed gas: {_money(result['assumed_gas_cost_usd'])}",
-        f"   Scenario net (NOT EXECUTABLE): {sign}{_money(result['scenario_net_usd'])}",
+        f"   Reference-price scenario net: {sign}{_money(result['scenario_net_usd'])}",
     ]
-
+    if result.get("quote_min_usd") is not None:
+        minimum = result["quote_min_usd"]
+        after_gas = result["quote_net_after_assumed_gas_usd"]
+        sign2 = "+" if after_gas >= 0 else ""
+        lines.extend([
+            f"   LIVE DEX MIN-OUT QUOTE: {_money(minimum)}",
+            f"   DEX-min scenario after ASSUMED gas: {sign2}{_money(after_gas)}",
+            f"   Quote routes: {result['dex_quote']['route_count']}",
+        ])
+    else:
+        lines.append(f"   Live DEX quote unavailable: {result.get('dex_quote_error') or 'no route'}")
+    lines.append("   NOT AN EXECUTABLE OR VERIFIED PROFIT QUOTE")
+    return lines
 
 def explain_missing(exc: Exception) -> str:
     return str(exc)[:90] if isinstance(exc, QuoteUnavailable) else "Market data or valuation failed"
