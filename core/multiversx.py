@@ -3760,6 +3760,7 @@ def admin_menu_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🧠 Wallet Intel", callback_data="wallet_intelligence"), InlineKeyboardButton("📈 Accumulation", callback_data="accumulation_detection")],
         [InlineKeyboardButton("⚠️ Fake Pump", callback_data="fake_pump_detection"), InlineKeyboardButton("🧪 Diagnostics", callback_data="diagnostics")],
         [InlineKeyboardButton("🤖 Bot Status", callback_data="bot_status")],
+        [InlineKeyboardButton("🔐 Hatom Watch (Private)", callback_data="hatom_watch")],
         [InlineKeyboardButton("◀️ Back", callback_data="menu_back")],
     ])
 
@@ -5315,6 +5316,11 @@ async def menu_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         is_public = is_public_menu_context(query.message.chat.type if query.message and query.message.chat else None, query.from_user.id if query.from_user else None)
         logger.info("AI_STATUS_BUTTON_USED | user=%s chat=%s public=%s", query.from_user.id if query.from_user else "?", query.message.chat_id if query.message else "?", is_public)
         await query.message.reply_text(await asyncio.to_thread(get_ai_status_text, is_public), parse_mode=ParseMode.MARKDOWN)
+    elif query.data == "hatom_watch":
+        if is_public:
+            return
+        from core.hatom_liquidations import status_text as hatom_status_text
+        await query.message.reply_text(hatom_status_text())
     elif query.data == "diagnostics":
         if is_public_menu_context(query.message.chat.type if query.message and query.message.chat else None, query.from_user.id if query.from_user else None):
             return
@@ -5536,6 +5542,8 @@ def main() -> None:
     app.add_handler(CommandHandler("testalert", testalert_command))
     from core.community_updates import register as register_community_updates
     register_community_updates(app)
+    from core.hatom_liquidations import register as register_hatom_liquidations
+    register_hatom_liquidations(app)
     app.add_handler(CallbackQueryHandler(menu_callbacks))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, greeting_handler))
 
