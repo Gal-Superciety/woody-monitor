@@ -89,6 +89,27 @@ class VmTests(unittest.TestCase):
         ])
         self.assertEqual(session.post.call_args_list[1].kwargs["json"]["args"][-1], "fa")
 
+    def test_preflight_rejects_insufficient_seizable_borrower_collateral(self):
+        blobs = [
+            (5 * 10**17).to_bytes(8, "big"), bytes([1]),
+            (150).to_bytes(2, "big"), (100).to_bytes(2, "big"),
+        ]
+        session = Mock()
+        outputs = []
+        for blob in blobs:
+            response = Mock()
+            response.content = b"ok"
+            response.json.return_value = result(blob)
+            outputs.append(response)
+        session.post.side_effect = outputs
+        client = VmClient(session=session)
+        self.assertIsNone(
+            client.meaningful_liquidation_check(CONTROLLER, CONTROLLER, CONTROLLER, 1000)
+        )
+        functions = [c.kwargs["json"]["funcName"] for c in session.post.call_args_list]
+        self.assertEqual(functions[-1], "getAccountTokens")
+        self.assertNotIn("getCash", functions)
+
     def test_repay_preflight_rejects_small_debt(self):
         session = Mock()
         client = VmClient(session=session)
