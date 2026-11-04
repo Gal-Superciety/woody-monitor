@@ -318,3 +318,18 @@ Primary references:
 * https://docs.hatom.com/getting-started/hatoms-ecosystem/lending-protocol/networks
 * https://github.com/HatomProtocol/hatom-sc-proxies
 * https://docs.multiversx.com/sdk-and-tools/rest-api/virtual-machine/
+
+### Important: Unpriced liquidation alerts are suppressed
+
+As of November 2026, the Hatom on-chain scanner validates risk indicators
+but **does not provide executable net-profit quotes**. All automatic
+liquidation alerts are therefore blocked, including signals from optional
+external feeds. A positive `isRisky` / `liquidateBorrowAllowed` result
+is not proof of profit. Scans may continue for private diagnostic status,
+but they will not message the admin about unpriced positions.
+
+Before restoring real profit alerts, implement and test token decimal
+resolution, actual repay limits, oracle freshness, seize amounts, current
+DEX liquidation routes, slippage, fees, and a configurable minimum **net**
+profit margin. Deduplicate by borrower and best executable collateral/debt
+route. Keep liquidation execution disabled until separately authorized.

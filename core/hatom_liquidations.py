@@ -29,6 +29,7 @@ _STATE: dict[str, Any] = {
     "last_error": None,
     "last_candidates": 0,
     "sent": 0,
+    "suppressed_unpriced": 0,
 }
 
 # This is intentionally NOT the shared WOODY chat_targets() helper.
@@ -206,46 +207,26 @@ async def scan(context: ContextTypes.DEFAULT_TYPE) -> int:
         _STATE["last_poll"] = datetime.now(timezone.utc).isoformat()
         _STATE["last_error"] = None
         _STATE["last_candidates"] = len(positions)
+        _STATE["suppressed_unpriced"] = len(positions)
     except Exception as exc:
         _STATE["last_error"] = type(exc).__name__
         logger.warning("Hatom watch scan failed (%s)", type(exc).__name__)
         return 0
 
-    now = time.time()
-    sent = 0
-    for position in positions:
-        if sent >= 5:  # guard against floods on a first scan
-            break
-        key = (position["borrower"], position.get("borrow_market", position["debt_token"]), position.get("collateral_market", position["collateral_token"]))
-        last = _LAST_ALERTS.get(key)
-        if last and last[0] == position["category"] and now - last[1] < _cooldown():
-            continue
-        try:
-            await context.bot.send_message(
-                chat_id=admin,  # never the public group ID
-                text=_message(position),
-                disable_web_page_preview=True,
-            )
-        except Exception as exc:
-            logger.warning("Hatom private alert delivery failed (%s)", type(exc).__name__)
-            _STATE["last_error"] = type(exc).__name__
-            break
-        _LAST_ALERTS[key] = (position["category"], now)
-        sent += 1
-        _STATE["sent"] += 1
+    # Risk indicators are not executable liquidation profit quotes.
+    # Missing: repay limits, token decimals, fresh oracle prices, DEX quotes,
+    # liquidation collateral recovery, gas costs, and slippage.
+    # DO NOT dispatch an alert until these inputs are actually validated.
+    logger.info("HATOM_UNPRICED_SIGNALS_SUPPRESSED | observed=%s", len(positions))
+    return 0
 
-    if len(_LAST_ALERTS) > 2000:
-        for key, (_, when) in list(_LAST_ALERTS.items()):
-            if now - when > max(_cooldown(), 86400):
-                _LAST_ALERTS.pop(key, None)
-    return sent
 
 
 def status_text() -> str:
     enabled = _enabled()
     configured = _ready()
     admin_ok = _admin_id() is not None
-    status = "ACTIVE" if enabled and configured and admin_ok else "NOT ACTIVE"
+    status = "SCAN-ONLY (NO PROFIT ALERTS)" if enabled and configured and admin_ok else "PAUSED"
     return (
         "🔐 Hatom Watch — Private Admin\n"
         f"State: {status}\n"
@@ -253,7 +234,9 @@ def status_text() -> str:
         f"Discovery source: {_source()}\n"
         f"Discovery configured: {'yes' if configured else 'no'}\n"
         f"Admin private destination: {'configured' if admin_ok else 'missing'}\n"
-        f"Recent candidates: {_STATE['last_candidates']}\n"
+        f"Unpriced risk signals on last scan: {_STATE['last_candidates']}\n"
+        "Net-profit validation: NOT IMPLEMENTED\n"
+        "Automatic liquidation alerts: BLOCKED\n"
         f"Alerts delivered this session: {_STATE['sent']}\n"
         f"Last successful poll: {_STATE['last_poll'] or 'never'}\n"
         f"Last error: {_STATE['last_error'] or 'none'}\n\n"
@@ -289,7 +272,7 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("Hatom Watch inactive. Configure ENABLE_HATOM_WATCH=true with HATOM_WATCH_SOURCE=onchain or a trusted feed.")
         return
     sent = await scan(context)
-    await update.message.reply_text(f"Hatom scan complete. New private alerts sent: {sent}.\n{status_text()}")
+    await update.message.reply_text(f"Hatom scan complete. Verified-profit alerts sent: {sent}.\n{status_text()}")
 
 
 def register(app: Application) -> None:
