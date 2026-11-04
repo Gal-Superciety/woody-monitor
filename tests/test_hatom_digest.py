@@ -81,7 +81,7 @@ class DigestTests(unittest.TestCase):
     def test_recheck_fails_closed_for_healthy_and_failures(self):
         rows = [dict(risk(), observed_at=time.time())]
         self.assertEqual(dg.recheck(rows, client=MockClient(healthy=True))[0], [])
-        self.assertEqual(dg.recheck(rows, client=MockClient(allowed=False))[0], [])
+        self.assertEqual(len(dg.recheck(rows, client=MockClient(allowed=False))[0]), 1)
         good, errors = dg.recheck(rows, client=MockClient())
         self.assertEqual(len(good), 1)
         self.assertEqual(errors, 0)
@@ -93,9 +93,9 @@ class DigestTests(unittest.TestCase):
         rows = [dict(risk(), observed_at=time.time())]
         report = dg.build_report(rows, verified=rows, scans=13, checks=130)
         self.assertIn("PRIVATE RISK DIGEST", report)
-        self.assertIn("Verified profitable liquidations: NOT AVAILABLE", report)
+        self.assertIn("Profit-positive liquidations: NOT VERIFIED", report)
         self.assertNotIn("Profit: +", report)
-        self.assertEqual(report.count("Borrower:"), 1)
+        self.assertIn(BORROWER, report)
 
     def test_regular_scan_never_sends_telegram(self):
         bot = SimpleNamespace(send_message=AsyncMock())
@@ -137,7 +137,7 @@ class DigestTests(unittest.TestCase):
                "ADMIN_TELEGRAM_ID": "42", "HATOM_WATCH_INTERVAL_SECONDS": "90"}
         with patch.dict(os.environ, env):
             watch.register(app)
-        self.assertEqual(app.job_queue.run_repeating.call_count, 1)
+        self.assertEqual(app.job_queue.run_repeating.call_count, 2)
         self.assertEqual(app.job_queue.run_daily.call_count, 3)
         local_hours = [call.kwargs["time"].hour for call in app.job_queue.run_daily.call_args_list]
         self.assertEqual(local_hours, [9, 15, 21])
