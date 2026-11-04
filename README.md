@@ -278,3 +278,43 @@ transactions or touches wallet keys.
 
 See Hatom's official [liquidation documentation](https://docs.hatom.com/getting-started/hatoms-ecosystem/lending-protocol/liquidation).
 Run offline tests with `python -m unittest tests.test_hatom_liquidations`.
+
+
+### Native Hatom mainnet scanner (no external feed)
+
+Set the following variables on Railway to request **read-only** smart
+contract scanning. It never signs transactions, and Hatom messages go only
+to `ADMIN_TELEGRAM_ID` (a Telegram private chat, never the WOODY group).
+
+```env
+ENABLE_HATOM_WATCH=true
+HATOM_WATCH_SOURCE=onchain
+HATOM_ONCHAIN_BATCH_SIZE=15
+HATOM_WATCH_INTERVAL_SECONDS=60
+```
+
+The code calls `https://gateway.multiversx.com/vm-values/query`
+directly with Hatom's documented mainnet Controller
+`erd1qqqqqqqqqqqqqpgqxp28qpnv7rfcmk6qrgxgw5uf2fnp84ar78ssqdk6hr`.
+
+Sequence: `getWhitelistedMarkets`, periodic `getMarketMembers`,
+`isRisky`, `getAccountMarkets`, `getCurrentAccountBorrowAmount`,
+`getAccountTokens`, and `liquidateBorrowAllowed` (small probe
+amount, view-only). Scan batches are capped at 100 wallets per poll, with
+a default of 15. The index gradually discovers participating addresses.
+If a view fails, nothing is sent; we do not invent portfolio values.
+
+**Limitations:** Verification against the live mainnet query responses is
+still required. A positive risk/allow check is an indicative on-chain
+signal, not a profitable opportunity. This monitor does not evaluate
+borrow-market decimal precision, close factors, gas, routing, or slippage
+for actual execution. It does not liquidate. In particular,
+`getMarketMembers` may be expensive for very large markets, and a
+production low-latency liquidator would require a dedicated event indexer.
+
+Offline unit tests: `pytest tests/test_hatom_onchain.py tests/test_hatom_liquidations.py`.
+
+Primary references:
+* https://docs.hatom.com/getting-started/hatoms-ecosystem/lending-protocol/networks
+* https://github.com/HatomProtocol/hatom-sc-proxies
+* https://docs.multiversx.com/sdk-and-tools/rest-api/virtual-machine/
