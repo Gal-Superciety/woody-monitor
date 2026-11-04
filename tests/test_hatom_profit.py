@@ -82,6 +82,27 @@ class CalcTests(unittest.TestCase):
         self.assertIn("60 EGLD", output)
         self.assertIn("NOT AN EXECUTABLE", output)
 
+    def test_live_route_minimum_return_scenario(self):
+        class RoutedPrices(FakePrices):
+            def dex_quote(self, from_token, to_token, amount_in):
+                self.quote_args = (from_token, to_token, amount_in)
+                return {
+                    "amount_out_min_raw": 205000000,
+                    "amount_out_raw": 207000000,
+                    "route_count": 2,
+                }
+
+        prices = RoutedPrices()
+        result = calc.estimate(risk(), vm=FakeVM(), prices=prices)
+        self.assertEqual(prices.quote_args, ("EGLD", "USDC-c76f1f", 60 * 10**18))
+        self.assertEqual(result["quote_min_units"], Decimal("205"))
+        self.assertEqual(result["quote_min_usd"], Decimal("205"))
+        self.assertEqual(result["quote_net_after_assumed_gas_usd"], Decimal("4.790"))
+        self.assertFalse(result["verified_profit"])
+        message = "\n".join(calc.format_scenario(result))
+        self.assertIn("LIVE DEX MIN-OUT: 205 USDC", message)
+        self.assertIn("NOT AN EXECUTABLE OR VERIFIED PROFIT QUOTE", message)
+
     def test_fail_closed_when_no_token_or_price(self):
         invalid = risk()
         invalid["category"] = "ONCHAIN_RISKY"
