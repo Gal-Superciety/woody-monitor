@@ -102,9 +102,11 @@ class StubClient:
     def collateral_tokens(self, market, borrower):
         return 1500 if market == self.collateral else 0
 
-    def liquidation_allowed(self, borrow_market, collateral_market, borrower, repay_raw):
-        self.calls.append(("allowed", repay_raw))
-        return self.mode == "allowed"
+    def meaningful_liquidation_check(self, borrow_market, collateral_market, borrower, borrow_raw):
+        self.calls.append(("meaningful", borrow_raw))
+        if self.mode != "allowed":
+            return None
+        return {"repay_raw": borrow_raw // 4, "seized_htokens_raw": 120, "collateral_underlying_raw": 120}
 
 
 class ScannerTests(unittest.TestCase):
@@ -115,16 +117,18 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(len(candidates), 1)
         candidate = candidates[0]
         self.assertEqual(candidate["borrower"], client.borrower)
-        self.assertEqual(candidate["category"], "ONCHAIN_RISKY")
+        self.assertEqual(candidate["category"], "ONCHAIN_ELIGIBLE")
         self.assertIsNone(candidate["max_repay_usd"])
         self.assertEqual(candidate["borrow_market"], client.market)
-        self.assertIn(("allowed", 1), client.calls)
+        self.assertIn(("meaningful", 500), client.calls)
 
-    def test_does_not_alert_when_liquidation_check_refuses(self):
+    def test_refused_liquidation_stays_at_risk_stage(self):
         client = StubClient()
         client.mode = "refused"
         scanner = HatomScanner(client, batch=2, refresh_seconds=3600)
-        self.assertEqual(scanner.scan(), [])
+        found = scanner.scan()
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["category"], "ONCHAIN_RISKY")
 
     def test_initial_market_index_warms_up_over_first_polls(self):
         client = StubClient()
