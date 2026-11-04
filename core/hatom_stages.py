@@ -39,7 +39,7 @@ def _file() -> Path:
 
 
 def _load() -> None:
-    global _INITIALIZED, _NOTIFIED, _LAST_BATCH
+    global _INITIALIZED, _LAST_BATCH
     with _LOCK:
         if _INITIALIZED:
             return
