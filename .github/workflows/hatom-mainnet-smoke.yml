@@ -33,6 +33,20 @@ jobs:
           underlying = client.collateral_underlying(markets[0], theoretical_seize)
           assert theoretical_seize > 0 and underlying > 0
           print("seize and collateral conversion views: OK")
+          from core.hatom_profit import MarketData, underlying_id, QuoteUnavailable
+          debt_token = underlying_id(client, markets[0])
+          print("First market underlying identifier:", debt_token)
+          meta = MarketData(timeout=8)
+          egld_price = meta.asset("EGLD")
+          print("EGLD reference price exists:", egld_price.price_usd > 0)
+          print("Gas min price:", meta.gas_price())
+          try:
+              asset = meta.asset(debt_token)
+              print("First market asset metadata:", asset.token, asset.decimals)
+              assert asset.price_usd > 0
+          except QuoteUnavailable as exc:
+              print("First market valuation fail-closed:", str(exc))
+
           if members:
               print("first member queried for risk (address not displayed)")
               print("isRisky bool:", client.risky(members[0]))
