@@ -199,6 +199,74 @@ class VmClient:
             raise ValueError("Unexpected collateral amount response")
         return _decode_uint(data[0])
 
+    @staticmethod
+    def _raw_arg(number: int) -> bytes:
+        if number <= 0:
+            raise ValueError("Amount must be positive")
+        return number.to_bytes(max(1, (number.bit_length() + 7) // 8), "big")
+
+    def close_factor(self, market: str) -> int:
+        values = self.query(market, "getCloseFactor")
+        if len(values) != 1:
+            raise ValueError("Invalid close factor response")
+        factor = _decode_uint(values[0])
+        if not 0 < factor <= 10**18:
+            raise ValueError("Close factor outside expected WAD range")
+        return factor
+
+    def seized_htokens(self, debt_market: str, collateral_market: str, repay_raw: int) -> int:
+        values = self.query(self.controller, "tokensToSeize", [
+            address_decode(debt_market), address_decode(collateral_market),
+            self._raw_arg(repay_raw)
+        ])
+        if len(values) != 1:
+            raise ValueError("Invalid seize quote")
+        seized = _decode_uint(values[0])
+        if seized <= 0:
+            raise ValueError("Nothing to seize")
+        return seized
+
+    def collateral_underlying(self, market: str, seized_htokens: int) -> int:
+        values = self.query(market, "currentTokensToUnderlyingAmount", [self._raw_arg(seized_htokens)])
+        if len(values) != 1:
+            raise ValueError("Invalid underlying conversion")
+        result = _decode_uint(values[0])
+        if result <= 0:
+            raise ValueError("Zero collateral conversion")
+        return result
+
+    def market_cash(self, market: str) -> int:
+        values = self.query(market, "getCash")
+        if len(values) != 1:
+            raise ValueError("Invalid market cash")
+        return _decode_uint(values[0])
+
+    def meaningful_liquidation_check(self, debt_market: str, collateral_market: str,
+                                     borrower: str, borrow_raw: int) -> dict[str, int] | None:
+        """Fail-closed on-chain *eligibility*, NOT a profit or execution guarantee.
+
+        Repay a test fraction of the actual debt (1/4, capped by close factor),
+        check allow-view, seized hTokens, underlying redemption and market cash.
+        Values are raw token units, NEVER denominated fiat amounts.
+        """
+        if borrow_raw <= 1:
+            return None
+        close_factor = self.close_factor(debt_market)
+        repay = min(borrow_raw // 4, borrow_raw * close_factor // 10**18)
+        if repay <= 1:
+            return None
+        if not self.liquidation_allowed(debt_market, collateral_market, borrower, repay):
+            return None
+        seized = self.seized_htokens(debt_market, collateral_market, repay)
+        recovered_underlying = self.collateral_underlying(collateral_market, seized)
+        if self.market_cash(collateral_market) < recovered_underlying:
+            return None
+        return {
+            "repay_raw": repay,
+            "seized_htokens_raw": seized,
+            "collateral_underlying_raw": recovered_underlying,
+        }
+
     def liquidation_allowed(self, borrow_market: str, collateral_market: str,
                             borrower: str, repay_raw: int) -> bool:
         data = self.query(self.controller, "liquidateBorrowAllowed", [
@@ -292,20 +360,16 @@ class HatomScanner:
                             self.status["rejected_oracle_or_contract"] += 1
                     if not borrow_pairs or not collateral_markets:
                         continue
-                    # Contract-level allow-check on a tiny repay amount, NOT a live
-                    # quote or guaranteed profitable/executable liquidation.
+                    # Stage 1: contract reports debt and risky collateral.
+                    # Stage 2: fresh view methods confirm a meaningful repayment
+                    # and nonzero redeemable collateral, NOT net-profit or fill.
+                    candidate = None
                     for debt_market, raw_amount in borrow_pairs[:4]:
+                        if candidate is not None:
+                            break
                         for collateral_market in collateral_markets[:4]:
-                            try:
-                                allowed = self.client.liquidation_allowed(
-                                    debt_market, collateral_market, borrower, 1
-                                )
-                            except (ValueError, requests.RequestException) as exc:
-                                self.status["rejected_oracle_or_contract"] += 1
-                                logger.warning("Hatom allow check failed (%s)", type(exc).__name__)
-                                continue
-                            if allowed:
-                                found.append({
+                            if candidate is None:
+                                candidate = {
                                     "borrower": borrower,
                                     "debt_token": "market-contract",
                                     "collateral_token": "market-contract",
@@ -316,10 +380,26 @@ class HatomScanner:
                                     "max_repay_usd": None,
                                     "category": "ONCHAIN_RISKY",
                                     "observed_at": time.time(),
-                                })
-                                break
-                        if len(found) >= 5:
-                            break
+                                }
+                            try:
+                                quote = self.client.meaningful_liquidation_check(
+                                    debt_market, collateral_market, borrower, raw_amount
+                                )
+                                if quote:
+                                    candidate = dict(candidate)
+                                    candidate.update({
+                                        "borrow_market": debt_market,
+                                        "collateral_market": collateral_market,
+                                        "raw_borrow": str(raw_amount),
+                                        "category": "ONCHAIN_ELIGIBLE",
+                                        **quote,
+                                    })
+                                    break
+                            except (ValueError, requests.RequestException) as exc:
+                                self.status["rejected_oracle_or_contract"] += 1
+                                logger.warning("Hatom eligibility preflight failed (%s)", type(exc).__name__)
+                    if candidate is not None:
+                        found.append(candidate)
                 except (ValueError, requests.RequestException) as exc:
                     logger.warning("Hatom account risk query failed (%s)", type(exc).__name__)
                     self.status["rejected_oracle_or_contract"] += 1
