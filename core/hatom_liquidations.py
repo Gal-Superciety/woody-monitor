@@ -213,6 +213,9 @@ async def scan(context: ContextTypes.DEFAULT_TYPE) -> int:
             from core.hatom_onchain import get_scanner
             checked = get_scanner().status.get("checked", 0)
         store_scan(positions, checked=checked)
+        if _source() == "onchain":
+            from core.hatom_stages import observe
+            observe(positions)
         _STATE["last_candidates"] = len(set(row["borrower"] for row in positions))
         _STATE["suppressed_unpriced"] = len(positions)
     except Exception as exc:
@@ -227,6 +230,25 @@ async def scan(context: ContextTypes.DEFAULT_TYPE) -> int:
     logger.info("HATOM_RISK_SCAN_COLLECTED | new_route_signals=%s | private_digest_only", len(positions))
     return 0
 
+
+
+async def eligibility_notifier(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """At most one private stage-2 batch/hour; zero profit claims."""
+    if not _enabled() or not _ready() or _source() != "onchain" or _admin_id() is None:
+        return False
+    from core.hatom_stages import pending, revalidate, format_alert, mark_delivered
+    candidates = pending()
+    if not candidates:
+        return False
+    checked, errors = await asyncio.to_thread(revalidate, candidates)
+    if errors:
+        logger.info("HATOM_ELIGIBILITY_REFRESH_ERRORS | skipped=%s", errors)
+    if not checked:
+        return False
+    await context.bot.send_message(chat_id=_admin_id(), text=format_alert(checked))
+    mark_delivered(checked)
+    _STATE["sent"] += 1
+    return True
 
 
 async def digest(context: ContextTypes.DEFAULT_TYPE, *, manual: bool = False) -> bool:
@@ -256,9 +278,11 @@ def status_text() -> str:
     enabled = _enabled()
     configured = _ready()
     admin_ok = _admin_id() is not None
-    status = "SCAN + PRIVATE DIGEST (NO PROFIT QUOTES)" if enabled and configured and admin_ok else "PAUSED"
+    status = "SCAN + TWO-STAGE PRIVATE ALERTS" if enabled and configured and admin_ok else "PAUSED"
     from core.hatom_digest import digest_hours, state_snapshot
     report_state = state_snapshot()
+    from core.hatom_stages import status as stage_status
+    stage = stage_status()
     return (
         "🔐 Hatom Watch — Private Admin\n"
         f"State: {status}\n"
@@ -268,12 +292,15 @@ def status_text() -> str:
         f"Admin private destination: {'configured' if admin_ok else 'missing'}\n"
         f"Unpriced risk signals on last scan: {_STATE['last_candidates']}\n"
         "Net-profit validation: NOT IMPLEMENTED\n"
-        "Real-time per-wallet alerts: DISABLED\n"
+        "Risk alerts: PRIVATE DIGEST ONLY\\n"
+        "Stage 2: 1 batch/hour max, 2 borrowers/batch\\n"
+        "Stage 2 borrower cooldown: 12h\\n"
+        f"Pending stage 2 candidates: {stage['pending_eligible']}\\n"
         f"Private risk digest: {','.join(f'{hour:02d}:00' for hour in digest_hours())} Berlin\n"
         f"Risk wallets observed (last 12h): {len(report_state['candidates'])}\n"
         f"Completed scans this session: {report_state['scans']}\n"
         f"Wallets checked this session: {report_state['checks']}\n"
-        "Verified-profit alerts: NOT AVAILABLE (profit engine missing)\n"
+        "Profit-positive verified alerts: NOT AVAILABLE (profit engine missing)\\n"
         f"Alerts delivered this session: {_STATE['sent']}\n"
         f"Last successful poll: {_STATE['last_poll'] or 'never'}\n"
         f"Last error: {_STATE['last_error'] or 'none'}\n\n"
@@ -331,6 +358,10 @@ def register(app: Application) -> None:
     app.add_handler(CommandHandler("hatom_report", report_command))
     if _enabled() and _ready() and _admin_id() and app.job_queue:
         app.job_queue.run_repeating(scan, interval=_interval(), first=12, name="hatom_private_observer")
+        if _source() == "onchain":
+            app.job_queue.run_repeating(
+                eligibility_notifier, interval=300, first=45, name="hatom_stage2_private_batch"
+            )
         from core.hatom_digest import digest_hours
         if _source() == "onchain":
             for hour in digest_hours():
@@ -339,7 +370,7 @@ def register(app: Application) -> None:
                     time=clock_time(hour=hour, minute=0, tzinfo=ZoneInfo("Europe/Berlin")),
                     name=f"hatom_admin_digest_{hour:02d}",
                 )
-        logger.info("Hatom private observer scheduled | interval=%ss | digest hours Berlin=%s",
+        logger.info("Hatom private observer scheduled | interval=%ss | stage2 hourly cap | digest hours Berlin=%s",
                     _interval(), digest_hours() if _source() == "onchain" else [])
     else:
         logger.info("Hatom private observer disabled until an on-chain or trusted feed source is enabled")
