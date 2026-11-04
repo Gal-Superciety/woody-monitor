@@ -27,6 +27,8 @@ jobs:
           print("first market (truncated):", markets[0][:10])
           members = client.members(markets[0])
           print("first market member count:", len(members))
+          print("close factor WAD:", client.close_factor(markets[0]))
+          print("market cash raw:", client.market_cash(markets[0]))
           if members:
               print("first member queried for risk (address not displayed)")
               print("isRisky bool:", client.risky(members[0]))
