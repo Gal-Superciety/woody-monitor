@@ -240,3 +240,41 @@ LP_SNAPSHOT_CHECK_INTERVAL=3600
 LP_HOLDERS_PAGE_SIZE=100
 LP_HOLDERS_MAX_PAGES=20
 ```
+
+## Private Hatom Watch (experimental, read-only)
+
+Hatom monitoring has **one destination only**: the administrator's private
+Telegram chat determined from `ADMIN_TELEGRAM_ID`. It never sends Hatom
+alerts to `TELEGRAM_GROUP_CHAT_ID`, even when WOODY group alerts are on.
+
+Admin-only Telegram commands: `/hatom_status`, `/hatom_test`, `/hatom_scan`.
+The admin menu also has a **Hatom Watch (Private)** status button.
+Other users and group chats cannot use these commands.
+
+To enable, configure:
+```env
+ENABLE_HATOM_WATCH=true
+HATOM_OPPORTUNITIES_URL=https://your-trusted-observer.example/positions
+HATOM_WATCH_INTERVAL_SECONDS=60
+HATOM_MAX_SOURCE_AGE_SECONDS=120
+HATOM_ALERT_COOLDOWN_SECONDS=900
+```
+
+The JSON endpoint must be a validated, independent Hatom borrower indexer.
+Hatom does not document a public list of all risky positions, so monitoring
+is **disabled by default** until such a source is connected. The endpoint
+returns a JSON object with `updated_at` and a `positions` array. Each
+position has `borrower` (full MultiversX bech32 address),
+`health_factor`, `debt_token`, `collateral_token`, and optionally
+`borrow_usd` and `max_repay_usd`. Either per-position or top-level
+`updated_at` must be a recent ISO-8601 timestamp or UNIX seconds.
+
+Entries older than the configured freshness limit, malformed data, and
+healthy positions are ignored. The monitor sends at most five alerts per
+poll and deduplicates within a cooldown period. Alerts are **not proof of
+a profitable or executable liquidation**: positions and prices must be
+validated on-chain immediately before trading. It **never** sends
+transactions or touches wallet keys.
+
+See Hatom's official [liquidation documentation](https://docs.hatom.com/getting-started/hatoms-ecosystem/lending-protocol/liquidation).
+Run offline tests with `python -m unittest tests.test_hatom_liquidations`.
