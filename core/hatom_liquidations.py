@@ -268,12 +268,12 @@ def status_text() -> str:
         f"Admin private destination: {'configured' if admin_ok else 'missing'}\n"
         f"Unpriced risk signals on last scan: {_STATE['last_candidates']}\n"
         "Net-profit validation: NOT IMPLEMENTED\n"
-        "Real-time per-wallet alerts: DISABLED\\n"
-        f"Private risk digest: {','.join(f'{hour:02d}:00' for hour in digest_hours())} Berlin\\n"
-        f"Risk wallets observed (last 12h): {len(report_state['candidates'])}\\n"
-        f"Completed scans this session: {report_state['scans']}\\n"
-        f"Wallets checked this session: {report_state['checks']}\\n"
-        "Verified-profit alerts: NOT AVAILABLE (profit engine missing)\\n"
+        "Real-time per-wallet alerts: DISABLED\n"
+        f"Private risk digest: {','.join(f'{hour:02d}:00' for hour in digest_hours())} Berlin\n"
+        f"Risk wallets observed (last 12h): {len(report_state['candidates'])}\n"
+        f"Completed scans this session: {report_state['scans']}\n"
+        f"Wallets checked this session: {report_state['checks']}\n"
+        "Verified-profit alerts: NOT AVAILABLE (profit engine missing)\n"
         f"Alerts delivered this session: {_STATE['sent']}\n"
         f"Last successful poll: {_STATE['last_poll'] or 'never'}\n"
         f"Last error: {_STATE['last_error'] or 'none'}\n\n"
@@ -309,7 +309,7 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("Hatom Watch inactive. Configure ENABLE_HATOM_WATCH=true with HATOM_WATCH_SOURCE=onchain or a trusted feed.")
         return
     await scan(context)
-    await update.message.reply_text(f"Hatom scan completed (risk data stored; no instant alerts).\\n{status_text()}")
+    await update.message.reply_text(f"Hatom scan completed (risk data stored; no instant alerts).\n{status_text()}")
 
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
