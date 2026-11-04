@@ -258,6 +258,11 @@ class VmClient:
         if not self.liquidation_allowed(debt_market, collateral_market, borrower, repay):
             return None
         seized = self.seized_htokens(debt_market, collateral_market, repay)
+        available_htokens = self.collateral_tokens(collateral_market, borrower)
+        if seized > available_htokens:
+            # If the selected collateral is insufficient the transaction may
+            # revert even though Controller's allowance returns true.
+            return None
         recovered_underlying = self.collateral_underlying(collateral_market, seized)
         if self.market_cash(collateral_market) < recovered_underlying:
             return None
