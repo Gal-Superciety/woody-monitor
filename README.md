@@ -382,3 +382,35 @@ validator competition remain unavailable. The alert explicitly says so.
 The bot **never signs or executes any liquidation**. A future profit-only
 filter must first validate net profit before attaching a "profit-positive"
 label. No Hatom messages go to the WOODY group.
+
+### Hatom reference-price scenario calculator (read-only)
+
+A stage-2 notification, and the admin-only `/hatom_profit` command,
+can now report token quantities and USD values when **all** required
+metadata is available.
+
+Calculation process:
+1. Read Hatom money-market `getUnderlyingId` for the debt and collateral.
+2. Fetch underlying token decimals and indicative USD prices via
+   `https://api.multiversx.com/tokens/{identifier}` (EGLD is read from
+   `/economics`), and network minimum gas price from MultiversX Gateway.
+3. Convert exact Hatom raw repay/underlying amounts to human token amounts.
+4. Calculate the reference **gross** USD spread, then subtract **assumed**
+   swap loss (default 1.5%) and **assumed** gas units (default 60 million).
+   The scenario uses `HATOM_GAS_UNITS_ASSUMED` and
+   `HATOM_SWAP_LOSS_BPS_ASSUMED` from the environment.
+
+**Important:** The estimated scenario net is NOT an executable trade quote.
+Token USD prices can be stale, Hatom may change between checks, and swap
+routing/price impact, hToken redemption, exact execution gas, congestion
+and other liquidators are unverified. No price snapshot timestamp is
+available from the current public token API. An unavailable token price
+or metadata is reported as `unavailable`, never synthesized. No automatic
+trades, private keys, or wallet funding are involved. Until a validated
+live route and transaction simulation are available, **no scenario may be
+labeled verified profit**, regardless of its sign.
+
+Only the configured Telegram administrator receives Hatom reports. Stage-1
+scheduled risk digests and the stage-2 one-per-hour anti-spam restriction
+remain unchanged. The `/hatom_profit` command is an on-demand private
+recheck of recently cached stage-2 positions, not a request to execute.
