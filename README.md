@@ -440,3 +440,21 @@ Never execute from a chat message without a fresh independent check.
 
 See [the public MultiversX aggregator API](https://swap.xoxno.com/)
 and [MultiversX Token API](https://api.multiversx.com/).
+
+### Hatom cache and historical Telegram alert recheck
+
+The admin-only `/hatom_profit` command can now restore recently scanned
+Stage-2 positions from `$DATA_DIR/hatom_candidates.json` when `DATA_DIR`
+points to the worker's mounted persistent Railway volume (`/app/data`).
+Only public borrower/market addresses and observations are stored.
+Entries expire within 12 hours, and all on-chain risk, debt, collateral
+and liquidation eligibility checks must run again before USD valuation.
+
+To analyze a Hatom alert created before the cache existed, reply to
+that old private Telegram message with `/hatom_profit`, or use
+`/hatom_profit erd1...` with a public borrower address. The bot parses
+borrower addresses from numbered risk digests and older Stage-2 alerts;
+it never reuses old repayment amounts without reconfirming contract state.
+At most three borrower addresses are examined per command. This does not
+sign or execute any blockchain transactions. If the position is no
+longer eligible, the bot says so rather than manufacturing a profit quote.

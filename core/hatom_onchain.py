@@ -421,6 +421,63 @@ class HatomScanner:
             self._lock.release()
 
 
+def inspect_borrower_live(borrower: str, *, client: VmClient | None = None,
+                          max_markets: int = 16, max_routes: int = 2
+                          ) -> list[dict[str, Any]]:
+    """On-demand read-only re-discovery of stage-2 opportunities for a borrower.
+
+    Enables manual rechecks after restarts or by replying to old Telegram
+    alerts. Uses fresh borrows/collateral and a real-sized Controller preflight.
+    Never signs transactions. Returns no candidates on stale/healthy accounts.
+    """
+    address_decode(borrower)
+    client = client if client is not None else VmClient(timeout=8)
+    if not client.risky(borrower):
+        return []
+    markets = client.account_markets(borrower)[:max_markets]
+    debts: list[tuple[str, int]] = []
+    collaterals: list[str] = []
+    for market in markets:
+        try:
+            amount = client.borrow_amount(market, borrower)
+            collateral = client.collateral_tokens(market, borrower)
+            if amount > 1:
+                debts.append((market, amount))
+            if collateral > 0:
+                collaterals.append(market)
+        except (ValueError, requests.RequestException) as exc:
+            logger.warning("Hatom borrower manual market check failed (%s)", type(exc).__name__)
+    if not debts or not collaterals:
+        return []
+    results: list[dict[str, Any]] = []
+    for debt_market, borrow_raw in debts[:4]:
+        for collateral_market in collaterals[:4]:
+            try:
+                quote = client.meaningful_liquidation_check(
+                    debt_market, collateral_market, borrower, borrow_raw
+                )
+                if not quote:
+                    continue
+                results.append({
+                    "borrower": borrower,
+                    "debt_token": "market-contract",
+                    "collateral_token": "market-contract",
+                    "borrow_market": debt_market,
+                    "collateral_market": collateral_market,
+                    "raw_borrow": str(borrow_raw),
+                    "health_factor": None,
+                    "max_repay_usd": None,
+                    "category": "ONCHAIN_ELIGIBLE",
+                    "observed_at": time.time(),
+                    **quote,
+                })
+                if len(results) >= max_routes:
+                    return results
+            except (ValueError, requests.RequestException) as exc:
+                logger.warning("Hatom manual eligibility check failed (%s)", type(exc).__name__)
+    return results
+
+
 _SCANNER: HatomScanner | None = None
 
 

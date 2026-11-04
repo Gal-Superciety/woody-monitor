@@ -360,33 +360,119 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(f"Hatom scan completed (risk data stored; no instant alerts).\n{status_text()}")
 
 
+def _profit_requested_borrowers(update: Update, context: ContextTypes.DEFAULT_TYPE
+                                ) -> list[str]:
+    """Read only borrower addresses from command args or a replied Hatom alert."""
+    from core.hatom_onchain import address_decode
+    explicit_args = getattr(context, "args", None) or []
+    text_source = " ".join(explicit_args)
+    if not text_source and update.message:
+        reply = getattr(update.message, "reply_to_message", None)
+        text_source = str(getattr(reply, "text", "") or "")
+    if not text_source:
+        return []
+    exact = re.compile(r"erd1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{58}")
+    # Text of prior Stage-2 alerts: "Borrower: erd1..."
+    # Text of risk digests: "1. erd1...". Never use debt/collateral SCs.
+    matches = re.findall(
+        r"(?im)^\s*(?:(?:\d+[.)]\s+)?Borrower:\s*|\d+[.)]\s+)(erd1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{58})\b",
+        text_source,
+    )
+    if explicit_args:
+        matches = [m.group(0) for m in exact.finditer(text_source)]
+    out: list[str] = []
+    for item in matches:
+        try:
+            address_decode(item)
+        except ValueError:
+            continue
+        if item not in out:
+            out.append(item)
+        if len(out) >= 3:
+            break
+    return out
+
+
+def _recheck_borrowers_on_demand(borrowers: list[str]) -> list[dict[str, Any]]:
+    """Query contract state NOW, without using historic raw repay estimates."""
+    from core.hatom_onchain import VmClient, inspect_borrower_live
+    client = VmClient(timeout=8)
+    out: list[dict[str, Any]] = []
+    for borrower in borrowers[:3]:
+        try:
+            rows = inspect_borrower_live(borrower, client=client, max_routes=1)
+            out.extend(rows)
+            if len(out) >= 2:
+                break
+        except (ValueError, requests.RequestException) as exc:
+            logger.warning("Manual Hatom borrower recheck failed (%s)", type(exc).__name__)
+    return out[:2]
+
+
 async def profit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Private manual preflight + market-price scenario, never a trade."""
+    """Private on-demand valuation from saved cache OR an older Hatom alert."""
     if not _admin_private(update) or not update.message:
         return
     if not _enabled() or _source() != "onchain":
         await update.message.reply_text("Hatom Watch on-chain monitoring is paused.")
         return
-    from core.hatom_digest import state_snapshot
+    from core.hatom_digest import state_snapshot, store_scan
     from core.hatom_stages import revalidate, format_alert
-    recent = [
-        row for row in state_snapshot()["candidates"]
-        if row.get("category") == "ONCHAIN_ELIGIBLE"
-    ][:6]
-    if not recent:
-        await update.message.reply_text(
-            "No recent stage-2 candidates are cached. This is not proof that Hatom has no liquidations."
-        )
-        return
-    valid, errors = await asyncio.to_thread(revalidate, recent)
+    requested = _profit_requested_borrowers(update, context)
+    snapshot = state_snapshot()
+    recent = snapshot["candidates"]
+    if requested:
+        # Explicit address / replied historic alert: re-discover all contract
+        # balances afresh; never trust the old message's monetary values.
+        try:
+            valid = await asyncio.wait_for(
+                asyncio.to_thread(_recheck_borrowers_on_demand, requested), timeout=50
+            )
+        except asyncio.TimeoutError:
+            await update.message.reply_text(
+                "Hatom on-chain recheck timed out. No profit quote is available."
+            )
+            return
+        errors = 0
+    else:
+        stage2 = [row for row in recent if row.get("category") == "ONCHAIN_ELIGIBLE"][:6]
+        valid, errors = await asyncio.to_thread(revalidate, stage2)
+        if not valid and recent:
+            # A prior Stage-1 risk candidate may now qualify. Re-query by wallet.
+            borrowers = [row["borrower"] for row in recent[:3]]
+            try:
+                valid = await asyncio.wait_for(
+                    asyncio.to_thread(_recheck_borrowers_on_demand, borrowers), timeout=50
+                )
+            except asyncio.TimeoutError:
+                await update.message.reply_text(
+                    "Hatom on-chain recheck timed out. No profit quote is available."
+                )
+                return
     if not valid:
-        await update.message.reply_text(
-            f"No stage-2 positions survived current on-chain recheck (errors: {errors})."
-        )
+        if not requested and not recent:
+            await update.message.reply_text(
+                "No recent Hatom positions are stored yet. Scanning continues. "
+                "To recheck an earlier position, reply to its Hatom alert with "
+                "/hatom_profit, or send /hatom_profit erd1... (borrower address). "
+                "An old alert is never used as proof of current eligibility."
+            )
+        else:
+            await update.message.reply_text(
+                f"No selected Hatom position passed the current Stage-2 "
+                f"liquidation check (query errors: {errors}). "
+                "This does not prove all of Hatom has no eligible positions."
+            )
         return
-    valuations = await asyncio.to_thread(_value_eligible_positions, valid)
+    # Save only freshly reconfirmed public chain positions (no wallet keys).
+    store_scan(valid)
+    try:
+        valuations = await asyncio.wait_for(
+            asyncio.to_thread(_value_eligible_positions, valid), timeout=40
+        )
+    except asyncio.TimeoutError:
+        valuations = {r["borrower"]: "DEX or price data timed out" for r in valid}
     await update.message.reply_text(format_alert(valid, valuations))
-
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _admin_private(update) or not update.message:
