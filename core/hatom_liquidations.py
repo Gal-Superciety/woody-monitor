@@ -148,12 +148,12 @@ def normalize_positions(payload: Any, *, now: float | None = None, max_age: int 
 def _message(position: dict[str, Any]) -> str:
     if position["category"] == "ONCHAIN_RISKY":
         return (
-            "🔐 Hatom Watch — PRIVATE ADMIN ALERT\\n\\n"
-            "⚠️ ON-CHAIN RISK SIGNAL (not a profit quote)\\n"
-            f"Borrower: {position['borrower']}\\n"
-            f"Debt market: {position['borrow_market']}\\n"
-            f"Collateral market: {position['collateral_market']}\\n"
-            f"Debt amount (raw base units): {position['raw_borrow']}\\n\\n"
+            "🔐 Hatom Watch — PRIVATE ADMIN ALERT\n\n"
+            "⚠️ ON-CHAIN RISK SIGNAL (not a profit quote)\n"
+            f"Borrower: {position['borrower']}\n"
+            f"Debt market: {position['borrow_market']}\n"
+            f"Collateral market: {position['collateral_market']}\n"
+            f"Debt amount (raw base units): {position['raw_borrow']}\n\n"
             "Controller reports isRisky=true; allowance was checked for a minimal "
             "repayment amount. Real repay limits, token decimals, prices, "
             "collateral sale, gas, and slippage still need verification. "
