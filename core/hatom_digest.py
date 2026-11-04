@@ -165,7 +165,7 @@ def build_report(rows: list[dict[str, Any]], *, now: float | None = None,
         "USD net profit, execution gas, swap prices and slippage remain unknown.",
         "No automatic transactions. No private keys.",
     ])
-    return "\\n".join(text)[:3800]
+    return "\n".join(text)[:3800]
 
 
 def mark_report_sent(*, now: float | None = None) -> None:
