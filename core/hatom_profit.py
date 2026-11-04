@@ -250,6 +250,22 @@ def estimate(row: dict[str, Any], vm: Any = None, prices: MarketData | None = No
         gas_usd = Decimal(gas_units) * Decimal(gas_price) / _ETH * egld_asset.price_usd
         swap_usd = collateral_usd * Decimal(swap_bps) / Decimal("10000")
         scenario_net_usd = gross_usd - gas_usd - swap_usd
+    # DEX minimum-output quotes are public market snapshots, not executable
+    # liquidation fills. Assumed gas excludes unexpected multi-tx overhead.
+    dex_quote = None
+    dex_quote_error = None
+    quote_min_usd = None
+    quote_net_usd = None
+    try:
+        dex_quote = prices.dex_quote(
+            collateral_id, debt_id, _nonnegative_int(row["collateral_underlying_raw"])
+        )
+        min_units = human(dex_quote["amount_out_min_raw"], debt_asset.decimals)
+        quote_min_usd = min_units * debt_asset.price_usd
+        quote_net_usd = quote_min_usd - debt_usd - gas_usd
+    except (QuoteUnavailable, KeyError, TypeError, AttributeError) as exc:
+        dex_quote_error = explain_missing(exc)
+
     return {
         "category": "INDICATIVE_ONLY",
         "borrower": row["borrower"],
@@ -267,6 +283,10 @@ def estimate(row: dict[str, Any], vm: Any = None, prices: MarketData | None = No
         "assumed_swap_cost_usd": swap_usd,
         "assumed_gas_cost_usd": gas_usd,
         "scenario_net_usd": scenario_net_usd,
+        "dex_quote": dex_quote,
+        "dex_quote_error": dex_quote_error,
+        "quote_min_usd": quote_min_usd,
+        "quote_net_after_assumed_gas_usd": quote_net_usd,
         "assumed_slippage_bps": swap_bps,
         "assumed_gas_units": gas_units,
         "gas_price_wei": gas_price,
