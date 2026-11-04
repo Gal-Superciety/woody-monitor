@@ -238,6 +238,8 @@ class HatomScanner:
         now = time.time()
         if not self._markets or now - self._markets_at >= 3600:
             markets = self.client.whitelist()
+            if not markets:
+                raise ValueError("Hatom controller returned no whitelisted markets")
             self._markets = markets[:32]
             self._markets_at = now
             self.status["markets"] = len(self._markets)
