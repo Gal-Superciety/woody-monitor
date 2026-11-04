@@ -375,7 +375,7 @@ def _profit_requested_borrowers(update: Update, context: ContextTypes.DEFAULT_TY
     # Text of prior Stage-2 alerts: "Borrower: erd1..."
     # Text of risk digests: "1. erd1...". Never use debt/collateral SCs.
     matches = re.findall(
-        r"(?im)^\s*(?:\d+[.)]\s+|Borrower:\s*)(erd1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{58})\b",
+        r"(?im)^\s*(?:(?:\d+[.)]\s+)?Borrower:\s*|\d+[.)]\s+)(erd1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{58})\b",
         text_source,
     )
     if explicit_args:
