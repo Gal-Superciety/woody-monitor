@@ -83,3 +83,24 @@ jobs:
           except Exception as exc:
               print("Quote schema unavailable; do NOT enable executable quote:", type(exc).__name__)
           PY
+
+      - name: Test XOXNO route quote public endpoint (no transaction)
+        run: |
+          python - <<'PY'
+          import requests
+          url = "https://swap.xoxno.com/api/v1/quote"
+          params = {"from":"WEGLD-bd4d79","to":"USDC-c76f1f","amountIn":"1000000000000000000","includePaths":"true"}
+          try:
+              resp = requests.get(url, params=params, timeout=15, allow_redirects=False)
+              print("XOXNO quote HTTP:", resp.status_code)
+              data = resp.json()
+              if isinstance(data, dict):
+                  fields = ["from","to","amountIn","amountOut","amountOutMin","amountOutMinShort","feeBps","quoteTimestamp","timestamp"]
+                  print("XOXNO quote keys:", sorted(data.keys())[:32])
+                  print("XOXNO fields:", {key:data.get(key) for key in fields})
+                  print("XOXNO paths:", len(data.get("paths") or []))
+              else:
+                  print("XOXNO non-object response")
+          except Exception as exc:
+              print("XOXNO quote endpoint unavailable (fail closed):", type(exc).__name__)
+          PY
