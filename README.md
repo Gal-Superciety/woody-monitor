@@ -488,3 +488,37 @@ evidence of an executable liquidation**: end-to-end signing, redemption,
 wrap/unwrap, gas and competition still need separate simulation.
 No transactions or wallet keys are used. Alerts go to the private admin
 chat exclusively.
+
+
+### Hatom Stage 3: isolated read-only liquidation dry-run
+
+New administrator-only command: `/hatom_dryrun`. Reply to a private
+Hatom Stage-2 alert with that command, or use `/hatom_dryrun erd1...`
+with a borrower address. The bot always refreshes the account's Hatom
+borrowed amounts, risk status and collateral before testing.
+
+It builds unsigned draft calldata for the Hatom market `liquidateBorrow`
+endpoint: an `ESDTTransfer` for fungible token debts, or a direct EGLD
+payment for EGLD debt. **No keys, signing, transactions or funds.**
+
+Optionally set `HATOM_SIMULATION_SENDER` to the *public address* of an
+account you control. This enables **isolated** mainnet gas estimation
+and simulation; this setting is NOT a seed phrase or a private key.
+The code uses only allowlisted read-only endpoints:
+`GET /network/config`, `GET /address/{sender}`,
+`POST /transaction/cost`, and
+`POST /transaction/simulate?checkSignature=false`.
+The latter uses a dummy zero signature and never broadcasts.
+
+Without a public simulation sender, the command clearly reports that
+the gas/outcome could not be tested. With an unfunded sender, the network
+may reject the simulation for missing EGLD or borrowed tokens.
+
+Important: these queries can simulate only the isolated liquidation
+call, NOT the entire liquidation → hToken redemption → optional wrap
+→ DEX swap pipeline in one atomic state transition. Same-shard
+limitations, other liquidators, timing and gas mean an isolated success
+is NOT a verified profitable trade. This monitor retains read-only
+mode, Stage-1 digests and positive-indicative Stage-2 alert filtering.
+
+Reference: https://docs.multiversx.com/sdk-and-tools/rest-api/transactions/
