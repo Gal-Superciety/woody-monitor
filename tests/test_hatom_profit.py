@@ -80,7 +80,7 @@ class CalcTests(unittest.TestCase):
         output = "\n".join(calc.format_scenario(result))
         self.assertIn("200 USDC", output)
         self.assertIn("60 EGLD", output)
-        self.assertIn("NOT EXECUTABLE", output)
+        self.assertIn("NOT AN EXECUTABLE", output)
 
     def test_fail_closed_when_no_token_or_price(self):
         invalid = risk()
@@ -136,6 +136,44 @@ class CalcTests(unittest.TestCase):
         ])
         self.assertTrue(all(c.kwargs["allow_redirects"] is False
                             for c in session.get.call_args_list))
+
+    def test_xoxno_quote_checks_exact_input_route_and_min_output(self):
+        session = Mock()
+        session.get.return_value = FakeResponse({
+            "from": "WEGLD-bd4d79", "to": "USDC-c76f1f",
+            "amountIn": "1000000000000000000",
+            "amountOut": "3451159", "amountOutMin": "3416647",
+            "paths": [{"swaps": [{"dex": "xExchange"}]}],
+        })
+        quote = calc.MarketData(session=session).dex_quote(
+            "EGLD", "USDC-c76f1f", 10**18
+        )
+        self.assertEqual(quote["amount_out_min_raw"], 3416647)
+        self.assertEqual(quote["route_count"], 1)
+        request = session.get.call_args
+        self.assertEqual(request.args[0], "https://swap.xoxno.com/api/v1/quote")
+        self.assertFalse(request.kwargs["allow_redirects"])
+        self.assertEqual(request.kwargs["params"]["from"], "WEGLD-bd4d79")
+        self.assertEqual(request.kwargs["params"]["amountIn"], str(10**18))
+
+    def test_unroutable_or_invalid_live_quote_fails_closed(self):
+        session = Mock()
+        session.get.return_value = FakeResponse({
+            "from": "WEGLD-bd4d79", "to": "USDC-c76f1f",
+            "amountIn": "1000000000000000000",
+            "amountOut": "3451159", "amountOutMin": "9999999999999",
+            "paths": [{"swaps": []}],
+        })
+        with self.assertRaises(calc.QuoteUnavailable):
+            calc.MarketData(session=session).dex_quote("EGLD", "USDC-c76f1f", 10**18)
+        session.get.return_value = FakeResponse({
+            "from": "WEGLD-bd4d79", "to": "USDC-c76f1f",
+            "amountIn": "1000000000000000000",
+            "amountOut": "3451159", "amountOutMin": "3416647",
+            "paths": [],
+        })
+        with self.assertRaises(calc.QuoteUnavailable):
+            calc.MarketData(session=session).dex_quote("EGLD", "USDC-c76f1f", 10**18)
 
     def test_missing_price_or_wrong_token_id_is_rejected(self):
         session = Mock()
