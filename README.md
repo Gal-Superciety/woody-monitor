@@ -414,3 +414,29 @@ Only the configured Telegram administrator receives Hatom reports. Stage-1
 scheduled risk digests and the stage-2 one-per-hour anti-spam restriction
 remain unchanged. The `/hatom_profit` command is an on-demand private
 recheck of recently cached stage-2 positions, not a request to execute.
+
+### Hatom DEX minimum-output quote integration
+
+The stage-2 calculator also reads a **public, exact-input XOXNO MultiversX
+DEX aggregator quote** from `https://swap.xoxno.com/api/v1/quote` using
+the underlying collateral amount to be redeemed. It validates the input
+and output token identifiers, exact input base units, nonzero output,
+minimum output (after slippage), and actual path presence. `EGLD` is
+represented as `WEGLD-bd4d79` for quoting; the required wrap/redeem
+transaction costs are *not* fully simulated.
+
+When an exact-input DEX quote exists, the bot additionally reports:
+- Live DEX minimum-output USD equivalent (using public API token price)
+- Estimated DEX route surplus after repaying the debt and **assumed gas**
+- Route count (information only)
+
+This can be more informative than the simple reference-price spread,
+but does not include exact Hatom liquidation execution gas, the cost
+of hToken redemption/wrap, market changes, competing liquidators,
+or a transactional atomicity guarantee. The result is explicitly
+**NOT AN EXECUTABLE OR VERIFIED PROFIT QUOTE**. DEX quote failures
+fall back to the reference-price scenario with the failure reason.
+Never execute from a chat message without a fresh independent check.
+
+See [the public MultiversX aggregator API](https://swap.xoxno.com/)
+and [MultiversX Token API](https://api.multiversx.com/).
