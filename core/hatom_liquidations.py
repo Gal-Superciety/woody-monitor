@@ -42,6 +42,15 @@ def _enabled() -> bool:
     return os.getenv("ENABLE_HATOM_WATCH", "false").strip().lower() in {"true", "1", "yes", "on"}
 
 
+def _source() -> str:
+    source = os.getenv("HATOM_WATCH_SOURCE", "feed").strip().lower()
+    return source if source in {"feed", "onchain"} else "invalid"
+
+
+def _ready() -> bool:
+    return _source() == "onchain" or (_source() == "feed" and bool(_feed_url()))
+
+
 def _feed_url() -> str:
     url = os.getenv("HATOM_OPPORTUNITIES_URL", "").strip()
     parts = urlsplit(url)
@@ -137,6 +146,19 @@ def normalize_positions(payload: Any, *, now: float | None = None, max_age: int 
 
 
 def _message(position: dict[str, Any]) -> str:
+    if position["category"] == "ONCHAIN_RISKY":
+        return (
+            "🔐 Hatom Watch — PRIVATE ADMIN ALERT\\n\\n"
+            "⚠️ ON-CHAIN RISK SIGNAL (not a profit quote)\\n"
+            f"Borrower: {position['borrower']}\\n"
+            f"Debt market: {position['borrow_market']}\\n"
+            f"Collateral market: {position['collateral_market']}\\n"
+            f"Debt amount (raw base units): {position['raw_borrow']}\\n\\n"
+            "Controller reports isRisky=true; allowance was checked for a minimal "
+            "repayment amount. Real repay limits, token decimals, prices, "
+            "collateral sale, gas, and slippage still need verification. "
+            "NO transactions are executed."
+        )
     status = "POTENTIAL LIQUIDATION" if position["category"] == "BELOW_1" else "POSITION AT RISK"
     message = (
         "🔐 Hatom Watch — PRIVATE ADMIN ALERT\n\n"
@@ -173,10 +195,14 @@ def _download() -> list[dict[str, Any]]:
 async def scan(context: ContextTypes.DEFAULT_TYPE) -> int:
     """Poll a source, then alert only the administrator in their own private chat."""
     admin = _admin_id()
-    if admin is None or not _enabled() or not _feed_url():
+    if admin is None or not _enabled() or not _ready():
         return 0
     try:
-        positions = await asyncio.to_thread(_download)
+        if _source() == "onchain":
+            from core.hatom_onchain import scan_mainnet
+            positions = await asyncio.to_thread(scan_mainnet)
+        else:
+            positions = await asyncio.to_thread(_download)
         _STATE["last_poll"] = datetime.now(timezone.utc).isoformat()
         _STATE["last_error"] = None
         _STATE["last_candidates"] = len(positions)
@@ -190,7 +216,7 @@ async def scan(context: ContextTypes.DEFAULT_TYPE) -> int:
     for position in positions:
         if sent >= 5:  # guard against floods on a first scan
             break
-        key = (position["borrower"], position["debt_token"], position["collateral_token"])
+        key = (position["borrower"], position.get("borrow_market", position["debt_token"]), position.get("collateral_market", position["collateral_token"]))
         last = _LAST_ALERTS.get(key)
         if last and last[0] == position["category"] and now - last[1] < _cooldown():
             continue
@@ -217,21 +243,22 @@ async def scan(context: ContextTypes.DEFAULT_TYPE) -> int:
 
 def status_text() -> str:
     enabled = _enabled()
-    configured = bool(_feed_url())
+    configured = _ready()
     admin_ok = _admin_id() is not None
     status = "ACTIVE" if enabled and configured and admin_ok else "NOT ACTIVE"
     return (
         "🔐 Hatom Watch — Private Admin\n"
         f"State: {status}\n"
         f"Observation mode: READ-ONLY\n"
-        f"Trusted HTTPS candidate feed: {'configured' if configured else 'missing'}\n"
+        f"Discovery source: {_source()}\n"
+        f"Discovery configured: {'yes' if configured else 'no'}\n"
         f"Admin private destination: {'configured' if admin_ok else 'missing'}\n"
         f"Recent candidates: {_STATE['last_candidates']}\n"
         f"Alerts delivered this session: {_STATE['sent']}\n"
         f"Last successful poll: {_STATE['last_poll'] or 'never'}\n"
         f"Last error: {_STATE['last_error'] or 'none'}\n\n"
-        "Signals are indicative and require on-chain verification. "
-        "Without a trusted positions feed, automatic opportunity alerts cannot run."
+        "Read-only observation. On-chain results are not profit quotes. "
+        "Check Hatom contract state and liquidity before manual action."
     )
 
 
@@ -258,8 +285,8 @@ async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _admin_private(update) or not update.message:
         return
-    if not _enabled() or not _feed_url():
-        await update.message.reply_text("Hatom Watch is inactive: configure ENABLE_HATOM_WATCH=true and a trusted HATOM_OPPORTUNITIES_URL.")
+    if not _enabled() or not _ready():
+        await update.message.reply_text("Hatom Watch inactive. Configure ENABLE_HATOM_WATCH=true with HATOM_WATCH_SOURCE=onchain or a trusted feed.")
         return
     sent = await scan(context)
     await update.message.reply_text(f"Hatom scan complete. New private alerts sent: {sent}.\n{status_text()}")
@@ -269,8 +296,8 @@ def register(app: Application) -> None:
     app.add_handler(CommandHandler("hatom_status", status_command))
     app.add_handler(CommandHandler("hatom_test", test_command))
     app.add_handler(CommandHandler("hatom_scan", scan_command))
-    if _enabled() and _feed_url() and _admin_id() and app.job_queue:
+    if _enabled() and _ready() and _admin_id() and app.job_queue:
         app.job_queue.run_repeating(scan, interval=_interval(), first=12, name="hatom_private_observer")
         logger.info("Hatom private observer scheduled | interval=%ss", _interval())
     else:
-        logger.info("Hatom private observer disabled until a trusted HTTPS source is configured")
+        logger.info("Hatom private observer disabled until an on-chain or trusted feed source is enabled")
