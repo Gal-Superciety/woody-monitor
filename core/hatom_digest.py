@@ -6,10 +6,12 @@ execution, and actual net profit is not computed.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
 import time
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -21,6 +23,76 @@ _LOCK = threading.Lock()
 _LAST_REPORT: float | None = None
 _SINCE_START = 0
 _TOTAL_CHECKS = 0
+_LOADED_DATA_DIR: str | None = None
+
+
+def _cache_path() -> Path | None:
+    # Explicit DATA_DIR must be on a persistent Railway volume.
+    root = os.getenv("DATA_DIR", "").strip()
+    return Path(root) / "hatom_candidates.json" if root else None
+
+
+def _load_cached() -> None:
+    """Called under _LOCK. Cached positions are untrusted until rechecked on-chain."""
+    global _LOADED_DATA_DIR
+    path = _cache_path()
+    if path is None or _LOADED_DATA_DIR == str(path):
+        return
+    _LOADED_DATA_DIR = str(path)
+    try:
+        if path.stat().st_size > 300_000:
+            raise ValueError("Hatom cache unexpectedly large")
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict) or not isinstance(raw.get("candidates"), list):
+            raise ValueError("Invalid Hatom cache format")
+        from core.hatom_onchain import address_decode
+        now = time.time()
+        for item in raw["candidates"][:500]:
+            if not isinstance(item, dict):
+                continue
+            try:
+                borrower = str(item["borrower"])
+                debt = str(item["borrow_market"])
+                collateral = str(item["collateral_market"])
+                address_decode(borrower)
+                address_decode(debt)
+                address_decode(collateral)
+                observed = float(item["observed_at"])
+                amount = int(str(item["raw_borrow"]))
+                category = item["category"]
+                if category not in ("ONCHAIN_ELIGIBLE", "ONCHAIN_RISKY"):
+                    continue
+                if not 0 <= now - observed <= 12 * 3600:
+                    continue
+                if amount <= 0 or amount > 10**80:
+                    continue
+                _RISK_CACHE[borrower] = {
+                    "borrower": borrower, "borrow_market": debt,
+                    "collateral_market": collateral, "raw_borrow": str(amount),
+                    "category": category, "observed_at": observed,
+                    "routes_seen": 1,
+                }
+            except (ValueError, TypeError, KeyError):
+                continue
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError, TypeError) as exc:
+        logger.warning("Hatom position cache unreadable (%s)", type(exc).__name__)
+
+
+def _save_cached() -> None:
+    """Best-effort private persistence of public chain addresses, no credentials."""
+    path = _cache_path()
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = {"candidates": list(_RISK_CACHE.values())[:500]}
+        temp = path.with_name(path.name + ".tmp")
+        temp.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
+        os.replace(temp, path)
+    except (OSError, TypeError, ValueError) as exc:
+        logger.warning("Hatom position cache write failed (%s)", type(exc).__name__)
 
 
 def digest_hours() -> list[int]:
@@ -45,6 +117,7 @@ def store_scan(rows: list[dict[str, Any]], *, now: float | None = None, checked:
     global _SINCE_START, _TOTAL_CHECKS
     now = time.time() if now is None else now
     with _LOCK:
+        _load_cached()
         _SINCE_START += 1
         _TOTAL_CHECKS += max(0, checked)
         for row in rows:
@@ -72,11 +145,13 @@ def store_scan(rows: list[dict[str, Any]], *, now: float | None = None, checked:
         if len(_RISK_CACHE) > 1000:
             for borrower, row in sorted(_RISK_CACHE.items(), key=lambda x: x[1]["observed_at"])[:len(_RISK_CACHE)-1000]:
                 _RISK_CACHE.pop(borrower, None)
+        _save_cached()
 
 
 def state_snapshot(*, now: float | None = None, window_seconds: int = 12 * 3600) -> dict[str, Any]:
     now = time.time() if now is None else now
     with _LOCK:
+        _load_cached()
         candidates = [
             dict(row) for row in _RISK_CACHE.values()
             if 0 <= now - row["observed_at"] <= window_seconds
