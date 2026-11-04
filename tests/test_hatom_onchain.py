@@ -62,7 +62,7 @@ class VmTests(unittest.TestCase):
     def test_nontrivial_repay_and_collateral_cash_preflight(self):
         responses = [
             result((5 * 10**17).to_bytes(8, "big")),  # 50% close factor (WAD)
-            result(b"\\x01"),  # Controller repayment allowed
+            result(bytes([1])),  # Controller repayment allowed
             result((150).to_bytes(2, "big")),  # Hatom tokens seized
             result((120).to_bytes(1, "big")),  # underlying received
             result((500).to_bytes(2, "big")),  # collateral market cash
