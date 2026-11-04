@@ -502,6 +502,58 @@ async def profit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         valuations = {r["borrower"]: "DEX or price data timed out" for r in valid}
     await update.message.reply_text(format_alert(valid, valuations))
 
+async def dryrun_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Private on-demand liquidation tx preflight, without a wallet or execution."""
+    if not _admin_private(update) or not update.message:
+        return
+    if not _enabled() or _source() != "onchain":
+        await update.message.reply_text("Hatom Watch is paused or not in on-chain mode.")
+        return
+    from core.hatom_digest import state_snapshot
+    from core.hatom_dryrun import dryrun, format_report, DryRunUnavailable
+    requested = _profit_requested_borrowers(update, context)
+    if requested:
+        wallets = requested[:1]
+    else:
+        recent = state_snapshot()["candidates"]
+        wallets = [
+            row["borrower"] for row in recent if row.get("category") == "ONCHAIN_ELIGIBLE"
+        ][:1]
+    if not wallets:
+        await update.message.reply_text(
+            "No recent Stage-2 wallet is cached. Reply to a previous private Hatom "
+            "alert with /hatom_dryrun or send /hatom_dryrun erd1... . "
+            "Simulation uses live account status, not the old alert values."
+        )
+        return
+    try:
+        rows = await asyncio.wait_for(
+            asyncio.to_thread(_recheck_borrowers_on_demand, wallets), timeout=45
+        )
+        if not rows:
+            await update.message.reply_text(
+                "This borrower has NO currently reconfirmed Stage-2 liquidation. "
+                "No transaction preflight was attempted."
+            )
+            return
+        result = await asyncio.wait_for(
+            asyncio.to_thread(dryrun, rows[0]), timeout=35
+        )
+    except asyncio.TimeoutError:
+        await update.message.reply_text(
+            "Dry-run lookup timed out. No simulated execution was established."
+        )
+        return
+    except (ValueError, requests.RequestException) as exc:
+        logger.info("Hatom dry-run unavailable (%s)", type(exc).__name__)
+        await update.message.reply_text(
+            "The Hatom liquidation transaction preflight is unavailable; "
+            "the bot has not executed anything."
+        )
+        return
+    await update.message.reply_text(format_report(result))
+
+
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _admin_private(update) or not update.message:
         return
@@ -520,6 +572,7 @@ def register(app: Application) -> None:
     app.add_handler(CommandHandler("hatom_scan", scan_command))
     app.add_handler(CommandHandler("hatom_report", report_command))
     app.add_handler(CommandHandler("hatom_profit", profit_command))
+    app.add_handler(CommandHandler("hatom_dryrun", dryrun_command))
     if _enabled() and _ready() and _admin_id() and app.job_queue:
         app.job_queue.run_repeating(scan, interval=_interval(), first=12, name="hatom_private_observer")
         if _source() == "onchain":
