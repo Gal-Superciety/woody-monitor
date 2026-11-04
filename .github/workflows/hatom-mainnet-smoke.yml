@@ -1,0 +1,39 @@
+name: Hatom mainnet read-only smoke
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/hatom-mainnet-smoke.yml'
+      - 'core/hatom_onchain.py'
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install requests
+      - name: Query live Hatom market discovery (read-only)
+        run: |
+          python - <<'PY'
+          from core.hatom_onchain import VmClient, CONTROLLER
+          client = VmClient(timeout=15)
+          print("MAINNET controller view-only probe")
+          markets = client.whitelist()
+          print("whitelisted market count:", len(markets))
+          assert 0 < len(markets) <= 32, "Unexpected market count"
+          print("first market (truncated):", markets[0][:10])
+          members = client.members(markets[0])
+          print("first market member count:", len(members))
+          if members:
+              print("first member queried for risk (address not displayed)")
+              print("isRisky bool:", client.risky(members[0]))
+              account_markets = client.account_markets(members[0])
+              print("account markets:", len(account_markets))
+              print("borrow raw:", client.borrow_amount(markets[0], members[0]))
+              print("collateral raw:", client.collateral_tokens(markets[0], members[0]))
+          else:
+              print("first market empty, no borrower risk query")
+          PY
