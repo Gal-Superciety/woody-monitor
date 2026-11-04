@@ -104,3 +104,16 @@ jobs:
           except Exception as exc:
               print("XOXNO quote endpoint unavailable (fail closed):", type(exc).__name__)
           PY
+
+      - name: Validate bot's strict live XOXNO quote parser (no tx)
+        run: |
+          python - <<'PY'
+          from core.hatom_profit import MarketData, QuoteUnavailable
+          try:
+              result = MarketData(timeout=12).dex_quote("EGLD", "USDC-c76f1f", 10**18)
+              print("Bot strict DEX quote min-out raw:", result["amount_out_min_raw"])
+              print("Bot strict DEX quote path count:", result["route_count"])
+              assert result["amount_out_min_raw"] > 0
+          except QuoteUnavailable as exc:
+              print("Bot strict DEX quote fail-closed:", str(exc))
+          PY
