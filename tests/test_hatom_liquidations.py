@@ -98,7 +98,7 @@ class HatomWatchTests(unittest.TestCase):
             self.assertEqual(len(bot.messages), 0)
             self.assertEqual(watch._STATE["last_candidates"], 1)
             self.assertEqual(watch._STATE["suppressed_unpriced"], 1)
-            self.assertIn("NO PROFIT QUOTES", watch.status_text())
+            self.assertIn("Profit-positive verified alerts: NOT AVAILABLE", watch.status_text())
 
 
     def test_onchain_risk_signals_are_also_suppressed(self):

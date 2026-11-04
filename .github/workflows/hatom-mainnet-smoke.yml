@@ -27,6 +27,12 @@ jobs:
           print("first market (truncated):", markets[0][:10])
           members = client.members(markets[0])
           print("first market member count:", len(members))
+          print("close factor WAD:", client.close_factor(markets[0]))
+          print("market cash raw:", client.market_cash(markets[0]))
+          theoretical_seize = client.seized_htokens(markets[0], markets[0], 10**15)
+          underlying = client.collateral_underlying(markets[0], theoretical_seize)
+          assert theoretical_seize > 0 and underlying > 0
+          print("seize and collateral conversion views: OK")
           if members:
               print("first member queried for risk (address not displayed)")
               print("isRisky bool:", client.risky(members[0]))

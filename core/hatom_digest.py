@@ -48,7 +48,7 @@ def store_scan(rows: list[dict[str, Any]], *, now: float | None = None, checked:
         _SINCE_START += 1
         _TOTAL_CHECKS += max(0, checked)
         for row in rows:
-            if row.get("category") != "ONCHAIN_RISKY":
+            if row.get("category") not in ("ONCHAIN_RISKY", "ONCHAIN_ELIGIBLE"):
                 continue
             borrower = row.get("borrower")
             if not isinstance(borrower, str) or not borrower.startswith("erd1"):
@@ -59,6 +59,8 @@ def store_scan(rows: list[dict[str, Any]], *, now: float | None = None, checked:
             same_poll = bool(old and now - old["observed_at"] < 2)
             _RISK_CACHE[borrower] = {
                 "borrower": borrower,
+                "category": row["category"],
+                "raw_borrow": row.get("raw_borrow", "0"),
                 "borrow_market": row["borrow_market"],
                 "collateral_market": row["collateral_market"],
                 "observed_at": now,
@@ -89,7 +91,7 @@ def state_snapshot(*, now: float | None = None, window_seconds: int = 12 * 3600)
 
 def recheck(rows: list[dict[str, Any]], *, client: Any = None, max_check: int = 7,
             max_show: int = 3) -> tuple[list[dict[str, Any]], int]:
-    """Reconfirm contract risk and smallest allow-check; fail closed on errors."""
+    """Fresh controller risk recheck; only promote to stage 2 after repay preflight."""
     if not rows:
         return [], 0
     if client is None:
@@ -101,26 +103,36 @@ def recheck(rows: list[dict[str, Any]], *, client: Any = None, max_check: int = 
         try:
             if not client.risky(row["borrower"]):
                 continue
-            if not client.liquidation_allowed(
-                row["borrow_market"], row["collateral_market"], row["borrower"], 1
-            ):
-                continue
-            confirmed.append(row)
+            current = dict(row)
+            if row.get("category") == "ONCHAIN_ELIGIBLE":
+                quote = client.meaningful_liquidation_check(
+                    row["borrow_market"], row["collateral_market"], row["borrower"],
+                    int(row["raw_borrow"])
+                )
+                if not quote:
+                    current["category"] = "ONCHAIN_RISKY"
+                else:
+                    current.update(quote)
+            else:
+                current["category"] = "ONCHAIN_RISKY"
+            confirmed.append(current)
             if len(confirmed) >= max_show:
                 break
         except Exception as exc:
             errors += 1
-            logger.warning("Hatom digest live recheck failed (%s)", type(exc).__name__)
+            logger.warning("Hatom digest live risk check failed (%s)", type(exc).__name__)
     return confirmed, errors
 
 
 def build_report(rows: list[dict[str, Any]], *, now: float | None = None,
                  verified: list[dict[str, Any]] | None = None, errors: int = 0,
                  scans: int = 0, checks: int = 0) -> str:
-    """Report only proven on-chain indicators, not dollar amounts or net-profit claims."""
+    """Private risk overview. Stage-2 candidates are not necessarily profitable."""
     now = time.time() if now is None else now
     current = datetime.fromtimestamp(now, BERLIN).strftime("%d %b %Y %H:%M")
     verified = verified or []
+    stage2 = [row for row in verified if row.get("category") == "ONCHAIN_ELIGIBLE"]
+    risk_only = [row for row in verified if row.get("category") != "ONCHAIN_ELIGIBLE"]
     text = [
         "🔐 Hatom Watch — PRIVATE RISK DIGEST",
         f"🕒 {current} (Berlin)",
@@ -128,27 +140,30 @@ def build_report(rows: list[dict[str, Any]], *, now: float | None = None,
         "Scan mode: READ-ONLY",
         f"Scans this session: {scans} | wallet checks: {checks}",
         f"Unique risk wallets observed in last 12h: {len(rows)}",
-        f"Risk + minimal repay rechecked now: {len(verified)}",
+        f"Currently reconfirmed risk-only: {len(risk_only)}",
+        f"Currently reconfirmed protocol-eligible: {len(stage2)}",
     ]
-    if verified:
-        text.append("")
-        text.append("⚠️ ON-CHAIN RISK CANDIDATES (not profit quotes):")
-        for index, row in enumerate(verified, 1):
-            observed = datetime.fromtimestamp(row["observed_at"], BERLIN).strftime("%H:%M")
+    if risk_only:
+        text.extend(["", "🟡 STAGE 1 — AT RISK (execution not verified):"])
+        for index, row in enumerate(risk_only[:3], 1):
+            text.append(f"{index}. {row['borrower']}")
+    if stage2:
+        text.extend(["", "🟠 STAGE 2 — LIQUIDATION PRECHECK PASSED (NOT PROFIT):"])
+        for index, row in enumerate(stage2[:3], 1):
             text.extend([
-                f"{index}. Borrower: {row['borrower']}",
-                f"   Seen: {observed} | minimal repay allowed: YES",
+                f"{index}. {row['borrower']}",
                 f"   Debt market: {row['borrow_market']}",
                 f"   Collateral market: {row['collateral_market']}",
             ])
     if errors:
-        text.append(f"Unavailable fresh checks: {errors} (excluded)")
+        text.append(f"Failed fresh checks (excluded): {errors}")
     text.extend([
         "",
-        "💰 Verified profitable liquidations: NOT AVAILABLE",
-        "Net profit cannot be calculated yet: exact repay cap, token decimals,",
-        "seized collateral value, real swap quotes, gas and slippage are missing.",
-        "No automatic liquidation transactions. No private keys used.",
+        "💰 Profit-positive liquidations: NOT VERIFIED",
+        "Stage 2 means Hatom's contract allows a meaningful test repayment,",
+        "with nonzero redeemable collateral and reported market cash.",
+        "USD net profit, execution gas, swap prices and slippage remain unknown.",
+        "No automatic transactions. No private keys.",
     ])
     return "\n".join(text)[:3800]
 

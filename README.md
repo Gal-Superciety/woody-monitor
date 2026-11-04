@@ -356,3 +356,29 @@ before any notification may truthfully claim a profit. No trades are
 executed. All Hatom reports target ONLY `ADMIN_TELEGRAM_ID` in a
 private chat, never the WOODY Telegram group.
 
+### Two-stage Hatom alerts — November 2026
+
+Stage 1 (risk): continuous read-only scans; at most three private risk summaries
+daily at 09:00, 15:00 and 21:00 Europe/Berlin. Multiple debt/collateral
+pairs for the same borrower are grouped.
+
+Stage 2 (protocol liquidation eligibility): the Hatom Controller identifies a
+risky account with nonzero borrowed funds and collateral; before promotion,
+the monitor checks a significant proposed repayment (25% of current debt,
+capped by the live market close factor), a nonzero `tokensToSeize` result,
+nonzero conversion from Hatom tokens to underlying collateral, and enough
+cash in the collateral money market. These contract view checks are
+**not** a transaction simulation and do not guarantee on-chain execution.
+
+Stage 2 notifications are private to `ADMIN_TELEGRAM_ID`, limited globally to
+**one batched message per hour** containing at most **two accounts** and a
+**12-hour per-borrower cooldown**. A fresh Hatom recheck is required before
+each batch; a temporary on-disk cooldown record is saved under `DATA_DIR`
+so reconnects/redeployments do not reset the global rate limit.
+
+The bot still **cannot verify whether a liquidation generates positive net
+profit**: USD-equivalent token prices, exact swap routes and slippage, gas and
+validator competition remain unavailable. The alert explicitly says so.
+The bot **never signs or executes any liquidation**. A future profit-only
+filter must first validate net profit before attaching a "profit-positive"
+label. No Hatom messages go to the WOODY group.
