@@ -33,6 +33,20 @@ jobs:
           underlying = client.collateral_underlying(markets[0], theoretical_seize)
           assert theoretical_seize > 0 and underlying > 0
           print("seize and collateral conversion views: OK")
+          from core.hatom_profit import MarketData, underlying_id, QuoteUnavailable
+          debt_token = underlying_id(client, markets[0])
+          print("First market underlying identifier:", debt_token)
+          meta = MarketData(timeout=8)
+          egld_price = meta.asset("EGLD")
+          print("EGLD reference price exists:", egld_price.price_usd > 0)
+          print("Gas min price:", meta.gas_price())
+          try:
+              asset = meta.asset(debt_token)
+              print("First market asset metadata:", asset.token, asset.decimals)
+              assert asset.price_usd > 0
+          except QuoteUnavailable as exc:
+              print("First market valuation fail-closed:", str(exc))
+
           if members:
               print("first member queried for risk (address not displayed)")
               print("isRisky bool:", client.risky(members[0]))
@@ -42,4 +56,64 @@ jobs:
               print("collateral raw:", client.collateral_tokens(markets[0], members[0]))
           else:
               print("first market empty, no borrower risk query")
+          PY
+
+      - name: Inspect public XOXNO MultiversX aggregator quote schema (read-only)
+        run: |
+          python - <<'PY'
+          import json
+          import requests
+          url = "https://swap.xoxno.com/api-docs/openapi.json"
+          try:
+              response = requests.get(url, timeout=12, allow_redirects=False)
+              print("Aggregator schema HTTP:", response.status_code)
+              response.raise_for_status()
+              schema = response.json()
+              op = schema["paths"]["/api/v1/quote"]["get"]
+              for p in op.get("parameters", []):
+                  print("QUOTE PARAM:", json.dumps({
+                      "name": p.get("name"), "in": p.get("in"),
+                      "required": p.get("required"), "schema": p.get("schema"),
+                  })[:320])
+              responses = op.get("responses", {})
+              print("QUOTE RESPONSE 200:", json.dumps(responses.get("200", {}))[:1600])
+              component = schema.get("components", {}).get("schemas", {})
+              for name in ("QuoteResponse", "QuoteSwapResponse", "QuotePathResponse"):
+                  print("QUOTE SCHEMA:", name, json.dumps(component.get(name, {}))[:2600])
+          except Exception as exc:
+              print("Quote schema unavailable; do NOT enable executable quote:", type(exc).__name__)
+          PY
+
+      - name: Test XOXNO route quote public endpoint (no transaction)
+        run: |
+          python - <<'PY'
+          import requests
+          url = "https://swap.xoxno.com/api/v1/quote"
+          params = {"from":"WEGLD-bd4d79","to":"USDC-c76f1f","amountIn":"1000000000000000000","includePaths":"true"}
+          try:
+              resp = requests.get(url, params=params, timeout=15, allow_redirects=False)
+              print("XOXNO quote HTTP:", resp.status_code)
+              data = resp.json()
+              if isinstance(data, dict):
+                  fields = ["from","to","amountIn","amountOut","amountOutMin","amountOutMinShort","feeBps","quoteTimestamp","timestamp"]
+                  print("XOXNO quote keys:", sorted(data.keys())[:32])
+                  print("XOXNO fields:", {key:data.get(key) for key in fields})
+                  print("XOXNO paths:", len(data.get("paths") or []))
+              else:
+                  print("XOXNO non-object response")
+          except Exception as exc:
+              print("XOXNO quote endpoint unavailable (fail closed):", type(exc).__name__)
+          PY
+
+      - name: Validate bot's strict live XOXNO quote parser (no tx)
+        run: |
+          python - <<'PY'
+          from core.hatom_profit import MarketData, QuoteUnavailable
+          try:
+              result = MarketData(timeout=12).dex_quote("EGLD", "USDC-c76f1f", 10**18)
+              print("Bot strict DEX quote min-out raw:", result["amount_out_min_raw"])
+              print("Bot strict DEX quote path count:", result["route_count"])
+              assert result["amount_out_min_raw"] > 0
+          except QuoteUnavailable as exc:
+              print("Bot strict DEX quote fail-closed:", str(exc))
           PY

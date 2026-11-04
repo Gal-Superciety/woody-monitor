@@ -106,7 +106,7 @@ class StageTests(unittest.TestCase):
         now = time.time()
         stages.observe([sample(), sample(borrower=B)], now=now)
         bot = SimpleNamespace(send_message=AsyncMock())
-        with patch("core.hatom_stages.revalidate", return_value=(
+        with patch("core.hatom_liquidations._value_eligible_positions", return_value={}), patch("core.hatom_stages.revalidate", return_value=(
             [dict(sample(), observed_at=now), dict(sample(borrower=B), observed_at=now)], 0
         )):
             self.assertTrue(asyncio.run(watch.eligibility_notifier(SimpleNamespace(bot=bot))))
@@ -116,7 +116,7 @@ class StageTests(unittest.TestCase):
         alert = bot.send_message.await_args.kwargs["text"]
         self.assertEqual(alert.count("Borrower:"), 2)
         self.assertIn("Not a net-profit quote", alert)
-        self.assertIn("Profit net: NOT VERIFIED", alert)
+        self.assertIn("NET PROFIT: NOT VERIFIED", alert)
         self.assertEqual(len(stages.pending()), 0)
 
     def test_disabled_monitor_does_not_notify(self):

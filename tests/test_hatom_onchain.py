@@ -64,6 +64,7 @@ class VmTests(unittest.TestCase):
             result((5 * 10**17).to_bytes(8, "big")),  # 50% close factor (WAD)
             result(bytes([1])),  # Controller repayment allowed
             result((150).to_bytes(2, "big")),  # Hatom tokens seized
+            result((200).to_bytes(2, "big")),  # borrower collateral hTokens
             result((120).to_bytes(1, "big")),  # underlying received
             result((500).to_bytes(2, "big")),  # collateral market cash
         ]
@@ -84,9 +85,30 @@ class VmTests(unittest.TestCase):
         names = [call.kwargs["json"]["funcName"] for call in session.post.call_args_list]
         self.assertEqual(names, [
             "getCloseFactor", "liquidateBorrowAllowed", "tokensToSeize",
-            "currentTokensToUnderlyingAmount", "getCash"
+            "getAccountTokens", "currentTokensToUnderlyingAmount", "getCash"
         ])
         self.assertEqual(session.post.call_args_list[1].kwargs["json"]["args"][-1], "fa")
+
+    def test_preflight_rejects_insufficient_seizable_borrower_collateral(self):
+        blobs = [
+            (5 * 10**17).to_bytes(8, "big"), bytes([1]),
+            (150).to_bytes(2, "big"), (100).to_bytes(2, "big"),
+        ]
+        session = Mock()
+        outputs = []
+        for blob in blobs:
+            response = Mock()
+            response.content = b"ok"
+            response.json.return_value = result(blob)
+            outputs.append(response)
+        session.post.side_effect = outputs
+        client = VmClient(session=session)
+        self.assertIsNone(
+            client.meaningful_liquidation_check(CONTROLLER, CONTROLLER, CONTROLLER, 1000)
+        )
+        functions = [c.kwargs["json"]["funcName"] for c in session.post.call_args_list]
+        self.assertEqual(functions[-1], "getAccountTokens")
+        self.assertNotIn("getCash", functions)
 
     def test_repay_preflight_rejects_small_debt(self):
         session = Mock()
