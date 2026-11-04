@@ -458,3 +458,33 @@ it never reuses old repayment amounts without reconfirming contract state.
 At most three borrower addresses are examined per command. This does not
 sign or execute any blockchain transactions. If the position is no
 longer eligible, the bot says so rather than manufacturing a profit quote.
+
+
+### Hatom priority alerts: positive indicative DEX scenarios only
+
+Stage-1 scheduled risk digests stay unchanged. Stage-2 stays rate limited to
+one private batch per hour, maximum two wallets per message, same borrower
+at most once per 12 hours **after a successful alert**.
+
+The notifier filters out ALL other Stage-2 candidates and requires:
+1. A freshly reconfirmed Hatom on-chain liquidation preflight.
+2. A valid XOXNO exact-input route with strictly positive minimum output,
+   received within `HATOM_ALERT_MAX_QUOTE_AGE_SECONDS=60`.
+3. A repayment value of at least `HATOM_ALERT_MIN_REPAY_USD=25`.
+4. The DEX minimum-output reference USD value minus the debt repayment and
+   *assumed* gas, minus an **additional** conservative buffer equal to
+   the greater of 1% of the repayment or USD 0.50.
+5. At least `HATOM_ALERT_MIN_NET_USD=2` remains after that buffer.
+
+Relevant variables: `HATOM_ALERT_MIN_REPAY_USD`,
+`HATOM_ALERT_MIN_NET_USD`, `HATOM_ALERT_SAFETY_BUFFER_BPS`,
+`HATOM_ALERT_SAFETY_BUFFER_USD`,
+`HATOM_ALERT_MAX_QUOTE_AGE_SECONDS`. Invalid settings fail closed.
+
+If these conditions are NOT met, no Stage-2 Telegram alert is sent.
+On-demand `/hatom_profit` still explains positive *or negative* indicative
+scenarios for eligible positions. An indicative profit screen is **not
+evidence of an executable liquidation**: end-to-end signing, redemption,
+wrap/unwrap, gas and competition still need separate simulation.
+No transactions or wallet keys are used. Alerts go to the private admin
+chat exclusively.

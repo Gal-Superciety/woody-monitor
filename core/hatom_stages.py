@@ -149,12 +149,15 @@ def revalidate(rows: list[dict[str, Any]], *, client: Any = None, max_select: in
     return valid, errors
 
 
-def format_alert(rows: list[dict[str, Any]], valuations: dict[str, Any] | None = None) -> str:
+def format_alert(rows: list[dict[str, Any]], valuations: dict[str, Any] | None = None,
+                 *, profit_screened: bool = False) -> str:
     valuations = valuations or {}
     lines = [
-        "🚨 HATOM — PRIVATE PROTOCOL-LIQUIDATION ALERT",
+        "🚨 HATOM — PRIVATE POSITIVE-SCENARIO ALERT" if profit_screened
+        else "🚨 HATOM — PRIVATE PROTOCOL-LIQUIDATION ALERT",
         "Stage 2: protocol liquidation eligibility reconfirmed NOW.",
-        "Not a net-profit quote or execution guarantee.",
+        "Positive indicative DEX margin, NOT verified execution profit." if profit_screened
+        else "Not a net-profit quote or execution guarantee.",
         "",
     ]
     for i, row in enumerate(rows, 1):
@@ -170,13 +173,21 @@ def format_alert(rows: list[dict[str, Any]], valuations: dict[str, Any] | None =
         if isinstance(estimate, dict) and estimate.get("category") == "INDICATIVE_ONLY":
             from core.hatom_profit import format_scenario
             lines.extend(format_scenario(estimate))
+            if profit_screened and estimate.get("profit_alert_screen_passed") is True:
+                from core.hatom_profit import _money
+                lines.extend([
+                    f"   Extra safety buffer: {_money(estimate['safety_buffer_usd'])}",
+                    f"   Indicative surplus AFTER buffer: "
+                    f"{_money(estimate['screened_surplus_usd'])}",
+                    "   Profit remains UNVERIFIED; do not transact from this alert.",
+                ])
         elif isinstance(estimate, str):
             lines.append(f"   Price scenario: unavailable ({estimate[:90]})")
         else:
             lines.append("   Price scenario: unavailable (no verified token metadata)")
         lines.append("")
     lines += [
-        "NET PROFIT: NOT VERIFIED — no executable DEX swap quote.",
+        "NET PROFIT: NOT VERIFIED — no full transaction simulation.",
         "USD values, if present, are reference-price scenarios with ASSUMED costs.",
         "Price source timestamp and exact execution costs are not independently verified.",
         "A subsequent transaction may fail if conditions change.",
