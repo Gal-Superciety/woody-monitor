@@ -239,7 +239,7 @@ def _value_eligible_positions(rows: list[dict[str, Any]]) -> dict[str, Any]:
     results: dict[str, Any] = {}
     vm = VmClient(timeout=8)
     prices = MarketData(timeout=7)
-    for row in rows[:3]:
+    for row in rows[:8]:
         borrower = row["borrower"]
         try:
             results[borrower] = estimate(row, vm=vm, prices=prices)
@@ -250,23 +250,50 @@ def _value_eligible_positions(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 async def eligibility_notifier(context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """At most one private stage-2 batch/hour; zero profit claims."""
+    """Send only private, positive indicative DEX scenarios after strict screen.
+
+    Hatom scan and scheduled risk digest continue normally. No wallet signing.
+    """
     if not _enabled() or not _ready() or _source() != "onchain" or _admin_id() is None:
         return False
     from core.hatom_stages import pending, revalidate, format_alert, mark_delivered
+    from core.hatom_profit_filter import eligible_for_priority_alert
     candidates = pending()
     if not candidates:
         return False
-    checked, errors = await asyncio.to_thread(revalidate, candidates)
+    # Inspect several candidates; the first two may be economically worthless.
+    checked, errors = await asyncio.to_thread(revalidate, candidates, max_select=8)
     if errors:
         logger.info("HATOM_ELIGIBILITY_REFRESH_ERRORS | skipped=%s", errors)
     if not checked:
         return False
     valuations = await asyncio.to_thread(_value_eligible_positions, checked)
-    await context.bot.send_message(
-        chat_id=_admin_id(), text=format_alert(checked, valuations)
+    passing: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    reason_counts: dict[str, int] = {}
+    for row in checked:
+        qualifies, reason, screened = eligible_for_priority_alert(
+            valuations.get(row["borrower"])
+        )
+        if qualifies and screened is not None:
+            passing.append((row, screened))
+        else:
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+    logger.info(
+        "HATOM_PROFIT_ALERT_SCREEN | checked=%s | passing=%s | rejected=%s",
+        len(checked), len(passing), reason_counts
     )
-    mark_delivered(checked)
+    if not passing:
+        return False
+    # Pick up to two distinct wallets with the best *indicative* surplus,
+    # without altering the Stage-2 borrower cooldown or hourly limit.
+    passing.sort(key=lambda item: item[1]["screened_surplus_usd"], reverse=True)
+    selected = passing[:2]
+    rows = [row for row, _ in selected]
+    screened_values = {row["borrower"]: value for row, value in selected}
+    await context.bot.send_message(
+        chat_id=_admin_id(), text=format_alert(rows, screened_values, profit_screened=True)
+    )
+    mark_delivered(rows)
     _STATE["sent"] += 1
     return True
 
@@ -312,9 +339,10 @@ def status_text() -> str:
         f"Admin private destination: {'configured' if admin_ok else 'missing'}\n"
         f"Unpriced risk signals on last scan: {_STATE['last_candidates']}\n"
         "Profit scenario: REFERENCE USD PRICES + ASSUMED COSTS\n"
-        "Verified executable profit: NOT AVAILABLE (no DEX quote)\n"
+        "Verified executable profit: NOT AVAILABLE (no transaction simulation)\n"
         "Risk alerts: PRIVATE DIGEST ONLY\n"
-        "Stage 2: 1 batch/hour max, 2 borrowers/batch\n"
+        "Stage 2: PROFIT-SCREENED INDICATIVE ONLY; 1 batch/hour, 2 wallets\n"
+        "Priority filter: DEX quote + minimum repay $25 + safety margin + $2\n"
         "Stage 2 borrower cooldown: 12h\n"
         f"Pending stage 2 candidates: {stage['pending_eligible']}\n"
         f"Private risk digest: {','.join(f'{hour:02d}:00' for hour in digest_hours())} Berlin\n"
