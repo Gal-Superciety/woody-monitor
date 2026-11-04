@@ -14,8 +14,9 @@ import math
 import os
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, time as clock_time, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 from urllib.parse import urlsplit
 
 import requests
@@ -206,7 +207,13 @@ async def scan(context: ContextTypes.DEFAULT_TYPE) -> int:
             positions = await asyncio.to_thread(_download)
         _STATE["last_poll"] = datetime.now(timezone.utc).isoformat()
         _STATE["last_error"] = None
-        _STATE["last_candidates"] = len(positions)
+        from core.hatom_digest import store_scan
+        checked = 0
+        if _source() == "onchain":
+            from core.hatom_onchain import get_scanner
+            checked = get_scanner().status.get("checked", 0)
+        store_scan(positions, checked=checked)
+        _STATE["last_candidates"] = len(set(row["borrower"] for row in positions))
         _STATE["suppressed_unpriced"] = len(positions)
     except Exception as exc:
         _STATE["last_error"] = type(exc).__name__
@@ -217,16 +224,41 @@ async def scan(context: ContextTypes.DEFAULT_TYPE) -> int:
     # Missing: repay limits, token decimals, fresh oracle prices, DEX quotes,
     # liquidation collateral recovery, gas costs, and slippage.
     # DO NOT dispatch an alert until these inputs are actually validated.
-    logger.info("HATOM_UNPRICED_SIGNALS_SUPPRESSED | observed=%s", len(positions))
+    logger.info("HATOM_RISK_SCAN_COLLECTED | new_route_signals=%s | private_digest_only", len(positions))
     return 0
 
+
+
+async def digest(context: ContextTypes.DEFAULT_TYPE, *, manual: bool = False) -> bool:
+    """Send a private, rate-limited risk summary, not one alert per market."""
+    if not _enabled() or not _ready() or _source() != "onchain" or _admin_id() is None:
+        return False
+    from core.hatom_digest import state_snapshot, recheck, build_report, mark_report_sent
+    snapshot = state_snapshot()
+    candidates = snapshot["candidates"]
+    if not candidates and not manual:
+        return False
+    checked, errors = await asyncio.to_thread(recheck, candidates)
+    if not checked and not manual:
+        return False
+    report = build_report(
+        candidates, verified=checked, errors=errors,
+        scans=snapshot["scans"], checks=snapshot["checks"]
+    )
+    await context.bot.send_message(chat_id=_admin_id(), text=report)
+    if not manual:
+        mark_report_sent()
+    _STATE["sent"] += 1
+    return True
 
 
 def status_text() -> str:
     enabled = _enabled()
     configured = _ready()
     admin_ok = _admin_id() is not None
-    status = "SCAN-ONLY (NO PROFIT ALERTS)" if enabled and configured and admin_ok else "PAUSED"
+    status = "SCAN + PRIVATE DIGEST (NO PROFIT QUOTES)" if enabled and configured and admin_ok else "PAUSED"
+    from core.hatom_digest import digest_hours, state_snapshot
+    report_state = state_snapshot()
     return (
         "🔐 Hatom Watch — Private Admin\n"
         f"State: {status}\n"
@@ -236,7 +268,12 @@ def status_text() -> str:
         f"Admin private destination: {'configured' if admin_ok else 'missing'}\n"
         f"Unpriced risk signals on last scan: {_STATE['last_candidates']}\n"
         "Net-profit validation: NOT IMPLEMENTED\n"
-        "Automatic liquidation alerts: BLOCKED\n"
+        "Real-time per-wallet alerts: DISABLED\\n"
+        f"Private risk digest: {','.join(f'{hour:02d}:00' for hour in digest_hours())} Berlin\\n"
+        f"Risk wallets observed (last 12h): {len(report_state['candidates'])}\\n"
+        f"Completed scans this session: {report_state['scans']}\\n"
+        f"Wallets checked this session: {report_state['checks']}\\n"
+        "Verified-profit alerts: NOT AVAILABLE (profit engine missing)\\n"
         f"Alerts delivered this session: {_STATE['sent']}\n"
         f"Last successful poll: {_STATE['last_poll'] or 'never'}\n"
         f"Last error: {_STATE['last_error'] or 'none'}\n\n"
@@ -271,16 +308,38 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not _enabled() or not _ready():
         await update.message.reply_text("Hatom Watch inactive. Configure ENABLE_HATOM_WATCH=true with HATOM_WATCH_SOURCE=onchain or a trusted feed.")
         return
-    sent = await scan(context)
-    await update.message.reply_text(f"Hatom scan complete. Verified-profit alerts sent: {sent}.\n{status_text()}")
+    await scan(context)
+    await update.message.reply_text(f"Hatom scan completed (risk data stored; no instant alerts).\\n{status_text()}")
+
+
+async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _admin_private(update) or not update.message:
+        return
+    if not _enabled():
+        await update.message.reply_text("Hatom Watch is paused in Railway.")
+        return
+    if _source() != "onchain":
+        await update.message.reply_text("Hatom private risk digests require verified on-chain mode.")
+        return
+    await digest(context, manual=True)
 
 
 def register(app: Application) -> None:
     app.add_handler(CommandHandler("hatom_status", status_command))
     app.add_handler(CommandHandler("hatom_test", test_command))
     app.add_handler(CommandHandler("hatom_scan", scan_command))
+    app.add_handler(CommandHandler("hatom_report", report_command))
     if _enabled() and _ready() and _admin_id() and app.job_queue:
         app.job_queue.run_repeating(scan, interval=_interval(), first=12, name="hatom_private_observer")
-        logger.info("Hatom private observer scheduled | interval=%ss", _interval())
+        from core.hatom_digest import digest_hours
+        if _source() == "onchain":
+            for hour in digest_hours():
+                app.job_queue.run_daily(
+                    digest,
+                    time=clock_time(hour=hour, minute=0, tzinfo=ZoneInfo("Europe/Berlin")),
+                    name=f"hatom_admin_digest_{hour:02d}",
+                )
+        logger.info("Hatom private observer scheduled | interval=%ss | digest hours Berlin=%s",
+                    _interval(), digest_hours() if _source() == "onchain" else [])
     else:
         logger.info("Hatom private observer disabled until an on-chain or trusted feed source is enabled")
