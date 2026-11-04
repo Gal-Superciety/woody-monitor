@@ -126,6 +126,24 @@ class ScannerTests(unittest.TestCase):
         scanner = HatomScanner(client, batch=2, refresh_seconds=3600)
         self.assertEqual(scanner.scan(), [])
 
+    def test_initial_market_index_warms_up_over_first_polls(self):
+        client = StubClient()
+        scanner = HatomScanner(client, batch=1, refresh_seconds=3600)
+        scanner.scan()
+        self.assertEqual(
+            [call for call in client.calls if isinstance(call, tuple) and call[0] == "members"],
+            [("members", client.market)]
+        )
+        scanner.scan()
+        self.assertEqual(
+            [call for call in client.calls if isinstance(call, tuple) and call[0] == "members"],
+            [("members", client.market), ("members", client.collateral)]
+        )
+        scanner.scan()
+        self.assertEqual(
+            len([call for call in client.calls if isinstance(call, tuple) and call[0] == "members"]), 2
+        )
+
     def test_no_market_fails_closed(self):
         client = StubClient()
         client.whitelist = lambda: []

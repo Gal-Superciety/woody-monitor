@@ -333,3 +333,26 @@ resolution, actual repay limits, oracle freshness, seize amounts, current
 DEX liquidation routes, slippage, fees, and a configurable minimum **net**
 profit margin. Deduplicate by borrower and best executable collateral/debt
 route. Keep liquidation execution disabled until separately authorized.
+
+### Hatom Watch: quiet scans and private risk digests
+
+Set `ENABLE_HATOM_WATCH=true` with `HATOM_WATCH_SOURCE=onchain`
+to run *read-only* checks every `HATOM_WATCH_INTERVAL_SECONDS=90`
+seconds. These checks **never send per-position alerts**.
+
+By default, at most one private digest runs at **09:00, 15:00, 21:00
+Europe/Berlin** (`HATOM_DIGEST_HOURS_BERLIN=9,15,21`). The digest
+is skipped if no recent position passes an additional fresh Hatom
+`isRisky` and tiny-repayment `liquidateBorrowAllowed` view check.
+An administrator may request an immediate **private** snapshot with
+`/hatom_report`, which does not increase the scheduled message count.
+The bot deduplicates multiple debt/collateral markets of one borrower.
+
+**No verified profitable liquidation is available yet.** A positive
+`isRisky` and minimum-repayment view check are **only risk indicators**.
+Accurate repay caps, token decimals, oracle prices, seized collateral
+quotes, swap slippage, gas and net profit must be computed and tested
+before any notification may truthfully claim a profit. No trades are
+executed. All Hatom reports target ONLY `ADMIN_TELEGRAM_ID` in a
+private chat, never the WOODY Telegram group.
+

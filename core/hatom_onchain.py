@@ -243,7 +243,11 @@ class HatomScanner:
             self._markets = markets[:32]
             self._markets_at = now
             self.status["markets"] = len(self._markets)
-        if not self._members or now - self._last_refresh_at >= self.refresh_seconds:
+        # Warm up the index: query one NEW market per poll until all markets
+        # have been visited. Afterwards refresh one market at the normal
+        # cadence to limit network load.
+        initial_cycle_incomplete = self._next_market < len(self._markets)
+        if not self._members or initial_cycle_incomplete or now - self._last_refresh_at >= self.refresh_seconds:
             market = self._markets[self._next_market % len(self._markets)]
             found = self.client.members(market)
             if len(found) > self.max_members:
