@@ -365,7 +365,7 @@ class HatomScanner:
                     # and nonzero redeemable collateral, NOT net-profit or fill.
                     candidate = None
                     for debt_market, raw_amount in borrow_pairs[:4]:
-                        if candidate is not None:
+                        if candidate is not None and candidate["category"] == "ONCHAIN_ELIGIBLE":
                             break
                         for collateral_market in collateral_markets[:4]:
                             if candidate is None:
