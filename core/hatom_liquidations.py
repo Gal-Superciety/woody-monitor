@@ -220,34 +220,6 @@ async def scan(context: ContextTypes.DEFAULT_TYPE) -> int:
     logger.info("HATOM_UNPRICED_SIGNALS_SUPPRESSED | observed=%s", len(positions))
     return 0
 
-    now = time.time()
-    sent = 0
-    for position in positions:
-        if sent >= 5:  # guard against floods on a first scan
-            break
-        key = (position["borrower"], position.get("borrow_market", position["debt_token"]), position.get("collateral_market", position["collateral_token"]))
-        last = _LAST_ALERTS.get(key)
-        if last and last[0] == position["category"] and now - last[1] < _cooldown():
-            continue
-        try:
-            await context.bot.send_message(
-                chat_id=admin,  # never the public group ID
-                text=_message(position),
-                disable_web_page_preview=True,
-            )
-        except Exception as exc:
-            logger.warning("Hatom private alert delivery failed (%s)", type(exc).__name__)
-            _STATE["last_error"] = type(exc).__name__
-            break
-        _LAST_ALERTS[key] = (position["category"], now)
-        sent += 1
-        _STATE["sent"] += 1
-
-    if len(_LAST_ALERTS) > 2000:
-        for key, (_, when) in list(_LAST_ALERTS.items()):
-            if now - when > max(_cooldown(), 86400):
-                _LAST_ALERTS.pop(key, None)
-    return sent
 
 
 def status_text() -> str:
