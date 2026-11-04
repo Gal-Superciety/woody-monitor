@@ -57,3 +57,29 @@ jobs:
           else:
               print("first market empty, no borrower risk query")
           PY
+
+      - name: Inspect public XOXNO MultiversX aggregator quote schema (read-only)
+        run: |
+          python - <<'PY'
+          import json
+          import requests
+          url = "https://swap.xoxno.com/api-docs/openapi.json"
+          try:
+              response = requests.get(url, timeout=12, allow_redirects=False)
+              print("Aggregator schema HTTP:", response.status_code)
+              response.raise_for_status()
+              schema = response.json()
+              op = schema["paths"]["/api/v1/quote"]["get"]
+              for p in op.get("parameters", []):
+                  print("QUOTE PARAM:", json.dumps({
+                      "name": p.get("name"), "in": p.get("in"),
+                      "required": p.get("required"), "schema": p.get("schema"),
+                  })[:320])
+              responses = op.get("responses", {})
+              print("QUOTE RESPONSE 200:", json.dumps(responses.get("200", {}))[:1600])
+              component = schema.get("components", {}).get("schemas", {})
+              for name in ("QuoteResponse", "QuoteSwapResponse", "QuotePathResponse"):
+                  print("QUOTE SCHEMA:", name, json.dumps(component.get(name, {}))[:2600])
+          except Exception as exc:
+              print("Quote schema unavailable; do NOT enable executable quote:", type(exc).__name__)
+          PY
