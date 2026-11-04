@@ -255,13 +255,14 @@ def estimate(row: dict[str, Any], vm: Any = None, prices: MarketData | None = No
     dex_quote = None
     dex_quote_error = None
     quote_min_usd = None
+    quote_min_units = None
     quote_net_usd = None
     try:
         dex_quote = prices.dex_quote(
             collateral_id, debt_id, _nonnegative_int(row["collateral_underlying_raw"])
         )
-        min_units = human(dex_quote["amount_out_min_raw"], debt_asset.decimals)
-        quote_min_usd = min_units * debt_asset.price_usd
+        quote_min_units = human(dex_quote["amount_out_min_raw"], debt_asset.decimals)
+        quote_min_usd = quote_min_units * debt_asset.price_usd
         quote_net_usd = quote_min_usd - debt_usd - gas_usd
     except (QuoteUnavailable, KeyError, TypeError, AttributeError) as exc:
         dex_quote_error = explain_missing(exc)
@@ -286,6 +287,7 @@ def estimate(row: dict[str, Any], vm: Any = None, prices: MarketData | None = No
         "dex_quote": dex_quote,
         "dex_quote_error": dex_quote_error,
         "quote_min_usd": quote_min_usd,
+        "quote_min_units": quote_min_units,
         "quote_net_after_assumed_gas_usd": quote_net_usd,
         "assumed_slippage_bps": swap_bps,
         "assumed_gas_units": gas_units,
@@ -327,7 +329,8 @@ def format_scenario(result: dict[str, Any]) -> list[str]:
         after_gas = result["quote_net_after_assumed_gas_usd"]
         sign2 = "+" if after_gas >= 0 else ""
         lines.extend([
-            f"   LIVE DEX MIN-OUT QUOTE: {_money(minimum)}",
+            f"   LIVE DEX MIN-OUT: {_amount(result['quote_min_units'])} "
+            f"{result['repay_symbol']} ({_money(minimum)})",
             f"   DEX-min scenario after ASSUMED gas: {sign2}{_money(after_gas)}",
             f"   Quote routes: {result['dex_quote']['route_count']}",
         ])
