@@ -232,6 +232,23 @@ async def scan(context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 
+def _value_eligible_positions(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Read-only market-price scenarios; if anything is missing, show reason."""
+    from core.hatom_onchain import VmClient
+    from core.hatom_profit import MarketData, estimate, explain_missing
+    results: dict[str, Any] = {}
+    vm = VmClient(timeout=8)
+    prices = MarketData(timeout=7)
+    for row in rows[:3]:
+        borrower = row["borrower"]
+        try:
+            results[borrower] = estimate(row, vm=vm, prices=prices)
+        except Exception as exc:
+            results[borrower] = explain_missing(exc)
+            logger.info("HATOM_PROFIT_SCENARIO_UNAVAILABLE | reason=%s", type(exc).__name__)
+    return results
+
+
 async def eligibility_notifier(context: ContextTypes.DEFAULT_TYPE) -> bool:
     """At most one private stage-2 batch/hour; zero profit claims."""
     if not _enabled() or not _ready() or _source() != "onchain" or _admin_id() is None:
@@ -245,7 +262,10 @@ async def eligibility_notifier(context: ContextTypes.DEFAULT_TYPE) -> bool:
         logger.info("HATOM_ELIGIBILITY_REFRESH_ERRORS | skipped=%s", errors)
     if not checked:
         return False
-    await context.bot.send_message(chat_id=_admin_id(), text=format_alert(checked))
+    valuations = await asyncio.to_thread(_value_eligible_positions, checked)
+    await context.bot.send_message(
+        chat_id=_admin_id(), text=format_alert(checked, valuations)
+    )
     mark_delivered(checked)
     _STATE["sent"] += 1
     return True
@@ -291,7 +311,8 @@ def status_text() -> str:
         f"Discovery configured: {'yes' if configured else 'no'}\n"
         f"Admin private destination: {'configured' if admin_ok else 'missing'}\n"
         f"Unpriced risk signals on last scan: {_STATE['last_candidates']}\n"
-        "Net-profit validation: NOT IMPLEMENTED\n"
+        "Profit scenario: REFERENCE USD PRICES + ASSUMED COSTS\\n"
+        "Verified executable profit: NOT AVAILABLE (no DEX quote)\\n"
         "Risk alerts: PRIVATE DIGEST ONLY\n"
         "Stage 2: 1 batch/hour max, 2 borrowers/batch\n"
         "Stage 2 borrower cooldown: 12h\n"
@@ -300,7 +321,7 @@ def status_text() -> str:
         f"Risk wallets observed (last 12h): {len(report_state['candidates'])}\n"
         f"Completed scans this session: {report_state['scans']}\n"
         f"Wallets checked this session: {report_state['checks']}\n"
-        "Profit-positive verified alerts: NOT AVAILABLE (profit engine missing)\n"
+        "Trade signing and execution: DISABLED\\n"
         f"Alerts delivered this session: {_STATE['sent']}\n"
         f"Last successful poll: {_STATE['last_poll'] or 'never'}\n"
         f"Last error: {_STATE['last_error'] or 'none'}\n\n"
@@ -339,6 +360,34 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(f"Hatom scan completed (risk data stored; no instant alerts).\n{status_text()}")
 
 
+async def profit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Private manual preflight + market-price scenario, never a trade."""
+    if not _admin_private(update) or not update.message:
+        return
+    if not _enabled() or _source() != "onchain":
+        await update.message.reply_text("Hatom Watch on-chain monitoring is paused.")
+        return
+    from core.hatom_digest import state_snapshot
+    from core.hatom_stages import revalidate, format_alert
+    recent = [
+        row for row in state_snapshot()["candidates"]
+        if row.get("category") == "ONCHAIN_ELIGIBLE"
+    ][:6]
+    if not recent:
+        await update.message.reply_text(
+            "No recent stage-2 candidates are cached. This is not proof that Hatom has no liquidations."
+        )
+        return
+    valid, errors = await asyncio.to_thread(revalidate, recent)
+    if not valid:
+        await update.message.reply_text(
+            f"No stage-2 positions survived current on-chain recheck (errors: {errors})."
+        )
+        return
+    valuations = await asyncio.to_thread(_value_eligible_positions, valid)
+    await update.message.reply_text(format_alert(valid, valuations))
+
+
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _admin_private(update) or not update.message:
         return
@@ -356,6 +405,7 @@ def register(app: Application) -> None:
     app.add_handler(CommandHandler("hatom_test", test_command))
     app.add_handler(CommandHandler("hatom_scan", scan_command))
     app.add_handler(CommandHandler("hatom_report", report_command))
+    app.add_handler(CommandHandler("hatom_profit", profit_command))
     if _enabled() and _ready() and _admin_id() and app.job_queue:
         app.job_queue.run_repeating(scan, interval=_interval(), first=12, name="hatom_private_observer")
         if _source() == "onchain":
