@@ -74,7 +74,7 @@ class HatomWatchTests(unittest.TestCase):
             self.assertFalse(watch._admin_private(update(55, "private", 55)))
             self.assertFalse(watch._admin_private(update(55, "private", 42)))
 
-    def test_scan_sends_to_admin_only_and_deduplicates(self):
+    def test_scan_never_sends_unverified_profit_signals(self):
         sample = {
             "borrower": ADDRESS,
             "health_factor": 0.95,
@@ -93,11 +93,33 @@ class HatomWatchTests(unittest.TestCase):
             "ENABLE_HATOM_WATCH": "true",
         }
         with patch.dict(os.environ, env), patch.object(watch, "_download", return_value=[sample]):
-            self.assertEqual(asyncio.run(watch.scan(context)), 1)
             self.assertEqual(asyncio.run(watch.scan(context)), 0)
-        self.assertEqual(len(bot.messages), 1)
-        self.assertEqual(bot.messages[0]["chat_id"], 42)
-        self.assertNotEqual(bot.messages[0]["chat_id"], -100987)
+            self.assertEqual(asyncio.run(watch.scan(context)), 0)
+            self.assertEqual(len(bot.messages), 0)
+            self.assertEqual(watch._STATE["last_candidates"], 1)
+            self.assertEqual(watch._STATE["suppressed_unpriced"], 1)
+            self.assertIn("NO PROFIT ALERTS", watch.status_text())
+
+
+    def test_onchain_risk_signals_are_also_suppressed(self):
+        bot = FakeBot()
+        context = SimpleNamespace(bot=bot)
+        sample = {
+            "borrower": ADDRESS,
+            "health_factor": None,
+            "debt_token": "market-contract",
+            "collateral_token": "market-contract",
+            "borrow_market": ADDRESS,
+            "collateral_market": ADDRESS,
+            "raw_borrow": "123456789",
+            "category": "ONCHAIN_RISKY",
+        }
+        env = {"ADMIN_TELEGRAM_ID": "42", "HATOM_WATCH_SOURCE": "onchain",
+               "ENABLE_HATOM_WATCH": "true", "ENABLE_GROUP_ALERTS": "true"}
+        with patch.dict(os.environ, env), patch("core.hatom_onchain.scan_mainnet", return_value=[sample]):
+            self.assertEqual(asyncio.run(watch.scan(context)), 0)
+        self.assertEqual(bot.messages, [])
+        self.assertEqual(watch._STATE["suppressed_unpriced"], 1)
 
     def test_disabled_scan_does_not_call_feed_or_send(self):
         bot = FakeBot()
