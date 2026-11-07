@@ -470,11 +470,11 @@ The notifier filters out ALL other Stage-2 candidates and requires:
 1. A freshly reconfirmed Hatom on-chain liquidation preflight.
 2. A valid XOXNO exact-input route with strictly positive minimum output,
    received within `HATOM_ALERT_MAX_QUOTE_AGE_SECONDS=60`.
-3. A repayment value of at least `HATOM_ALERT_MIN_REPAY_USD=25`.
+3. A strictly positive repayment; `HATOM_ALERT_MIN_REPAY_USD=0` removes the additional minimum-capital floor.
 4. The DEX minimum-output reference USD value minus the debt repayment and
    *assumed* gas, minus an **additional** conservative buffer equal to
-   the greater of 1% of the repayment or USD 0.50.
-5. At least `HATOM_ALERT_MIN_NET_USD=2` remains after that buffer.
+   the greater of 1% of the repayment or USD 0.50 (unchanged safety reserve).
+5. At least `HATOM_ALERT_MIN_NET_USD=0.25` remains after that buffer.
 
 Relevant variables: `HATOM_ALERT_MIN_REPAY_USD`,
 `HATOM_ALERT_MIN_NET_USD`, `HATOM_ALERT_SAFETY_BUFFER_BPS`,
@@ -522,3 +522,17 @@ is NOT a verified profitable trade. This monitor retains read-only
 mode, Stage-1 digests and positive-indicative Stage-2 alert filtering.
 
 Reference: https://docs.multiversx.com/sdk-and-tools/rest-api/transactions/
+
+### Micro-liquidation alerts and cumulative gains
+
+Alerts now include positions with as little as USD 0.25 **modeled positive
+surplus AFTER** subtracting the quoted DEX minimum return, the assumed
+gas cost, and an *extra* safety buffer (at least USD 0.50 or 1% of debt).
+There is no arbitrary repayment-size floor. This lets smaller, genuinely
+positive *indicative* opportunities surface.
+
+These are **NOT verified or guaranteed profits**: liquidation may revert,
+a route may expire, redemptions may cost additional gas, and failed attempts
+can erase the small modeled gains. The monitor does not submit trades,
+compound gains or provide profit statistics based on unexecuted alerts.
+Never fund a bot solely on the basis of these scenarios.

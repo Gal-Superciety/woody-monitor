@@ -31,11 +31,11 @@ def sample(*, repay="200", received="209", gas="0.25", observed=None,
 
 
 class FilterTests(unittest.TestCase):
-    def test_default_limits_and_two_dollar_floor(self):
+    def test_default_limits_allow_small_repayment_with_quarter_dollar_floor(self):
         with patch.dict(os.environ, {}, clear=True):
             rules = limits()
-        self.assertEqual(rules["min_repay_usd"], Decimal("25"))
-        self.assertEqual(rules["min_net_usd"], Decimal("2"))
+        self.assertEqual(rules["min_repay_usd"], Decimal("0"))
+        self.assertEqual(rules["min_net_usd"], Decimal("0.25"))
         self.assertEqual(rules["buffer_bps"], 100)
         self.assertEqual(rules["fixed_buffer_usd"], Decimal("0.50"))
 
@@ -45,6 +45,33 @@ class FilterTests(unittest.TestCase):
         self.assertEqual(result["safety_buffer_usd"], Decimal("2"))
         self.assertEqual(result["screened_surplus_usd"], Decimal("6.75"))
         self.assertFalse(result["verified_profit"])
+
+    def test_small_repayment_can_pass_when_net_after_costs_and_buffer_is_at_least_025(self):
+        # Under the old $25 minimum this valid, modeled $0.70 result was suppressed.
+        passed, reason, result = eligible_for_priority_alert(
+            sample(repay="12", received="13.40", gas="0.20")
+        )
+        self.assertTrue(passed, reason)
+        self.assertEqual(result["safety_buffer_usd"], Decimal("0.50"))
+        self.assertEqual(result["screened_surplus_usd"], Decimal("0.70"))
+        self.assertFalse(result["verified_profit"])
+
+    def test_quarter_dollar_is_a_hard_floor_after_extra_buffer(self):
+        exactly, _, value = eligible_for_priority_alert(
+            sample(repay="10", received="10.95", gas="0.20")
+        )
+        self.assertTrue(exactly)
+        self.assertEqual(value["screened_surplus_usd"], Decimal("0.25"))
+        under, _, _ = eligible_for_priority_alert(
+            sample(repay="10", received="10.949999", gas="0.20")
+        )
+        self.assertFalse(under)
+
+    def test_zero_debt_does_not_pass_despite_removing_size_limit(self):
+        passed, _, _ = eligible_for_priority_alert(
+            sample(repay="0", received="10", gas="0.20")
+        )
+        self.assertFalse(passed)
 
     def test_prior_negative_examples_are_filtered(self):
         for value in (
@@ -65,7 +92,7 @@ class FilterTests(unittest.TestCase):
 
     def test_not_enough_after_safety_buffer(self):
         passed, _, _ = eligible_for_priority_alert(
-            sample(repay="200", received="203.2", gas="0.25")
+            sample(repay="200", received="202.1", gas="0.25")
         )
         self.assertFalse(passed)
 
