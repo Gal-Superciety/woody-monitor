@@ -26,13 +26,13 @@ def _money(value: Any) -> Decimal:
 
 def limits() -> dict[str, Decimal | int]:
     """Safe defaults; reject impossible environment settings."""
-    min_capital = _money(os.getenv("HATOM_ALERT_MIN_REPAY_USD", "25"))
-    min_net = _money(os.getenv("HATOM_ALERT_MIN_NET_USD", "2"))
+    min_capital = _money(os.getenv("HATOM_ALERT_MIN_REPAY_USD", "0"))
+    min_net = _money(os.getenv("HATOM_ALERT_MIN_NET_USD", "0.25"))
     buffer_bps = int(os.getenv("HATOM_ALERT_SAFETY_BUFFER_BPS", "100"))
     fixed_buffer = _money(os.getenv("HATOM_ALERT_SAFETY_BUFFER_USD", "0.50"))
     max_quote_age = int(os.getenv("HATOM_ALERT_MAX_QUOTE_AGE_SECONDS", "60"))
     if (
-        not Decimal("1") <= min_capital <= Decimal("100000")
+        not Decimal("0") <= min_capital <= Decimal("100000")
         or not Decimal("0.01") <= min_net <= Decimal("100000")
         or not 0 <= buffer_bps <= 3000
         or not Decimal("0") <= fixed_buffer <= Decimal("1000")
@@ -85,7 +85,7 @@ def eligible_for_priority_alert(
         gas = _money(report["assumed_gas_cost_usd"])
         scenario_net = _money(report["quote_net_after_assumed_gas_usd"])
         gross = _money(report["gross_usd"])
-        if debt < params["min_repay_usd"]:
+        if debt <= 0 or debt < params["min_repay_usd"]:
             return False, "repayment below capital threshold", None
         if received <= debt or gross <= 0 or gas <= 0:
             return False, "no positive pre-buffer margin", None
