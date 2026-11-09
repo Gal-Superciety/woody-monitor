@@ -536,3 +536,46 @@ a route may expire, redemptions may cost additional gas, and failed attempts
 can erase the small modeled gains. The monitor does not submit trades,
 compound gains or provide profit statistics based on unexecuted alerts.
 Never fund a bot solely on the basis of these scenarios.
+
+
+### XOXNO Lending MultiversX watch — private, no wallet
+
+XOXNO's MultiversX lending protocol is a distinct money market from Hatom.
+The public XOXNO SDK documents a liquidation candidate feed:
+`GET https://api.xoxno.com/lending/leaderboard/liquidate`. This public
+endpoint returned HTTP 200 with an empty array when tested on 9 Nov 2026.
+A candidate may appear whenever an account's collateral becomes insufficient.
+
+New private commands: `/xoxno_status` (status) and `/xoxno_scan` (immediate
+read-only lookup). Optional 240-second background monitoring is enabled by
+`ENABLE_XOXNO_LENDING_WATCH=true`. Only administrator DMs are used; no group
+messages. Automatic private eligibility alerts are capped at one batch/hour,
+two accounts/batch, and 12h duplicate suppression by account NFT. Alert
+state is stored in `DATA_DIR/xoxno_lending_alerts.json` to persist restarts.
+
+The API feed is treated as discovery ONLY. Each candidate must have an
+`XLEND-18dc6f` MultiversX account NFT, a positive borrowed balance and
+a parseable owner wallet. The watcher converts the account NFT nonce
+from hexadecimal and checks `canBeLiquidated` on the published XOXNO
+MultiversX Controller address from `XOXNO/rs-lending/networks.json`:
+`erd1qqqqqqqqqqqqqpgqyq9mwxkq7zelkupafta5ah95pw6362j745qsk5mdzw`.
+A missing response, false response, unexpected schema or network failure
+fails closed; the bot sends no inferred liquidation opportunities.
+
+**Eligibility is NOT profit**: the Controller health-factor view does NOT
+establish a viable repayment, collateral seize, DEX route, gas cost or net
+surplus. XOXNO's `liquidationEstimations` view exists for a later stage
+but requires a correctly encoded per-debt repayment plan and the returned
+collateral payments must be valued and quoted at the DEX.
+
+Accordingly the XOXNO private alert is deliberately labeled NOT A PROFIT
+ALERT, and it DOES NOT apply Hatom's USD 0.25 modeled-profit gate. No
+signatures, fees, wallet keys, transactions, network broadcasts or
+automatic liquidations are triggered. To obtain actual profits, a further
+reviewed profit quote + complete gas/swap simulation is needed.
+
+XOXNO also offers Stellar lending, but this integration is intentionally
+MultiversX-only and does not mix the two account or liquidation formats.
+
+Sources: https://github.com/XOXNO/rs-lending and
+https://sdk.xoxno.com/.
