@@ -23,7 +23,7 @@ def blob(value: int) -> bytes:
 
 
 def decimal(value: int, places: int) -> bytes:
-    return blob(value) + p.nested(b"")[-4:] if False else blob(value) + places.to_bytes(4, "big")
+    return blob(value) + places.to_bytes(4, "big")
 
 
 def encoded_estimate(
@@ -75,6 +75,10 @@ class Vm:
         if name == "getBorrowAmountForToken":
             return [decimal(10_000_000, 6)]
         if name == "liquidationEstimations":
+            if args[1] != p.encode_payment(DEBT, 10_000_000):
+                # The fixture models a protocol which only accepts the full
+                # proposed repayment; partial attempts fail closed.
+                return [b"\x01"]
             return self.quote
         raise AssertionError(name)
 
