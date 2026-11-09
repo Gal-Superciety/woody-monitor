@@ -317,7 +317,7 @@ def _requested_nft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str | 
         return None
     msg = getattr(update.message, "reply_to_message", None)
     txt = getattr(msg, "text", "") or ""
-    match = NFT.search(txt) if False else re.search(r"XLEND-18dc6f-[0-9a-f]{1,16}", txt)
+    match = re.search(r"XLEND-18dc6f-[0-9a-f]{1,16}", txt)
     if match and NFT.fullmatch(match.group(0)):
         return match.group(0)
     return None
@@ -331,12 +331,13 @@ async def profit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("XOXNO Lending Watch is disabled.")
         return
     from core.xoxno_profit import calculate, format_report, CalculationUnavailable
+    from core.hatom_profit import QuoteUnavailable
     identifier = _requested_nft(update, context)
     if identifier is None:
         # Recheck a current API candidate when user does not specify a NFT.
         try:
             rows, _ = await asyncio.wait_for(asyncio.to_thread(inspect), timeout=40)
-        except (asyncio.TimeoutError, Exception) as exc:
+        except Exception as exc:
             logger.info("XOXNO profit candidate discovery unavailable (%s)", type(exc).__name__)
             rows = []
         if not rows:
