@@ -5544,6 +5544,8 @@ def main() -> None:
     register_community_updates(app)
     from core.hatom_liquidations import register as register_hatom_liquidations
     register_hatom_liquidations(app)
+    from core.xoxno_lending_watch import register as register_xoxno_lending_watch
+    register_xoxno_lending_watch(app)
     app.add_handler(CallbackQueryHandler(menu_callbacks))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, greeting_handler))
 
