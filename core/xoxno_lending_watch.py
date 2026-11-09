@@ -249,7 +249,8 @@ def status_text() -> str:
         f"Scan interval: {interval()}s\n"
         "Private eligibility alerts: <=1 batch/hour; <=2 positions/batch\n"
         "Per NFT repeat cooldown: 12h\n"
-        "XOXNO profit >= USD 0.25: NOT VERIFIED / NOT IMPLEMENTED\n"
+        "Profit: /xoxno_profit (read-only, indicative and NOT verified)\n"
+        "Profit model floor: >= USD 0.25 after gas estimate + reserve\n"
         f"Scans this session: {_STATS['scans']}\n"
         f"API candidates: {_STATS['api_candidates']}\n"
         f"On-chain confirmed: {_STATS['confirmed']}\n"
@@ -306,6 +307,70 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
 
 
+def _requested_nft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str | None:
+    """Accept explicit XLEND NFT or a reply to one of our private candidate alerts."""
+    arguments = getattr(context, "args", None) or []
+    if arguments:
+        proposed = str(arguments[0]).strip()
+        if NFT.fullmatch(proposed):
+            return proposed
+        return None
+    msg = getattr(update.message, "reply_to_message", None)
+    txt = getattr(msg, "text", "") or ""
+    match = re.search(r"XLEND-18dc6f-[0-9a-f]{1,16}", txt)
+    if match and NFT.fullmatch(match.group(0)):
+        return match.group(0)
+    return None
+
+
+async def profit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Private on-demand estimate, ALWAYS live rechecked and clearly not verified."""
+    if not admin_private(update) or not update.message:
+        return
+    if not enabled():
+        await update.message.reply_text("XOXNO Lending Watch is disabled.")
+        return
+    from core.xoxno_profit import calculate, format_report, CalculationUnavailable
+    from core.hatom_profit import QuoteUnavailable
+    identifier = _requested_nft(update, context)
+    if identifier is None:
+        # Recheck a current API candidate when user does not specify a NFT.
+        try:
+            rows, _ = await asyncio.wait_for(asyncio.to_thread(inspect), timeout=40)
+        except Exception as exc:
+            logger.info("XOXNO profit candidate discovery unavailable (%s)", type(exc).__name__)
+            rows = []
+        if not rows:
+            await update.message.reply_text(
+                "No currently confirmed XOXNO account to calculate. "
+                "Reply with /xoxno_profit to an XOXNO private alert, or send "
+                "/xoxno_profit XLEND-18dc6f-<hex_nonce> . "
+                "A wallet address is not enough: XOXNO lending positions are account NFTs."
+            )
+            return
+        identifier = rows[0]["identifier"]
+    try:
+        estimate = await asyncio.wait_for(
+            asyncio.to_thread(calculate, identifier), timeout=110
+        )
+    except asyncio.TimeoutError:
+        await update.message.reply_text(
+            "XOXNO quote timed out. Profit remains NOT VERIFIED. "
+            "No funds were used."
+        )
+        return
+    except (CalculationUnavailable, QuoteUnavailable, requests.RequestException,
+            ValueError, TypeError) as exc:
+        logger.info("XOXNO profit scenario incomplete (%s)", type(exc).__name__)
+        await update.message.reply_text(
+            "XOXNO — no complete/validated liquidation scenario for "
+            + identifier + ".\nReason: " + str(exc)[:160]
+            + "\nProfit: NOT VERIFIED. Do not liquidate based on this result."
+        )
+        return
+    await update.message.reply_text(format_report(estimate))
+
+
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if admin_private(update) and update.message:
         await update.message.reply_text(status_text())
@@ -314,6 +379,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 def register(app: Application) -> None:
     app.add_handler(CommandHandler("xoxno_status", status_command))
     app.add_handler(CommandHandler("xoxno_scan", scan_command))
+    app.add_handler(CommandHandler("xoxno_profit", profit_command))
     if enabled() and admin_id() and app.job_queue:
         app.job_queue.run_repeating(
             scan_job, interval=interval(), first=65,

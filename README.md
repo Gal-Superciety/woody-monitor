@@ -579,3 +579,42 @@ MultiversX-only and does not mix the two account or liquidation formats.
 
 Sources: https://github.com/XOXNO/rs-lending and
 https://sdk.xoxno.com/.
+
+
+### XOXNO manual liquidation profit calculator
+
+Private command: `/xoxno_profit XLEND-18dc6f-eb` (replace the account NFT
+with a current candidate from `/xoxno_scan`). Alternatively reply directly
+to a private XOXNO eligibility alert with `/xoxno_profit`.
+Without an argument or replied alert, the command looks up one current
+on-chain-confirmed candidate from the public XOXNO leaderboard.
+
+The calculator always rechecks live `canBeLiquidated` on the deployed XOXNO
+MultiversX Controller; it cannot use an outdated alert to assume eligibility.
+It reads `/lending/account/{nonce}/positions` for debt token discovery and
+`getBorrowAmountForToken` on-chain for current amounts/decimals. It tests
+three repay sizes (full, half and quarter) for up to three debt token types
+via the protocol's read-only `liquidationEstimations` view.
+
+The official `LiquidationEstimate` supplies seized fungible payments,
+protocol fees, refunds, maximum repay value and bonus. We conservatively
+subtract protocol fees from seized amounts, net any debt refunds, request
+live XOXNO Swap exact-input min-output routes for each collateral asset,
+convert the output into the repayment token's USD reference value and
+subtract **assumed** gas plus an extra safety buffer (>= USD 0.50 or 1%).
+Only a COMPLETE decoded protocol estimate and valid DEX quotes produce
+a numerical net scenario. If any required field, price, token metadata,
+route or ABI decode is absent or invalid, it returns `NOT VERIFIED`.
+
+Default assumptions: `XOXNO_GAS_UNITS_ASSUMED=180000000`,
+`XOXNO_SAFETY_BPS=100`, `XOXNO_SAFETY_USD=0.50`. The estimated
+profit model is compared against the previously chosen `USD 0.25` floor,
+but **neither the gas assumption nor the live DEX min-out guarantees an
+executed profit**. Public token USD prices have no independently verified
+timestamp, a swap route can expire and a full liquidation+swap execution
+has not been simulated. Treat a positive scenario as a *candidate for
+manual independent verification*, not approval to trade.
+
+XOXNO auto-alerts remain technical eligibility alerts, max one batch/hour.
+The new profit calculation is on-demand only; no wallet, no signing, no
+funds, no broadcasting and no automation of liquidation is implemented.
