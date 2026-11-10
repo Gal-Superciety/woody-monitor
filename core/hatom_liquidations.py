@@ -619,8 +619,8 @@ def register(app: Application) -> None:
                 eligibility_notifier, interval=180, first=45, name="hatom_stage2_private_batch"
             )
         logger.info(
-            "Hatom private observer scheduled | scan=%ss | positive-only alerts=180s | min modeled surplus=USD 0.25",
-            _interval(),
+            "Hatom private observer scheduled | scan=%ss | positive-only alerts=180s | min modeled surplus=USD %s",
+            _interval(), os.getenv("HATOM_ALERT_MIN_NET_USD", "0.10"),
         )
     else:
         logger.info("Hatom private observer disabled until an on-chain or trusted feed source is enabled")
