@@ -375,9 +375,9 @@ def status_text() -> str:
         f"Unpriced risk signals on last scan: {_STATE['last_candidates']}\n"
         "Profit scenario: REFERENCE USD PRICES + ASSUMED COSTS\n"
         "Verified executable profit: NOT AVAILABLE (no transaction simulation)\n"
-        "Risk reporting: on-demand /hatom_report only\n"
+        "Risk reporting: scheduled private digest + /hatom_report\n"
         "Stage 2: only profitable modeled liquidation alerts\n"
-        "Minimum indicative net: +USD 0.25 AFTER assumed gas and buffer\n"
+        f"Minimum indicative net: +USD {os.getenv('HATOM_ALERT_MIN_NET_USD', '0.10')} AFTER assumed gas and buffer\n"
         "Require fresh live DEX min-out and on-chain eligibility\n"
         "Negative, missing DEX and below-threshold: no notifications\n"
         "Positive-alert dedupe: each borrower once (persistent)\n"
@@ -618,6 +618,15 @@ def register(app: Application) -> None:
             app.job_queue.run_repeating(
                 eligibility_notifier, interval=180, first=45, name="hatom_stage2_private_batch"
             )
+            # Low-frequency risk summaries are independent of modeled profit.
+            from core.hatom_digest import digest_hours
+            for hour in digest_hours():
+                app.job_queue.run_daily(
+                    digest,
+                    time=clock_time(hour=hour, minute=0, tzinfo=ZoneInfo("Europe/Berlin")),
+                    name=f"hatom_private_digest_{hour:02d}",
+                )
+            logger.info("HATOM_PRIVATE_DIGEST_SCHEDULED | hours_berlin=%s", digest_hours())
         logger.info(
             "Hatom private observer scheduled | scan=%ss | positive-only alerts=180s | min modeled surplus=USD %s",
             _interval(), os.getenv("HATOM_ALERT_MIN_NET_USD", "0.10"),

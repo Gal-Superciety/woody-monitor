@@ -455,6 +455,7 @@ def status_text() -> str:
         "Negative, unknown and below threshold: no Telegram alerts\n"
         "Alerts: up to 2 positions per 4min; one-time per positive NFT\n"
         "Manual /xoxno_scan /xoxno_report still include losses\n"
+        "Automatic private scan report: 21:05 Berlin daily\n"
         "Profit: /xoxno_profit (indicative, execution NOT verified)\n"
         f"Scans this session: {_STATS['scans']}\n"
         f"API candidates: {_STATS['api_candidates']}\n"
@@ -667,6 +668,12 @@ def register(app: Application) -> None:
         app.job_queue.run_repeating(
             scan_job, interval=interval(), first=65,
             name="xoxno_lending_liquidation_private",
+        )
+        # Daily owner-only summary is sent even when profit screening suppresses alerts.
+        app.job_queue.run_daily(
+            report_job,
+            time=clock_time(hour=21, minute=5, tzinfo=ZoneInfo("Europe/Berlin")),
+            name="xoxno_private_daily_scan_report",
         )
         logger.info(
             "XOXNO Lending watcher scheduled | every=%ss | positive-only modeled alerts + manual reports",

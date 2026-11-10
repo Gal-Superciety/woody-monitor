@@ -182,7 +182,7 @@ class DigestTests(unittest.TestCase):
         self.assertEqual(bot.send_message.await_args.kwargs["chat_id"], 42)
         self.assertIn("0", bot.send_message.await_args.kwargs["text"])
 
-    def test_config_schedules_continuous_scans_but_no_empty_auto_digests(self):
+    def test_config_schedules_scans_and_private_berlin_risk_digests(self):
         app = SimpleNamespace(add_handler=MagicMock(), job_queue=SimpleNamespace(
             run_daily=MagicMock(), run_repeating=MagicMock()
         ))
@@ -191,7 +191,15 @@ class DigestTests(unittest.TestCase):
         with patch.dict(os.environ, env):
             watch.register(app)
         self.assertEqual(app.job_queue.run_repeating.call_count, 2)
-        self.assertEqual(app.job_queue.run_daily.call_count, 0)
+        self.assertEqual(app.job_queue.run_daily.call_count, 3)
+        self.assertEqual(
+            [c.kwargs['time'].hour for c in app.job_queue.run_daily.call_args_list],
+            [9, 15, 21],
+        )
+        self.assertTrue(all(
+            c.kwargs['time'].tzinfo is not None
+            for c in app.job_queue.run_daily.call_args_list
+        ))
         self.assertEqual(
             app.job_queue.run_repeating.call_args_list[1].kwargs["interval"], 180
         )

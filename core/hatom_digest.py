@@ -235,7 +235,7 @@ def build_report(rows: list[dict[str, Any]], *, now: float | None = None,
             rules = alert_limits()
         except (ValueError, InvalidOperation):
             rules = {"fixed_buffer_usd": Decimal("0.50"), "buffer_bps": 100,
-                     "min_net_usd": Decimal("0.25")}
+                     "min_net_usd": Decimal("0.10")}
         for index, row in enumerate(stage2[:8], 1):
             text.extend([
                 f"{index}. {row['borrower']}",
@@ -286,8 +286,9 @@ def build_report(rows: list[dict[str, Any]], *, now: float | None = None,
         "",
         "📊 All results shown above include losses and unknown scenarios.",
         "🟢 = estimated surplus, NOT a verified executable profit.",
-        "Scheduled PRIORITY alerts remain separate and require >=0.25 USD",
-        "after modeled gas and safety reserve, plus a fresh DEX min-out.",
+        "Scheduled priority alerts remain separate from this report.",
+        "They require a positive modeled net above the configured threshold",
+        "after assumed gas/safety reserve, plus a fresh DEX min-out.",
         "💰 Profit-positive liquidations: NOT VERIFIED",
         "Real execution gas, slippage, failed trades and competing liquidators",
         "can change the result. No automatic transactions or private keys.",

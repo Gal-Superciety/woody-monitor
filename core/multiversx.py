@@ -7,6 +7,7 @@ import asyncio
 import json
 import threading
 import tempfile
+import traceback
 import calendar
 import csv
 import math
@@ -22,6 +23,7 @@ import socketio
 from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -5031,6 +5033,17 @@ async def check_holders(context: ContextTypes.DEFAULT_TYPE) -> None:
     else:
         PENDING_HOLDER_VALUE = None
 
+async def _reply_markdown_or_plain(message: Any, text: str) -> None:
+    """Preserve a reply when Telegram cannot parse dynamic Markdown content."""
+    try:
+        await message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+    except BadRequest as exc:
+        if "parse entities" not in str(exc).lower():
+            raise
+        logger.warning("TELEGRAM_MARKDOWN_FALLBACK | returning plain text")
+        await message.reply_text(text)
+
+
 async def reply_markdown_chunks_to_message(message: Any, text: str, max_chars: int = 3800) -> None:
     if not message:
         return
@@ -5039,13 +5052,13 @@ async def reply_markdown_chunks_to_message(message: Any, text: str, max_chars: i
     for line in text.splitlines():
         projected = chunk_len + len(line) + 1
         if chunk_lines and projected > max_chars:
-            await message.reply_text("\n".join(chunk_lines), parse_mode=ParseMode.MARKDOWN)
+            await _reply_markdown_or_plain(message, "\n".join(chunk_lines))
             chunk_lines = []
             chunk_len = 0
         chunk_lines.append(line)
         chunk_len += len(line) + 1
     if chunk_lines:
-        await message.reply_text("\n".join(chunk_lines), parse_mode=ParseMode.MARKDOWN)
+        await _reply_markdown_or_plain(message, "\n".join(chunk_lines))
 
 
 async def reply_markdown_chunks(update: Update, text: str, max_chars: int = 3800) -> None:
@@ -5065,6 +5078,53 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     chat = update.effective_chat
     user = update.effective_user
     await send_start_menu(chat.id, context, chat.type if chat else None, user.id if user else None)
+
+
+async def monitor_health_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Fast private, local-only health snapshot; never blocks on remote APIs."""
+    if (not update.message or not update.effective_chat
+            or update.effective_chat.type != "private"
+            or not is_admin_user(update.effective_user.id if update.effective_user else None)):
+        return
+    from core.hatom_liquidations import _STATE as hatom_state, _enabled as hatom_enabled
+    from core.xoxno_lending_watch import _STATS as xoxno_stats, enabled as xoxno_enabled
+    message = (
+        "🩺 WOODY Monitor — LIVE HEALTH\n"
+        f"WebSocket connected: {'YES' if WS_CONNECTED else 'NO'}\n"
+        f"Event worker running: {'YES' if WS_TASK and not WS_TASK.done() else 'NO'}\n"
+        f"Pending blockchain roots: {len(ROOT_PENDING)}\n"
+        f"MultiversX API success/fail: {API_OK_COUNT}/{API_FAIL_COUNT}\n"
+        f"Hatom enabled: {'YES' if hatom_enabled() else 'NO'}\n"
+        f"Hatom last scan: {hatom_state.get('last_poll') or 'never'}\n"
+        f"Hatom last error: {hatom_state.get('last_error') or 'none'}\n"
+        f"XOXNO enabled: {'YES' if xoxno_enabled() else 'NO'}\n"
+        f"XOXNO last scan: {xoxno_stats.get('last_poll') or 'never'}\n"
+        f"XOXNO API candidates: {xoxno_stats.get('api_candidates', 0)}\n"
+        f"XOXNO confirmed: {xoxno_stats.get('confirmed', 0)}\n"
+        f"XOXNO last error: {xoxno_stats.get('last_error') or 'none'}\n"
+        "Read-only status. No transaction sent."
+    )
+    await update.message.reply_text(message)
+
+
+async def telegram_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log actionable exception type/location without exposing Telegram token URLs."""
+    exc = context.error
+    frames = traceback.extract_tb(exc.__traceback__) if exc else []
+    last = frames[-1] if frames else None
+    where = f"{os.path.basename(last.filename)}:{last.lineno}" if last else "unknown"
+    logger.error("TELEGRAM_HANDLER_ERROR | type=%s | at=%s",
+                 type(exc).__name__ if exc else "Unknown", where)
+    if isinstance(update, Update) and update.effective_chat and update.effective_message:
+        if update.effective_chat.type == "private":
+            try:
+                await update.effective_message.reply_text(
+                    "⚠️ Comanda nu a putut fi finalizată. Încearcă din nou. "
+                    "Pentru diagnostic, folosește /monitor_health."
+                )
+            except Exception as send_error:
+                logger.warning("TELEGRAM_ERROR_RESPONSE_FAILED | type=%s",
+                               type(send_error).__name__)
 
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5511,8 +5571,10 @@ def main() -> None:
                 pass
 
     app = Application.builder().token(TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
+    app.add_error_handler(telegram_error_handler)
 
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("monitor_health", monitor_health_command))
     app.add_handler(CommandHandler("menu", menu_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("price", price_command))
