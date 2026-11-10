@@ -1,10 +1,10 @@
 """Two-stage Hatom Watch notification gate.
 
 Stage 1: borrower risk indicators -> read-only observation, no automatic alerts.
-Stage 2: contract-preflight liquidation eligibility -> PRIVATE alert on every
-newly verified liquidatable borrower, regardless of positive/negative/unknown
-profit. Batching is rate-limited. Each borrower is notified once ever
-while the persistent history remains intact.
+Stage 2: on-chain eligible borrowers are priced by the DEX and generate
+private alerts ONLY with fresh, positive modeled surplus >= USD 0.25 after
+assumed gas and an additional safety buffer. Negative/unknown scenarios
+are silent. One-time positive-only alert history persists across restarts.
 
 All values are on-chain raw amounts; USD estimates are optional and can be
 negative or unavailable. Nothing is signed or sent to the blockchain.
@@ -30,14 +30,14 @@ _NOTIFIED: dict[str, float] = {}
 _LAST_BATCH = 0.0
 _MSG_COUNT = 0
 
-# One eligibility batch every 3 minutes when new Stage-2 positions exist.
-# One-time per-borrower dedupe, across days and service restarts.
+# Check possible Stage-2 positions roughly every 3 minutes.
+# The history in the file below covers positive-priority alerts ONLY.
 GLOBAL_INTERVAL = 180
 PENDING_TTL = 30 * 60
 
 
 def _file() -> Path:
-    return Path(os.getenv("DATA_DIR", "data")) / "hatom_stage_notifications.json"
+    return Path(os.getenv("DATA_DIR", "data")) / "hatom_positive_alerts.json"
 
 
 def _load() -> None:
@@ -78,7 +78,7 @@ def _save() -> None:
 
 
 def observe(rows: list[dict[str, Any]], *, now: float | None = None) -> None:
-    """No Telegram here: track risk -> protocol-eligible transitions quietly."""
+    """Observe all currently eligible routes even if formerly unprofitable."""
     _load()
     now = time.time() if now is None else now
     with _LOCK:
@@ -93,10 +93,9 @@ def observe(rows: list[dict[str, Any]], *, now: float | None = None) -> None:
             _SEEN[borrower] = (stage, now)
             if stage == "ONCHAIN_RISKY":
                 _PENDING.pop(borrower, None)
-            elif previous != "ONCHAIN_ELIGIBLE":
-                if borrower not in _NOTIFIED:
-                    _PENDING[borrower] = dict(item, observed_at=now)
-            elif borrower in _PENDING:
+            elif borrower not in _NOTIFIED:
+                # A negative quote must not mark an account as notified:
+                # if prices improve later, the account can still be alerted.
                 _PENDING[borrower] = dict(item, observed_at=now)
 
         for borrower, item in list(_PENDING.items()):
@@ -155,11 +154,11 @@ def format_alert(rows: list[dict[str, Any]], valuations: dict[str, Any] | None =
     valuations = valuations or {}
     lines = [
         "🚨 HATOM — PRIVATE POSITIVE-SCENARIO ALERT" if profit_screened
-        else "🚨 HATOM — PRIVATE PROTOCOL-LIQUIDATION ALERT",
+        else "🔎 HATOM — PRIVATE PROTOCOL-LIQUIDATION RECHECK",
         "Stage 2: protocol liquidation eligibility reconfirmed NOW.",
-        "Alert is sent REGARDLESS OF PROFIT: gain, loss or unknown." if not profit_screened
-        else "Positive indicative DEX margin, NOT verified execution profit.",
-        "Profit is optional indicative information, NOT an execution guarantee.",
+        "Positive indicative margin after assumed gas and safety reserve."
+        if profit_screened else "Manual recheck, not a profit alert.",
+        "Not verified executable profit. Recheck before any manual action.",
         "",
     ]
     for i, row in enumerate(rows, 1):
@@ -209,8 +208,8 @@ def mark_delivered(rows: list[dict[str, Any]], *, now: float | None = None) -> N
             borrower = row["borrower"]
             _NOTIFIED[borrower] = now
             _PENDING.pop(borrower, None)
-        # Persist BEFORE trying Telegram to guarantee at-most-one attempt
-        # per borrower, even if the Telegram API call times out ambiguously.
+        # This is called ONLY for positive-screened alerts; negative positions
+        # remain eligible for later profitable rechecks. Persist before Telegram.
         _save()
 
 
