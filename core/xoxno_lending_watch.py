@@ -459,7 +459,7 @@ def status_text() -> str:
         f"Scans this session: {_STATS['scans']}\n"
         f"API candidates: {_STATS['api_candidates']}\n"
         f"On-chain confirmed: {_STATS['confirmed']}\n"        f"Priced this scan: {_STATS['priced']} | losses: {_STATS['losses']}\n"
-        f"Above 0.25 modeled: {_STATS['positive']} | not priced: {_STATS['unavailable']}\n"
+        f"Above +{minimum_alert_usd()} USD modeled: {_STATS['positive']} | not priced: {_STATS['unavailable']}\n"
         f"Private batches this session: {_STATS['alerts']}\n"
         f"Last successful poll: {_STATS['last_poll'] or 'never'}\n"
         f"Last error: {_STATS['last_error'] or 'none'}"
@@ -540,6 +540,17 @@ async def scan(context: ContextTypes.DEFAULT_TYPE, *, manual: bool = False) -> l
     _STATS.update(counts)
     _LAST_REPORT = {"rows": positions, "valuations": valuations,
                     "found": found, "error": _STATS["last_error"]}
+    # The watcher previously logged only errors and qualifying alerts,
+    # which made successful empty scans look like "no scanning at all".
+    logger.info(
+        "XOXNO_SCAN_COMPLETED | api_candidates=%s | onchain_confirmed=%s "
+        "| priced=%s | positive=%s | losses=%s | below_threshold=%s "
+        "| unavailable=%s | scan_count=%s | error=%s",
+        found, len(positions), counts["priced"], counts["positive"],
+        counts["losses"], counts["below_threshold"],
+        counts["unavailable"], _STATS["scans"],
+        _STATS["last_error"] or "none",
+    )
     return positions
 
 
