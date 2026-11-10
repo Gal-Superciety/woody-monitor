@@ -460,35 +460,27 @@ sign or execute any blockchain transactions. If the position is no
 longer eligible, the bot says so rather than manufacturing a profit quote.
 
 
-### Hatom priority alerts: positive indicative DEX scenarios only
+### Hatom Stage-2 liquidation eligibility alerts (independent of profit)
 
-Stage-1 scheduled risk digests stay unchanged. Stage-2 stays rate limited to
-one private batch per hour, maximum two wallets per message, same borrower
-at most once per 12 hours **after a successful alert**.
+The Hatom watcher scans every `HATOM_WATCH_INTERVAL_SECONDS=90` seconds.
+When a borrower passes the fresh on-chain Stage-2 liquidation preflight,
+a private Telegram alert is sent **regardless of whether the modeled
+profit is positive, negative, below $0.25 or unavailable**. Only
+risk-only Stage-1 positions remain silent.
 
-The notifier filters out ALL other Stage-2 candidates and requires:
-1. A freshly reconfirmed Hatom on-chain liquidation preflight.
-2. A valid XOXNO exact-input route with strictly positive minimum output,
-   received within `HATOM_ALERT_MAX_QUOTE_AGE_SECONDS=60`.
-3. A strictly positive repayment; `HATOM_ALERT_MIN_REPAY_USD=0` removes the additional minimum-capital floor.
-4. The DEX minimum-output reference USD value minus the debt repayment and
-   *assumed* gas, minus an **additional** conservative buffer equal to
-   the greater of 1% of the repayment or USD 0.50 (unchanged safety reserve).
-5. At least `HATOM_ALERT_MIN_NET_USD=0.25` remains after that buffer.
+The eligible-borrower notifier checks approximately every 180 seconds,
+sends up to two positions per message and persists a 12-hour
+per-borrower duplicate cooldown. The optional DEX-min output estimate
+is attached where available; errors never suppress a valid Stage-2
+eligibility notification. The saved `HATOM_ALERT_*` thresholds still
+support informative profitability classification but are NOT a
+notification gate.
 
-Relevant variables: `HATOM_ALERT_MIN_REPAY_USD`,
-`HATOM_ALERT_MIN_NET_USD`, `HATOM_ALERT_SAFETY_BUFFER_BPS`,
-`HATOM_ALERT_SAFETY_BUFFER_USD`,
-`HATOM_ALERT_MAX_QUOTE_AGE_SECONDS`. Invalid settings fail closed.
-
-If these conditions are NOT met, no Stage-2 Telegram alert is sent.
-On-demand `/hatom_profit` still explains positive *or negative* indicative
-scenarios for eligible positions. An indicative profit screen is **not
-evidence of an executable liquidation**: end-to-end signing, redemption,
-wrap/unwrap, gas and competition still need separate simulation.
-No transactions or wallet keys are used. Alerts go to the private admin
-chat exclusively.
-
+Use `/hatom_report` to see a recent risk-scan report with negative
+scenarios and `/hatom_profit` for a fresh per-borrower estimate.
+The three automatic daily Hatom digest messages have been disabled
+so that the bot only proactively notifies confirmed eligible positions.
+There are no wallet signatures or liquidation transactions.
 
 ### Hatom Stage 3: isolated read-only liquidation dry-run
 
@@ -523,72 +515,38 @@ mode, Stage-1 digests and positive-indicative Stage-2 alert filtering.
 
 Reference: https://docs.multiversx.com/sdk-and-tools/rest-api/transactions/
 
-### Micro-liquidation alerts and cumulative gains
+### Micro-liquidation profit estimation
 
-Alerts now include positions with as little as USD 0.25 **modeled positive
-surplus AFTER** subtracting the quoted DEX minimum return, the assumed
-gas cost, and an *extra* safety buffer (at least USD 0.50 or 1% of debt).
-There is no arbitrary repayment-size floor. This lets smaller, genuinely
-positive *indicative* opportunities surface.
-
-These are **NOT verified or guaranteed profits**: liquidation may revert,
-a route may expire, redemptions may cost additional gas, and failed attempts
-can erase the small modeled gains. The monitor does not submit trades,
-compound gains or provide profit statistics based on unexecuted alerts.
-Never fund a bot solely on the basis of these scenarios.
-
+The on-demand Hatom calculator can still show modeled net surplus down
+to cents, including negative values. A result of +$0.25 USD or higher
+is a useful reference target for *manual evaluation*, but not a minimum
+for Telegram eligibility notifications, and not executable profit.
+Even a small failed or unexpectedly expensive transaction can wipe
+out gains from many successful micro-liquidations.
 
 ### XOXNO Lending MultiversX watch — private, no wallet
 
-XOXNO's MultiversX lending protocol is a distinct money market from Hatom.
-The public XOXNO SDK documents a liquidation candidate feed:
-`GET https://api.xoxno.com/lending/leaderboard/liquidate`. This public
-endpoint returned HTTP 200 with an empty array when tested on 9 Nov 2026.
-A candidate may appear whenever an account's collateral becomes insufficient.
+XOXNO's lending protocol is separate from Hatom. This integration uses
+the publicly documented `GET /lending/leaderboard/liquidate` to discover
+candidates, then confirms `canBeLiquidated` on the official MultiversX
+Controller. It alerts every newly confirmed eligible **account NFT**,
+whether the optional price scenario is a profit, a loss or UNKNOWN.
 
-Private commands: `/xoxno_status` (status), `/xoxno_scan` or
-`/xoxno_report` (fresh private scan report, including losing and
-unpriceable candidates), and `/xoxno_profit XLEND-...` (fresh on-demand
-estimate). Enabled 240-second background monitoring continually checks
-the public liquidation list and its on-chain Controller. Scan reports
-are delivered privately at 09:00, 15:00 and 21:00 Berlin, even if
-the API currently has zero candidates. Separately, alerts for
-**indicative positive surplus >= $0.25 after gas and buffer**
-are capped at one batch/hour, 2 positions/batch, and 12-hour
-duplicate suppression by account NFT. Alerts are NOT guaranteed profits.
-State persists in `DATA_DIR/xoxno_lending_alerts.json`.
+The main loop runs every 240 seconds and sends at most two positions per
+batch, with a minimum 240-second gap between batches and a 12-hour
+persistent deduplication per account NFT. The alert includes the owner
+address and a `/xoxno_profit XLEND-...` command to manually re-price.
+A fresh verified eligible account is alerted *before* the optional
+valuation pass so that a failed/slow DEX quote cannot silence the alert.
 
-The API feed is treated as discovery ONLY. Each candidate must have an
-`XLEND-18dc6f` MultiversX account NFT, a positive borrowed balance and
-a parseable owner wallet. The watcher converts the account NFT nonce
-from hexadecimal and checks `canBeLiquidated` on the published XOXNO
-MultiversX Controller address from `XOXNO/rs-lending/networks.json`:
-`erd1qqqqqqqqqqqqqpgqyq9mwxkq7zelkupafta5ah95pw6362j745qsk5mdzw`.
-A missing response, false response, unexpected schema or network failure
-fails closed; the bot sends no inferred liquidation opportunities.
+Separate on-demand `/xoxno_scan` and `/xoxno_report` reports still
+show negative, positive, below-target and UNKNOWN outcomes. The
+optional profit calculator prices up to six of the confirmed accounts
+per cycle in rotation. No routine daily report is automatically sent
+when there is no eligible candidate.
 
-**Eligibility is NOT profit**: the Controller health-factor view does NOT
-establish a viable repayment, collateral seize, DEX route, gas cost or net
-surplus. XOXNO's `liquidationEstimations` view exists for a later stage
-but requires a correctly encoded per-debt repayment plan and the returned
-collateral payments must be valued and quoted at the DEX.
-
-Accordingly **raw eligibility cannot trigger a positive alert**. The
-XOXNO watch attempts read-only `liquidationEstimations` plus DEX
-min-out for each confirmed candidate (bounded to six candidates per
-4-minute poll; rotating through additional eligible positions). Negative
-and unavailable scenarios remain visible in scan reports. Only coherent,
-fresh estimates >= $0.25 after assumed gas and an additional safety
-reserve are eligible for *modeled-positive* priority notifications.
-No wallet keys, signing, transactions or automatic liquidations.
-A full execution simulation is still needed for verified profit.
-
-XOXNO also offers Stellar lending, but this integration is intentionally
-MultiversX-only and does not mix the two account or liquidation formats.
-
-Sources: https://github.com/XOXNO/rs-lending and
-https://sdk.xoxno.com/.
-
+XOXNO Stellar positions are not included. This is strictly
+read-only MultiversX; no keys, no broadcasts and no automatic execution.
 
 ### XOXNO manual liquidation profit calculator
 
@@ -624,38 +582,27 @@ timestamp, a swap route can expire and a full liquidation+swap execution
 has not been simulated. Treat a positive scenario as a *candidate for
 manual independent verification*, not approval to trade.
 
-XOXNO auto-alerts now require a complete modeled-positive read-only
-scenario; mere protocol eligibility is never enough. The on-demand
-`/xoxno_profit` command additionally lets the administrator recheck
-an individual NFT; `/xoxno_scan` and `/xoxno_report` show
-negative, below-threshold, positive and unpriceable results.
+The on-demand `/xoxno_profit` command lets the administrator
+recheck an individual NFT; `/xoxno_scan` and `/xoxno_report`
+show negative, below-threshold, positive and unpriceable results.
+Automatic eligibility alerts do not require a profit estimate.
 No wallet, signing, funds, broadcasting or automatic liquidation is implemented.
 
-### Separate private scan reports and profit-screened alerts (Hatom + XOXNO)
+### Current private notification rule (10 November 2026)
 
-The two protocols report to the **administrator's private Telegram chat**
-only. Risk/eligibility discovery does **not** discard candidates because
-their modeled result is a loss. Reports at 09:00/15:00/21:00 Berlin
-include negative, below-threshold, modeled-positive and UNKNOWN statuses
-(the latter means missing data, *never* a zero or negative outcome).
-Hatom's risk report now computes DEX-min indicative net for the freshly
-verified Stage-2 examples (up to eight); it also shows Stage-1 risk
-wallets, which are **not yet liquidatable**. Scheduled Hatom digests are
-sent even if the 12-hour risk cache has no candidates.
+**Continuous scanning, notifications only for newly confirmed
+liquidatable positions.** Both protocols alert even when their
+best available profit scenario is negative or unpriceable. No
+routine risk-only or empty scan messages are scheduled.
 
-XOXNO polls the full public `/lending/leaderboard/liquidate` response
-up to its documented safety cap and rechecks on-chain eligibility;
-each four-minute pricing cycle evaluates up to six of those confirmed
-accounts, rotating any additional candidates across cycles. This is
-**not a scan of every healthy protocol account**, and an unavailable
-quote is clearly marked UNKNOWN. The three daily XOXNO scan reports
-force a new discovery and include losing scenarios; no group messages.
+| Protocol | Scanning | Alert trigger | Duplicate limit |
+| --- | --- | --- | --- |
+| Hatom | ~90 sec | Fresh contract-confirmed Stage-2 liquidation eligibility | Max 2 positions per 3-minute batch, each borrower once/12h |
+| XOXNO MVX | ~240 sec | Fresh contract-confirmed `canBeLiquidated` for an XLEND NFT | Max 2 NFTs per 4-minute batch, each NFT once/12h |
 
-**Only separate priority notifications** select scenarios that pass
-the currently configured USD 0.25 modeled-net minimum *after* assumed
-gas and safety buffer, and require fresh DEX min-out. Hatom's stricter
-filter remains unchanged. XOXNO priority notifications additionally
-cross-check arithmetic, freshness (<=60s) and unverified execution
-markers; missing/inconsistent data fail closed. Priority alerts are
-a starting point for manual validation, **not trade recommendations or
-verified executable profits**. Neither protocol submits transactions.
+The existing private commands `/hatom_report`, `/hatom_profit`,
+`/xoxno_report`, `/xoxno_scan`, `/xoxno_profit` remain available.
+Profit thresholds and market valuations are INFORMATION ONLY;
+the user will decide whether to attempt manual liquidation.
+An eligible account may not have a profitable execution, and
+other liquidators or changing prices may invalidate the opportunity.
