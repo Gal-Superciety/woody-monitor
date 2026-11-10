@@ -95,6 +95,7 @@ class CalculatorTests(unittest.TestCase):
         self.env = patch.dict(os.environ, {
             "XOXNO_GAS_UNITS_ASSUMED": "180000000",
             "XOXNO_SAFETY_BPS": "100", "XOXNO_SAFETY_USD": "0.50",
+            "XOXNO_ALERT_MIN_NET_USD": "0.10",
         })
         self.env.start()
 
@@ -162,7 +163,24 @@ class CalculatorTests(unittest.TestCase):
         )
         self.assertFalse(report["clears_quarter_dollar"])
         self.assertLess(report["scenario_net_usd"], 0)
-        self.assertIn("BELOW USD 0.25", p.format_report(report))
+        self.assertIn("BELOW USD 0.10", p.format_report(report))
+
+    def test_ten_cent_calculated_profit_passes_new_floor(self):
+        # 11.14 DEX min-out - 10.00 repay - 0.54 assumed gas
+        # - 0.50 extra reserve = +0.10 USD indicative profit.
+        report = p.calculate(
+            ID, vm=Vm(), positions=Positions(), market=Markets(output=11_140_000)
+        )
+        self.assertEqual(report["scenario_net_usd"], Decimal("0.10"))
+        self.assertTrue(report["clears_alert_minimum"])
+        self.assertFalse(report["clears_quarter_dollar"])
+        self.assertIn("MODELED >= USD 0.10", p.format_report(report))
+        under = p.calculate(
+            ID, vm=Vm(), positions=Positions(), market=Markets(output=11_130_000)
+        )
+        self.assertEqual(under["scenario_net_usd"], Decimal("0.09"))
+        self.assertFalse(under["clears_alert_minimum"])
+        self.assertIn("BELOW USD 0.10", p.format_report(under))
 
     def test_healthy_account_never_gets_quote(self):
         vm = Vm(status=b"\x00")
