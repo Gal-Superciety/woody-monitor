@@ -632,3 +632,40 @@ If the historical file is corrupted or cannot be saved, automatic
 notification is suppressed instead of silently clearing the deduplication
 history. Restoring a Railway Volume from an older snapshot can naturally
 restore an older alert history.
+
+### Owner-approved second Telegram user for Hatom/XOXNO (private read-only)
+
+WOODY Monitor supports additional **private read-only** liquidation watchers
+(up to five). Authorization is by numeric **Telegram user ID**, not a
+displayed name, mutable @username, or MultiversX `erd1...` wallet. The
+username is stored only as an optional label. The new participant must
+first open the WOODY Monitor bot in Telegram and press **Start**.
+
+The existing administrator sends `/liquidation_invite` to WOODY Monitor
+in their **private chat**. The bot returns a strong one-time invitation
+valid for 24 hours as `/liquidation_join SECRET_TOKEN`. The owner privately
+sends it to the intended participant (for example @CosminRussu). That
+person enters the command in their own private Telegram chat with the bot.
+**Possession of the code grants the slot**; never send it to a public group.
+The bot stores only the SHA-256 hash of the one-time secret in Railway.
+
+After joining, the owner and subscriber each receive **future** private
+Hatom and XOXNO liquidation-eligibility alerts. The subscriber may use
+`/hatom_status`, `/hatom_scan`, `/hatom_report`, `/hatom_profit`,
+`/xoxno_status`, `/xoxno_scan`, `/xoxno_report`, `/xoxno_profit`.
+Each private command replies to its own requester; `/hatom_report` no longer
+accidentally sends a subscriber's report to the owner. Existing alerts
+that were already deduplicated are not replayed retroactively.
+
+Owner-only commands: `/liquidation_invite` (generate 24-hour invitation),
+`/liquidation_users` (view approved IDs), `/liquidation_remove 123456789`
+(revoke someone), `/hatom_test` and `/hatom_dryrun`. The subscriber can
+unsubscribe with `/liquidation_leave`. No subscriber gets control of bot
+administration, Railway, wallets, keys, automatic execution, or group alerts.
+
+Membership and invite digests persist in
+`DATA_DIR/liquidation_subscribers.json` on the worker's mounted volume.
+The bot individually sends alerts to both private recipients, so a blocked
+subscriber does not interrupt attempts to deliver to the owner.
+Successful deployment itself does **not** enroll a named Telegram account.
+The owner must issue the invite, send it privately, and the person must join.

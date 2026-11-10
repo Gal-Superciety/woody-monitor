@@ -284,15 +284,18 @@ async def eligibility_notifier(context: ContextTypes.DEFAULT_TYPE) -> bool:
     except (OSError, RuntimeError, ValueError) as exc:
         logger.error("Hatom alert history not persisted; not sending (%s)", type(exc).__name__)
         return False
-    await context.bot.send_message(
-        chat_id=_admin_id(), text=format_alert(selected, values)
+    from core.liquidation_access import send_liquidation_alert
+    recipients = await send_liquidation_alert(
+        context.bot, format_alert(selected, values)
     )
     _STATE["sent"] += 1
+    logger.info("HATOM_PRIVATE_FANOUT | delivered=%s", recipients)
     logger.info("HATOM_ELIGIBLE_PRIVATE_ALERT | count=%s | profit_gate=none",
                 len(selected))
     return True
 
-async def digest(context: ContextTypes.DEFAULT_TYPE, *, manual: bool = False) -> bool:
+async def digest(context: ContextTypes.DEFAULT_TYPE, *, manual: bool = False,
+                 target_chat_id: int | None = None) -> bool:
     """Send a private, rate-limited risk summary, not one alert per market."""
     if not _enabled() or not _ready() or _source() != "onchain" or _admin_id() is None:
         return False
@@ -318,7 +321,12 @@ async def digest(context: ContextTypes.DEFAULT_TYPE, *, manual: bool = False) ->
         scans=snapshot["scans"], checks=snapshot["checks"],
         valuations=valuations
     )
-    await context.bot.send_message(chat_id=_admin_id(), text=report)
+    if target_chat_id is not None:
+        # Called by the authorized user's private /hatom_report command.
+        await context.bot.send_message(chat_id=target_chat_id, text=report)
+    else:
+        from core.liquidation_access import send_liquidation_alert
+        await send_liquidation_alert(context.bot, report)
     if not manual:
         mark_report_sent()
     _STATE["sent"] += 1
@@ -365,10 +373,9 @@ def status_text() -> str:
 
 
 def _admin_private(update: Update) -> bool:
-    chat = update.effective_chat
-    user = update.effective_user
-    admin = _admin_id()
-    return bool(admin and user and chat and user.id == admin and chat.id == admin and chat.type == "private")
+    """Owner or specifically invited READ-ONLY liquidation subscriber."""
+    from core.liquidation_access import is_authorized_private
+    return is_authorized_private(update)
 
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -377,7 +384,8 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if _admin_private(update):
+    from core.liquidation_access import is_owner_private
+    if is_owner_private(update):
         await context.bot.send_message(
             chat_id=_admin_id(),
             text="🔐 Hatom Watch — PRIVATE TEST ALERT\nOnly the admin's private chat receives Hatom notifications. This is a test, not a live opportunity.",
@@ -509,8 +517,9 @@ async def profit_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text(format_alert(valid, valuations))
 
 async def dryrun_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Private on-demand liquidation tx preflight, without a wallet or execution."""
-    if not _admin_private(update) or not update.message:
+    """Owner-only on-demand liquidation preflight; no user trade privileges."""
+    from core.liquidation_access import is_owner_private
+    if not is_owner_private(update) or not update.message:
         return
     if not _enabled() or _source() != "onchain":
         await update.message.reply_text("Hatom Watch is paused or not in on-chain mode.")
@@ -569,7 +578,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if _source() != "onchain":
         await update.message.reply_text("Hatom private risk digests require verified on-chain mode.")
         return
-    await digest(context, manual=True)
+    await digest(context, manual=True, target_chat_id=update.effective_chat.id)
 
 
 def register(app: Application) -> None:
