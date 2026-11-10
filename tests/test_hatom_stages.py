@@ -145,26 +145,57 @@ class StageTests(unittest.TestCase):
         self.assertNotEqual(bot.send_message.await_args.kwargs["chat_id"], -100123)
         alert = bot.send_message.await_args.kwargs["text"]
         self.assertEqual(alert.count("Borrower:"), 2)
-        self.assertIn("Positive indicative DEX margin", alert)
+        self.assertIn("REGARDLESS OF PROFIT", alert)
         self.assertIn("NET PROFIT: NOT VERIFIED", alert)
         self.assertEqual(len(stages.pending()), 0)
 
-    def test_unprofitable_positions_are_never_notified(self):
+    def test_unprofitable_or_unknown_positions_still_trigger_eligibility_alert(self):
         stages.observe([sample()])
         bot = SimpleNamespace(send_message=AsyncMock())
-        data = {
-            "category": "INDICATIVE_ONLY",
-            "verified_profit": False,
-            "executable_dex_quote": False,
-            "dex_quote": None,
-        }
-        with patch("core.hatom_liquidations._value_eligible_positions", return_value={A: data}), patch(
+        with patch("core.hatom_liquidations._value_eligible_positions",
+                   return_value={A: "DEX quote unavailable"}), patch(
             "core.hatom_stages.revalidate", return_value=([sample()], 0)
         ):
+            self.assertTrue(asyncio.run(watch.eligibility_notifier(SimpleNamespace(bot=bot))))
+        bot.send_message.assert_awaited_once()
+        msg = bot.send_message.await_args.kwargs["text"]
+        self.assertIn("REGARDLESS OF PROFIT", msg)
+        self.assertIn("DEX quote unavailable", msg)
+        self.assertIn("NET PROFIT: NOT VERIFIED", msg)
+        self.assertEqual(stages.pending(), [])
+        # Send once, not every polling interval; 12h per-borrower dedupe.
+        with patch("core.hatom_stages.revalidate") as recheck:
             self.assertFalse(asyncio.run(watch.eligibility_notifier(SimpleNamespace(bot=bot))))
-        bot.send_message.assert_not_awaited()
-        # No 12h duplicate lock for rejected opportunities.
-        self.assertEqual(len(stages.pending()), 1)
+            recheck.assert_not_called()
+
+    def test_onchain_eligible_with_negative_profit_still_notifies(self):
+        from decimal import Decimal
+        stages.observe([sample()])
+        bot = SimpleNamespace(send_message=AsyncMock())
+        scenario = {
+            "category": "INDICATIVE_ONLY",
+            "repay_units": Decimal("0.1"),
+            "repay_symbol": "USDT",
+            "repay_usd": Decimal("0.10"),
+            "collateral_units": Decimal("200000"),
+            "collateral_symbol": "MEX",
+            "collateral_usd": Decimal("0.11"),
+            "gross_usd": Decimal("0.01"),
+            "assumed_swap_cost_usd": Decimal("0.001"),
+            "assumed_slippage_bps": 150,
+            "assumed_gas_cost_usd": Decimal("0.20"),
+            "scenario_net_usd": Decimal("-0.191"),
+            "quote_min_units": Decimal("0.11"),
+            "quote_min_usd": Decimal("0.11"),
+            "quote_net_after_assumed_gas_usd": Decimal("-0.19"),
+            "dex_quote": {"route_count": 1},
+        }
+        with patch("core.hatom_liquidations._value_eligible_positions",
+                   return_value={A: scenario}), patch(
+            "core.hatom_stages.revalidate", return_value=([sample()], 0)
+        ):
+            self.assertTrue(asyncio.run(watch.eligibility_notifier(SimpleNamespace(bot=bot))))
+        self.assertIn("$-0.19", bot.send_message.await_args.kwargs["text"])
 
     def test_disabled_monitor_does_not_notify(self):
         stages.observe([sample()])
