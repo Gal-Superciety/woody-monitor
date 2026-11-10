@@ -276,10 +276,17 @@ async def eligibility_notifier(context: ContextTypes.DEFAULT_TYPE) -> bool:
     except asyncio.TimeoutError:
         values = {row["borrower"]: "Pricing timed out" for row in selected}
     # A negative or missing net scenario NEVER suppresses an eligible signal.
+    # Reserve the one-time notification keys BEFORE contacting Telegram.
+    # If Telegram times out after delivering, a retry would duplicate it.
+    # A failed API call may therefore lose an alert, by design (at-most-once).
+    try:
+        mark_delivered(selected)
+    except (OSError, RuntimeError, ValueError) as exc:
+        logger.error("Hatom alert history not persisted; not sending (%s)", type(exc).__name__)
+        return False
     await context.bot.send_message(
         chat_id=_admin_id(), text=format_alert(selected, values)
     )
-    mark_delivered(selected)
     _STATE["sent"] += 1
     logger.info("HATOM_ELIGIBLE_PRIVATE_ALERT | count=%s | profit_gate=none",
                 len(selected))
@@ -339,10 +346,10 @@ def status_text() -> str:
         "Verified executable profit: NOT AVAILABLE (no transaction simulation)\n"
         "Risk reporting: on-demand /hatom_report only\n"
         "Stage 2: ANY reconfirmed liquidatable, +/-/UNKNOWN profit\n"
-        "Eligibility notifications: up to 2 wallets every 3min, 12h dedupe\n"
+        "Eligibility notifications: up to 2 wallets every 3min, one-time per address\n"
         "Optional profit estimate: DEX min-out - assumed gas; no alert threshold\n"
         "Manual /hatom_profit remains available; profit NOT VERIFIED\n"
-        "Stage 2 borrower cooldown: 12h\n"
+        "Stage 2: repeat alerts disabled for previously sent borrower addresses\n"
         f"Pending stage 2 candidates: {stage['pending_eligible']}\n"
         f"Private risk digest: {','.join(f'{hour:02d}:00' for hour in digest_hours())} Berlin\n"
         f"Risk wallets observed (last 12h): {len(report_state['candidates'])}\n"
