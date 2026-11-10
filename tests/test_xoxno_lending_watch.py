@@ -258,6 +258,24 @@ class XoxnoTests(unittest.TestCase):
             asyncio.run(x.scan(SimpleNamespace(bot=bot)))
         bot.send_message.assert_awaited_once()
 
+    def test_empty_scan_is_logged_and_correct_ten_cent_status_shown(self):
+        bot = SimpleNamespace(send_message=AsyncMock())
+        with patch.object(x, "inspect", return_value=([], 0)):
+            with self.assertLogs("core.xoxno_lending_watch", level="INFO") as captured:
+                asyncio.run(x.scan(SimpleNamespace(bot=bot)))
+        bot.send_message.assert_not_awaited()
+        entry = "\n".join(captured.output)
+        self.assertIn("XOXNO_SCAN_COMPLETED", entry)
+        self.assertIn("api_candidates=0", entry)
+        self.assertIn("onchain_confirmed=0", entry)
+        self.assertIn("priced=0", entry)
+        self.assertIn("positive=0", entry)
+        self.assertIn("error=none", entry)
+        status = x.status_text()
+        self.assertIn("Scans this session: 1", status)
+        self.assertIn("Above +0.10 USD modeled: 0", status)
+        self.assertNotIn("Above 0.25 modeled", status)
+
     def test_no_candidates_no_automatic_notification(self):
         bot = SimpleNamespace(send_message=AsyncMock())
         with patch.object(x, "inspect", return_value=([], 0)):
