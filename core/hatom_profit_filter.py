@@ -27,7 +27,7 @@ def _money(value: Any) -> Decimal:
 def limits() -> dict[str, Decimal | int]:
     """Safe defaults; reject impossible environment settings."""
     min_capital = _money(os.getenv("HATOM_ALERT_MIN_REPAY_USD", "0"))
-    min_net = _money(os.getenv("HATOM_ALERT_MIN_NET_USD", "0.25"))
+    min_net = _money(os.getenv("HATOM_ALERT_MIN_NET_USD", "0.10"))
     buffer_bps = int(os.getenv("HATOM_ALERT_SAFETY_BUFFER_BPS", "100"))
     fixed_buffer = _money(os.getenv("HATOM_ALERT_SAFETY_BUFFER_USD", "0.50"))
     max_quote_age = int(os.getenv("HATOM_ALERT_MAX_QUOTE_AGE_SECONDS", "60"))
