@@ -82,11 +82,10 @@ def load_state() -> None:
         path = state_file()
         if _LOADED_PATH == str(path):
             return
-        _LOADED_PATH = str(path)
         _NOTIFIED.clear()
         _LAST_BATCH = 0
         try:
-            if path.stat().st_size > 90_000:
+            if path.stat().st_size > 5_000_000:
                 raise ValueError("Oversized XOXNO watcher state")
             obj = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(obj, dict):
@@ -95,15 +94,21 @@ def load_state() -> None:
             batch = obj.get("last_batch", 0)
             if type(batch) in (int, float) and 0 <= now - batch < 86400:
                 _LAST_BATCH = float(batch)
-            for key, ts in list(obj.get("notified", {}).items())[:200]:
+            notified = obj.get("notified", {})
+            if not isinstance(notified, dict):
+                raise ValueError("Invalid XOXNO notified history")
+            for key, ts in notified.items():
                 if (isinstance(key, str) and NFT.fullmatch(key)
                         and type(ts) in (int, float)
-                        and 0 <= now - ts < 24 * 3600):
+                        and 0 < ts <= now + 300):
                     _NOTIFIED[key] = float(ts)
+            _LOADED_PATH = str(path)
         except FileNotFoundError:
-            pass
+            _LOADED_PATH = str(path)
         except (OSError, ValueError, TypeError, AttributeError) as exc:
-            logger.warning("XOXNO watcher state unavailable (%s)", type(exc).__name__)
+            logger.error("XOXNO notification history unreadable (%s); alerts fail closed",
+                         type(exc).__name__)
+            raise RuntimeError("XOXNO notification history unavailable") from exc
 
 
 def mark_sent(rows: list[dict[str, Any]]) -> None:
@@ -114,19 +119,15 @@ def mark_sent(rows: list[dict[str, Any]]) -> None:
         _LAST_BATCH = now
         for row in rows:
             _NOTIFIED[row["identifier"]] = now
-        for key, ts in list(_NOTIFIED.items()):
-            if now - ts >= 24 * 3600:
-                _NOTIFIED.pop(key, None)
         path = state_file()
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_name(path.name + ".tmp")
-            tmp.write_text(json.dumps({
-                "last_batch": _LAST_BATCH, "notified": _NOTIFIED
-            }), encoding="utf8")
-            os.replace(tmp, path)
-        except OSError as exc:
-            logger.warning("XOXNO watcher alert persistence failed (%s)", type(exc).__name__)
+        # Save BEFORE Telegram is called; failure prevents sending to avoid
+        # repeats after restart. Different NFT positions have unique IDs.
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps({
+            "last_batch": _LAST_BATCH, "notified": _NOTIFIED
+        }), encoding="utf8")
+        os.replace(tmp, path)
 
 
 def nonce_of(identifier: Any) -> int:
@@ -394,8 +395,7 @@ def eligible_to_send(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     with _STATE_LOCK:
         if now - _LAST_BATCH < ELIGIBILITY_BATCH_INTERVAL:
             return []
-        return [r for r in rows if
-                now - _NOTIFIED.get(r["identifier"], -1e12) >= 12 * 3600][:2]
+        return [r for r in rows if r["identifier"] not in _NOTIFIED][:2]
 
 
 def alert_text(rows: list[dict[str, Any]], *, manual: bool = False) -> str:
@@ -435,9 +435,9 @@ def status_text() -> str:
         "Validation: canBeLiquidated on mainnet Controller\n"
         f"Scan interval: {interval()}s\n"
         "Private alerts: ALL verified liquidatable, including losses/unknown\n"
-        "Alert batches: 1 per 4min, up to 2 positions; 12h NFT dedupe\n"
+        "Alert batches: 1 per 4min, up to 2 positions; lifetime NFT dedupe\n"
         "Scan reports including loss: on-demand /xoxno_report\n"
-        "Per NFT repeat cooldown: 12h\n"
+        "Duplicate suppression: same NFT notified only once while stored\n"
         "Profit: /xoxno_profit (read-only, indicative and NOT verified)\n"
         "Profit >= USD 0.25 is informational, NOT an alert requirement\n"
         f"Scans this session: {_STATS['scans']}\n"
@@ -477,11 +477,18 @@ async def scan(context: ContextTypes.DEFAULT_TYPE, *, manual: bool = False) -> l
     if not manual and positions:
         selected = eligible_to_send(positions)
         if selected:
-            await context.bot.send_message(
-                chat_id=admin_id(), text=alert_text(selected)
-            )
-            mark_sent(selected)
-            _STATS["alerts"] += 1
+            # Persist BEFORE Telegram to avoid duplicates after ambiguous
+            # delivery timeouts. Failed sends are not automatically retried.
+            try:
+                mark_sent(selected)
+            except (OSError, RuntimeError, ValueError) as exc:
+                logger.error("XOXNO alert history not saved; suppress send (%s)",
+                             type(exc).__name__)
+            else:
+                await context.bot.send_message(
+                    chat_id=admin_id(), text=alert_text(selected)
+                )
+                _STATS["alerts"] += 1
     valuations: dict[str, Any] = {}
     if positions:
         try:

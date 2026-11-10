@@ -3,7 +3,8 @@
 Stage 1: borrower risk indicators -> read-only observation, no automatic alerts.
 Stage 2: contract-preflight liquidation eligibility -> PRIVATE alert on every
 newly verified liquidatable borrower, regardless of positive/negative/unknown
-profit. Batching is rate-limited, with 12-hour per-borrower deduplication.
+profit. Batching is rate-limited. Each borrower is notified once ever
+while the persistent history remains intact.
 
 All values are on-chain raw amounts; USD estimates are optional and can be
 negative or unavailable. Nothing is signed or sent to the blockchain.
@@ -30,9 +31,8 @@ _LAST_BATCH = 0.0
 _MSG_COUNT = 0
 
 # One eligibility batch every 3 minutes when new Stage-2 positions exist.
-# Per-borrower 12-hour dedupe prevents repeats; Stage-1 risk-only is silent.
+# One-time per-borrower dedupe, across days and service restarts.
 GLOBAL_INTERVAL = 180
-BORROWER_COOLDOWN = 12 * 3600
 PENDING_TTL = 30 * 60
 
 
@@ -45,35 +45,36 @@ def _load() -> None:
     with _LOCK:
         if _INITIALIZED:
             return
-        _INITIALIZED = True
         try:
             obj = json.loads(_file().read_text(encoding="utf8"))
             if not isinstance(obj, dict):
-                return
+                raise ValueError("Invalid Hatom notification state")
             now = time.time()
             entries = obj.get("notified", {})
-            if isinstance(entries, dict):
-                for borrower, ts in entries.items():
-                    if isinstance(borrower, str) and borrower.startswith("erd1") and isinstance(ts, (int, float)) and 0 <= now - ts <= 2 * BORROWER_COOLDOWN:
-                        _NOTIFIED[borrower] = float(ts)
+            if not isinstance(entries, dict):
+                raise ValueError("Invalid Hatom notification history")
+            for borrower, ts in entries.items():
+                if (isinstance(borrower, str) and borrower.startswith("erd1")
+                        and type(ts) in (int, float) and 0 < ts <= now + 300):
+                    _NOTIFIED[borrower] = float(ts)
             batch = obj.get("last_batch", 0)
             if isinstance(batch, (int, float)) and 0 <= now - batch <= 86400:
                 _LAST_BATCH = float(batch)
+            _INITIALIZED = True
         except FileNotFoundError:
+            _INITIALIZED = True
             return
         except (OSError, ValueError, TypeError) as exc:
-            logger.warning("Hatom stage state read failed (%s); safety gate retained", type(exc).__name__)
+            logger.error("Hatom persisted notification history unreadable (%s); alerts fail closed", type(exc).__name__)
+            raise RuntimeError("Hatom notification history unavailable") from exc
 
 
 def _save() -> None:
     path = _file()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"last_batch": _LAST_BATCH, "notified": _NOTIFIED}), encoding="utf8")
-        os.replace(tmp, path)
-    except OSError as exc:
-        logger.warning("Hatom stage state save failed (%s)", type(exc).__name__)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"last_batch": _LAST_BATCH, "notified": _NOTIFIED}), encoding="utf8")
+    os.replace(tmp, path)
 
 
 def observe(rows: list[dict[str, Any]], *, now: float | None = None) -> None:
@@ -93,7 +94,7 @@ def observe(rows: list[dict[str, Any]], *, now: float | None = None) -> None:
             if stage == "ONCHAIN_RISKY":
                 _PENDING.pop(borrower, None)
             elif previous != "ONCHAIN_ELIGIBLE":
-                if now - _NOTIFIED.get(borrower, -1e12) >= BORROWER_COOLDOWN:
+                if borrower not in _NOTIFIED:
                     _PENDING[borrower] = dict(item, observed_at=now)
             elif borrower in _PENDING:
                 _PENDING[borrower] = dict(item, observed_at=now)
@@ -104,9 +105,6 @@ def observe(rows: list[dict[str, Any]], *, now: float | None = None) -> None:
         for borrower, (_, when) in list(_SEEN.items()):
             if now - when > 24 * 3600:
                 _SEEN.pop(borrower, None)
-        for borrower, when in list(_NOTIFIED.items()):
-            if now - when > 2 * BORROWER_COOLDOWN:
-                _NOTIFIED.pop(borrower, None)
 
 
 def pending(*, now: float | None = None) -> list[dict[str, Any]]:
@@ -115,9 +113,10 @@ def pending(*, now: float | None = None) -> list[dict[str, Any]]:
     with _LOCK:
         if now - _LAST_BATCH < GLOBAL_INTERVAL:
             return []
-        return [dict(item) for _, item in sorted(
+        return [dict(item) for borrower, item in sorted(
             _PENDING.items(), key=lambda pair: pair[1]["observed_at"]
-        ) if now - item["observed_at"] <= PENDING_TTL][:8]
+        ) if borrower not in _NOTIFIED
+          and now - item["observed_at"] <= PENDING_TTL][:8]
 
 
 def revalidate(rows: list[dict[str, Any]], *, client: Any = None, max_select: int = 2) -> tuple[list[dict[str, Any]], int]:
@@ -210,6 +209,8 @@ def mark_delivered(rows: list[dict[str, Any]], *, now: float | None = None) -> N
             borrower = row["borrower"]
             _NOTIFIED[borrower] = now
             _PENDING.pop(borrower, None)
+        # Persist BEFORE trying Telegram to guarantee at-most-one attempt
+        # per borrower, even if the Telegram API call times out ambiguously.
         _save()
 
 

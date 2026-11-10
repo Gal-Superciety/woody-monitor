@@ -271,6 +271,53 @@ class XoxnoTests(unittest.TestCase):
         self.assertEqual(x.eligible_to_send([row]), [])
         self.assertTrue(os.path.exists(x.state_file()))
 
+    def test_same_xoxno_nft_never_realerts_after_month_or_restart(self):
+        row = x.parse_candidate(entry())
+        x.mark_sent([row])
+        self.assertEqual(x.eligible_to_send([row]), [])
+        # The old 12h limit is gone. Even after a month no repeat is allowed.
+        with patch.object(x.time, "time", return_value=time.time() + 30 * 86400):
+            self.assertEqual(x.eligible_to_send([row]), [])
+            x._LOADED_PATH = None
+            x._NOTIFIED.clear()
+            x._LAST_BATCH = 0
+            self.assertEqual(x.eligible_to_send([row]), [])
+            self.assertIn(row["identifier"], x._NOTIFIED)
+
+    def test_second_xoxno_account_nft_is_distinct_position(self):
+        row1 = x.parse_candidate(entry(identifier="XLEND-18dc6f-eb"))
+        row2 = x.parse_candidate(entry(identifier="XLEND-18dc6f-ec"))
+        # Even for the same owner, two distinct account NFTs have their own debt.
+        x.mark_sent([row1])
+        with patch.object(x.time, "time", return_value=time.time() + 500):
+            self.assertEqual(x.eligible_to_send([row1, row2]), [row2])
+
+    def test_corrupt_history_blocks_alert_instead_of_resetting_dedupe(self):
+        path = x.state_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{broken", encoding="utf8")
+        x._LOADED_PATH = None
+        with self.assertRaises(RuntimeError):
+            x.eligible_to_send([x.parse_candidate(entry())])
+
+    def test_alert_persisted_even_when_telegram_times_out(self):
+        row = x.parse_candidate(entry())
+        failing = SimpleNamespace(send_message=AsyncMock(side_effect=TimeoutError()))
+        with patch.object(x, "inspect", return_value=([row], 1)), patch.object(
+            x, "price_candidates", return_value={}
+        ):
+            with self.assertRaises(TimeoutError):
+                asyncio.run(x.scan(SimpleNamespace(bot=failing)))
+            self.assertIn(row["identifier"], x._NOTIFIED)
+            self.assertTrue(x.state_file().exists())
+            # A restart must not attempt a duplicate send.
+            x._LOADED_PATH = None
+            x._NOTIFIED.clear()
+            x._LAST_BATCH = 0
+            second = SimpleNamespace(send_message=AsyncMock())
+            asyncio.run(x.scan(SimpleNamespace(bot=second)))
+            second.send_message.assert_not_awaited()
+
     def test_register_is_scheduled_only_when_enabled(self):
         app = SimpleNamespace(
             add_handler=Mock(),
