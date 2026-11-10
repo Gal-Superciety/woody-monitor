@@ -5542,6 +5542,8 @@ def main() -> None:
     app.add_handler(CommandHandler("testalert", testalert_command))
     from core.community_updates import register as register_community_updates
     register_community_updates(app)
+    from core.liquidation_access import register as register_liquidation_access
+    register_liquidation_access(app)
     from core.hatom_liquidations import register as register_hatom_liquidations
     register_hatom_liquidations(app)
     from core.xoxno_lending_watch import register as register_xoxno_lending_watch
