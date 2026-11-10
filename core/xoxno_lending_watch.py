@@ -58,9 +58,9 @@ def admin_id() -> int | None:
 
 
 def admin_private(update: Update) -> bool:
-    admin, user, chat = admin_id(), update.effective_user, update.effective_chat
-    return bool(admin and user and chat and user.id == admin
-                and chat.id == admin and chat.type == "private")
+    """Owner or owner-invited subscriber, only in their own private chat."""
+    from core.liquidation_access import is_authorized_private
+    return is_authorized_private(update)
 
 
 def interval() -> int:
@@ -485,10 +485,12 @@ async def scan(context: ContextTypes.DEFAULT_TYPE, *, manual: bool = False) -> l
                 logger.error("XOXNO alert history not saved; suppress send (%s)",
                              type(exc).__name__)
             else:
-                await context.bot.send_message(
-                    chat_id=admin_id(), text=alert_text(selected)
+                from core.liquidation_access import send_liquidation_alert
+                delivered = await send_liquidation_alert(
+                    context.bot, alert_text(selected)
                 )
                 _STATS["alerts"] += 1
+                logger.info("XOXNO_PRIVATE_FANOUT | delivered=%s", delivered)
     valuations: dict[str, Any] = {}
     if positions:
         try:
