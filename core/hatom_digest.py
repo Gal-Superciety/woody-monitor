@@ -201,15 +201,17 @@ def recheck(rows: list[dict[str, Any]], *, client: Any = None, max_check: int = 
 
 def build_report(rows: list[dict[str, Any]], *, now: float | None = None,
                  verified: list[dict[str, Any]] | None = None, errors: int = 0,
-                 scans: int = 0, checks: int = 0) -> str:
-    """Private risk overview. Stage-2 candidates are not necessarily profitable."""
+                 scans: int = 0, checks: int = 0,
+                 valuations: dict[str, Any] | None = None) -> str:
+    """Private scan summary including losing indicative scenarios, never profit proof."""
     now = time.time() if now is None else now
     current = datetime.fromtimestamp(now, BERLIN).strftime("%d %b %Y %H:%M")
     verified = verified or []
+    valuations = valuations or {}
     stage2 = [row for row in verified if row.get("category") == "ONCHAIN_ELIGIBLE"]
     risk_only = [row for row in verified if row.get("category") != "ONCHAIN_ELIGIBLE"]
     text = [
-        "🔐 Hatom Watch — PRIVATE RISK DIGEST",
+        "🔐 Hatom Watch — PRIVATE SCAN REPORT (WIN + LOSS)",
         f"🕒 {current} (Berlin)",
         "",
         "Scan mode: READ-ONLY",
@@ -217,6 +219,9 @@ def build_report(rows: list[dict[str, Any]], *, now: float | None = None,
         f"Unique risk wallets observed in last 12h: {len(rows)}",
         f"Currently reconfirmed risk-only: {len(risk_only)}",
         f"Currently reconfirmed protocol-eligible: {len(stage2)}",
+        f"Recent risk candidates reconfirmed in this report: {len(verified)}",
+        "This is a bounded snapshot, not every Hatom borrower.",
+
     ]
     if risk_only:
         text.extend(["", "🟡 STAGE 1 — AT RISK (execution not verified):"])
@@ -224,21 +229,68 @@ def build_report(rows: list[dict[str, Any]], *, now: float | None = None,
             text.append(f"{index}. {row['borrower']}")
     if stage2:
         text.extend(["", "🟠 STAGE 2 — LIQUIDATION PRECHECK PASSED (NOT PROFIT):"])
-        for index, row in enumerate(stage2[:3], 1):
+        from decimal import Decimal, InvalidOperation
+        from core.hatom_profit_filter import limits as alert_limits
+        try:
+            rules = alert_limits()
+        except (ValueError, InvalidOperation):
+            rules = {"fixed_buffer_usd": Decimal("0.50"), "buffer_bps": 100,
+                     "min_net_usd": Decimal("0.25")}
+        for index, row in enumerate(stage2[:8], 1):
             text.extend([
                 f"{index}. {row['borrower']}",
                 f"   Debt market: {row['borrow_market']}",
                 f"   Collateral market: {row['collateral_market']}",
             ])
+            value = valuations.get(row["borrower"])
+            if isinstance(value, dict) and value.get("category") == "INDICATIVE_ONLY":
+                try:
+                    repay = Decimal(str(value["repay_usd"]))
+                    received = Decimal(str(value["quote_min_usd"]))
+                    gas = Decimal(str(value["assumed_gas_cost_usd"]))
+                    if not all(x.is_finite() for x in (repay, received, gas)):
+                        raise ValueError("Invalid valuation numbers")
+                    if repay <= 0 or gas <= 0 or received <= 0:
+                        raise ValueError("Invalid repay/DEX/gas amounts")
+                    quoted_net = Decimal(str(value["quote_net_after_assumed_gas_usd"]))
+                    if (not quoted_net.is_finite()
+                            or abs(received - repay - gas - quoted_net) > Decimal("0.000000001")):
+                        raise ValueError("DEX valuation mismatch")
+                    if (not isinstance(value.get("dex_quote"), dict)
+                            or value["dex_quote"].get("route_count", 0) <= 0):
+                        raise ValueError("Missing DEX route")
+                    buffer_usd = max(
+                        Decimal(str(rules["fixed_buffer_usd"])),
+                        repay * Decimal(int(rules["buffer_bps"])) / Decimal("10000")
+                    )
+                    after_buffer = quoted_net - buffer_usd
+                    label = ("🟢 ABOVE THRESHOLD (INDICATIVE)" if
+                             after_buffer >= Decimal(str(rules["min_net_usd"]))
+                             else "🔴 LOSS / BELOW THRESHOLD")
+                    text.append(
+                        f"   DEX min-out after assumed gas: {quoted_net:+.4f} USD"
+                    )
+                    text.append(
+                        f"   After extra safety buffer: {after_buffer:+.4f} USD — {label}"
+                    )
+                except (KeyError, ValueError, TypeError, InvalidOperation):
+                    text.append("   Net scenario: UNKNOWN (incomplete DEX/gas quote)")
+            elif isinstance(value, str):
+                text.append(f"   Net scenario: UNKNOWN ({value[:60]})")
+            else:
+                text.append("   Net scenario: UNKNOWN (no complete quote)")
+
     if errors:
         text.append(f"Failed fresh checks (excluded): {errors}")
     text.extend([
         "",
+        "📊 All results shown above include losses and unknown scenarios.",
+        "🟢 = estimated surplus, NOT a verified executable profit.",
+        "Scheduled PRIORITY alerts remain separate and require >=0.25 USD",
+        "after modeled gas and safety reserve, plus a fresh DEX min-out.",
         "💰 Profit-positive liquidations: NOT VERIFIED",
-        "Stage 2 means Hatom's contract allows a meaningful test repayment,",
-        "with nonzero redeemable collateral and reported market cash.",
-        "USD net profit, execution gas, swap prices and slippage remain unknown.",
-        "No automatic transactions. No private keys.",
+        "Real execution gas, slippage, failed trades and competing liquidators",
+        "can change the result. No automatic transactions or private keys.",
     ])
     return "\n".join(text)[:3800]
 
