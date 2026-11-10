@@ -13,7 +13,7 @@ import os
 import re
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, time as clock_time
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -30,6 +30,7 @@ CONTROLLER = "erd1qqqqqqqqqqqqqpgqyq9mwxkq7zelkupafta5ah95pw6362j745qsk5mdzw"
 LIST_URL = "https://api.xoxno.com/lending/leaderboard/liquidate"
 NFT = re.compile(r"^XLEND-18dc6f-([0-9a-f]{1,16})$")
 MAX_ROWS = 20
+MAX_PRICE_PER_POLL = 6  # Rotate through every confirmed candidate over successive polls.
 _STATE_LOCK = threading.RLock()
 _LOADED_PATH: str | None = None
 _NOTIFIED: dict[str, float] = {}
@@ -37,7 +38,10 @@ _LAST_BATCH = 0.0
 _STATS: dict[str, Any] = {
     "last_poll": None, "last_error": None, "api_candidates": 0,
     "confirmed": 0, "scans": 0, "alerts": 0,
+    "priced": 0, "losses": 0, "below_threshold": 0,
+    "positive": 0, "unavailable": 0,
 }
+_LAST_REPORT: dict[str, Any] | None = None
 
 
 def enabled() -> bool:
@@ -203,6 +207,185 @@ def inspect() -> tuple[list[dict[str, Any]], int]:
     return confirm_onchain(records), len(records)
 
 
+def _priority_eligible(report: Any, *, now: float | None = None) -> bool:
+    """Fail closed on stale, inconsistent or incomplete indicative net scenarios.
+
+    Only determines whether to send a PRIVATE modeled-surplus alert.
+    Does not determine real profit or transaction execution eligibility.
+    """
+    if not isinstance(report, dict):
+        return False
+    if (report.get("verified_profit") is not False
+            or report.get("transaction_sent") is not False
+            or report.get("full_pipeline_simulated") is not False
+            or report.get("clears_quarter_dollar") is not True):
+        return False
+    try:
+        repaid = Decimal(str(report["repay_usd"]))
+        received = Decimal(str(report["dex_min_usd"]))
+        gas = Decimal(str(report["estimated_gas_usd"]))
+        reserve = Decimal(str(report["safety_buffer_usd"]))
+        modeled = Decimal(str(report["scenario_net_usd"]))
+        timestamp = float(report["quote_observed_at"])
+        current = time.time() if now is None else now
+        if not (all(x.is_finite() for x in (repaid, received, gas, reserve, modeled))
+                and repaid > 0 and received > 0 and gas > 0
+                and reserve >= Decimal("0.50")
+                and modeled >= Decimal("0.25")
+                and received > repaid + gas
+                and abs(received - repaid - gas - reserve - modeled)
+                <= Decimal("0.000000001")
+                and 0 <= current-timestamp <= 60
+                and NFT.fullmatch(str(report["identifier"]))):
+            return False
+    except (ValueError, TypeError, InvalidOperation, KeyError, OverflowError):
+        return False
+    return True
+
+
+def price_candidates(rows: list[dict[str, Any]], *, poll: int = 0,
+                     price_limit: int = MAX_PRICE_PER_POLL) -> dict[str, Any]:
+    """Evaluate even unprofitable verified candidates; rotate bounded pricing.
+
+    No quote is considered an error-free zero profit. Unknown stays unknown.
+    """
+    from core.xoxno_profit import calculate
+    from core.hatom_profit import QuoteUnavailable
+    if not rows:
+        return {}
+    count = min(MAX_ROWS, len(rows))
+    budget = min(max(1, price_limit), count)
+    start = (poll * budget) % count
+    selected = [rows[(start + n) % count] for n in range(budget)]
+    out: dict[str, Any] = {}
+    for row in selected:
+        identifier = row["identifier"]
+        try:
+            value = calculate(identifier)
+            if value.get("identifier") != identifier:
+                raise ValueError("Mismatched XOXNO NFT valuation")
+            out[identifier] = value
+        except Exception as exc:
+            # Price or Controller failure is UNKNOWN, never a fictitious loss.
+            logger.info("XOXNO scenario unavailable | nft=%s | error=%s",
+                        identifier, type(exc).__name__)
+            out[identifier] = "Unpriced: " + type(exc).__name__
+    return out
+
+
+def _scenario_counts(rows: list[dict[str, Any]],
+                     valuations: dict[str, Any]) -> dict[str, int]:
+    counts = {"priced": 0, "losses": 0, "below_threshold": 0,
+              "positive": 0, "unavailable": 0}
+    for row in rows:
+        data = valuations.get(row["identifier"])
+        if not isinstance(data, dict):
+            counts["unavailable"] += 1
+            continue
+        try:
+            net = Decimal(str(data["scenario_net_usd"]))
+            if not net.is_finite():
+                raise ValueError("Nonfinite result")
+        except (KeyError, TypeError, ValueError, InvalidOperation):
+            counts["unavailable"] += 1
+            continue
+        counts["priced"] += 1
+        if net < 0:
+            counts["losses"] += 1
+        elif _priority_eligible(data):
+            counts["positive"] += 1
+        else:
+            counts["below_threshold"] += 1
+    return counts
+
+
+def scan_report_text(
+    rows: list[dict[str, Any]], valuations: dict[str, Any] | None = None,
+    *, discovered: int = 0, error: str | None = None
+) -> str:
+    """Private scan digest; include losing and unavailable candidates."""
+    valuations = valuations or {}
+    counts = _scenario_counts(rows, valuations)
+    lines = [
+        "📊 XOXNO LENDING — PRIVATE SCAN REPORT (WIN + LOSS)",
+        "MultiversX | READ-ONLY | MANUAL LIQUIDATIONS ONLY",
+        "Time (Berlin): " + datetime.now(ZoneInfo("Europe/Berlin")).strftime("%d %b %H:%M"),
+        "API candidates: " + str(discovered),
+        "Controller-confirmed eligible: " + str(len(rows)),
+        "Priced scenarios: " + str(counts["priced"]),
+        "🔴 Loss scenarios: " + str(counts["losses"]),
+        "🟡 Nonnegative but below alert threshold: " + str(counts["below_threshold"]),
+        "🟢 Passing modeled +0.25 USD alert screen: " + str(counts["positive"]),
+        "⚪ Not priced / unavailable: " + str(counts["unavailable"]),
+        "",
+    ]
+    if error:
+        lines += ["⚠️ SCAN UNAVAILABLE: " + error[:75],
+                  "No absence/profit conclusion can be drawn.", ""]
+    elif not rows:
+        lines += ["No candidates in the current public XOXNO liquidation list.",
+                  "This is not a guarantee no account will become liquidatable.", ""]
+    for idx, row in enumerate(rows[:MAX_ROWS], 1):
+        ident = row["identifier"]
+        data = valuations.get(ident)
+        lines.append(str(idx) + ". " + ident + " | " + row["borrower"])
+        if isinstance(data, dict):
+            try:
+                net = Decimal(str(data["scenario_net_usd"]))
+                if not net.is_finite():
+                    raise ValueError("Invalid net")
+                verdict = ("🟢 +0.25 USD SCREEN" if _priority_eligible(data)
+                           else "🔴 LOSS" if net < 0 else "🟡 BELOW THRESHOLD")
+                lines.append("   Net after assumed gas + reserve: "
+                             + format(net, "+.4f") + " USD " + verdict)
+            except (ValueError, TypeError, KeyError, InvalidOperation):
+                lines.append("   Scenario: UNKNOWN (invalid quote)")
+        else:
+            lines.append("   Scenario: UNKNOWN (no complete Controller + DEX quote)")
+        if sum(len(x)+1 for x in lines) > 3000:
+            lines.append("... Other candidate rows omitted from this message.")
+            break
+    lines.extend([
+        "",
+        "Candidate discovery uses XOXNO public leaderboard; live liquidation",
+        "and DEX prices may change. Only up to " + str(MAX_PRICE_PER_POLL)
+        + " candidate scenarios priced per poll, rotated on later polls.",
+        "Separate positive alerts require >= 0.25 USD modeled after costs.",
+        "Profit remains UNVERIFIED: gas and full TX are not simulated.",
+        "No keys or automatic execution.",
+    ])
+    return "\n".join(lines)[:3800]
+
+
+def positive_alert_text(rows: list[dict[str, Any]],
+                        valuations: dict[str, Any]) -> str:
+    lines = [
+        "🚨 XOXNO LENDING — PRIVATE POSITIVE-SCENARIO ALERT",
+        "MultiversX | READ-ONLY | MANUAL ACTION ONLY",
+        "On-chain eligibility confirmed; profit is MODELED, NOT VERIFIED.",
+        "",
+    ]
+    for idx, row in enumerate(rows[:2], 1):
+        q = valuations[row["identifier"]]
+        lines.extend([
+            str(idx) + ". Account NFT: " + row["identifier"],
+            "   Borrower: " + row["borrower"],
+            "   Debt asset: " + q["repay_token"],
+            "   Repay USD: " + format(q["repay_usd"], ".4f"),
+            "   DEX minimum-out USD: " + format(q["dex_min_usd"], ".4f"),
+            "   ASSUMED gas: USD " + format(q["estimated_gas_usd"], ".4f"),
+            "   Safety reserve: USD " + format(q["safety_buffer_usd"], ".4f"),
+            "   Indicative net: " + format(q["scenario_net_usd"], "+.4f") + " USD",
+            "   Recheck: /xoxno_profit " + row["identifier"],
+            "",
+        ])
+    lines += [
+        "No full liquidation simulation. Gas is assumed, quotes can change.",
+        "NOT a verified executable profit; NO transaction sent.",
+    ]
+    return "\n".join(lines)[:3800]
+
+
 def eligible_to_send(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     load_state()
     now = time.time()
@@ -247,13 +430,15 @@ def status_text() -> str:
         "Discovery: XOXNO public liquidatable leaderboard\n"
         "Validation: canBeLiquidated on mainnet Controller\n"
         f"Scan interval: {interval()}s\n"
-        "Private eligibility alerts: <=1 batch/hour; <=2 positions/batch\n"
+        "Private profitable-scenario alerts: <=1 batch/hour; <=2 positions/batch\n"
+        "Scan reports (including losses): 09:00, 15:00, 21:00 Berlin\n"
         "Per NFT repeat cooldown: 12h\n"
         "Profit: /xoxno_profit (read-only, indicative and NOT verified)\n"
         "Profit model floor: >= USD 0.25 after gas estimate + reserve\n"
         f"Scans this session: {_STATS['scans']}\n"
         f"API candidates: {_STATS['api_candidates']}\n"
-        f"On-chain confirmed: {_STATS['confirmed']}\n"
+        f"On-chain confirmed: {_STATS['confirmed']}\n"        f"Priced this scan: {_STATS['priced']} | losses: {_STATS['losses']}\n"
+        f"Above 0.25 modeled: {_STATS['positive']} | not priced: {_STATS['unavailable']}\n"
         f"Private batches this session: {_STATS['alerts']}\n"
         f"Last successful poll: {_STATS['last_poll'] or 'never'}\n"
         f"Last error: {_STATS['last_error'] or 'none'}"
@@ -261,6 +446,12 @@ def status_text() -> str:
 
 
 async def scan(context: ContextTypes.DEFAULT_TYPE, *, manual: bool = False) -> list[dict[str, Any]]:
+    """Each polling cycle discovers all API candidates and prices a rotating slice.
+
+    Only fresh, coherent indicative >=$0.25 scenarios create priority alerts.
+    Scheduled scan reports (including losses) are a separate message type.
+    """
+    global _LAST_REPORT
     if not enabled() or admin_id() is None:
         return []
     try:
@@ -273,11 +464,33 @@ async def scan(context: ContextTypes.DEFAULT_TYPE, *, manual: bool = False) -> l
     except Exception as exc:
         _STATS["last_error"] = type(exc).__name__
         logger.warning("XOXNO lending watcher unavailable (%s)", type(exc).__name__)
+        _LAST_REPORT = {"rows": [], "valuations": {}, "found": 0,
+                        "error": type(exc).__name__}
         return []
+    valuations: dict[str, Any] = {}
+    if positions:
+        try:
+            valuations = await asyncio.wait_for(
+                asyncio.to_thread(
+                    price_candidates, positions, poll=_STATS["scans"] - 1
+                ), timeout=110
+            )
+        except (asyncio.TimeoutError, ValueError, TypeError) as exc:
+            _STATS["last_error"] = "Valuation: " + type(exc).__name__
+            logger.warning("XOXNO batch pricing unavailable (%s)", type(exc).__name__)
+    counts = _scenario_counts(positions, valuations)
+    _STATS.update(counts)
+    _LAST_REPORT = {"rows": positions, "valuations": valuations,
+                    "found": found, "error": _STATS["last_error"]}
     if not manual and positions:
-        selected = eligible_to_send(positions)
+        qualified = [r for r in positions if _priority_eligible(
+            valuations.get(r["identifier"])
+        )]
+        selected = eligible_to_send(qualified)
         if selected:
-            await context.bot.send_message(chat_id=admin_id(), text=alert_text(selected))
+            await context.bot.send_message(
+                chat_id=admin_id(), text=positive_alert_text(selected, valuations)
+            )
             mark_sent(selected)
             _STATS["alerts"] += 1
     return positions
@@ -287,24 +500,35 @@ async def scan_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     await scan(context)
 
 
+async def report_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Scheduled private report includes losses, unknowns and empty results."""
+    if not enabled() or admin_id() is None:
+        return
+    await scan(context, manual=True)
+    report = _LAST_REPORT or {"rows": [], "valuations": {}, "found": 0,
+                              "error": "No recent scan"}
+    await context.bot.send_message(
+        chat_id=admin_id(),
+        text=scan_report_text(
+            report["rows"], report["valuations"],
+            discovered=report["found"], error=report["error"]
+        ),
+    )
+
+
 async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not admin_private(update) or not update.message:
         return
     if not enabled():
         await update.message.reply_text("XOXNO lending watch is disabled.")
         return
-    rows = await scan(context, manual=True)
-    if _STATS["last_error"]:
-        await update.message.reply_text(
-            "XOXNO data unavailable or on-chain verification failed.\n" + status_text()
-        )
-    elif rows:
-        await update.message.reply_text(alert_text(rows, manual=True))
-    else:
-        await update.message.reply_text(
-            "No currently confirmed XOXNO MultiversX liquidation candidate "
-            "was found in the public leaderboard.\n\n" + status_text()
-        )
+    await scan(context, manual=True)
+    snapshot = _LAST_REPORT or {"rows": [], "valuations": {}, "found": 0,
+                                "error": "No recent scan"}
+    await update.message.reply_text(scan_report_text(
+        snapshot["rows"], snapshot["valuations"],
+        discovered=snapshot["found"], error=snapshot["error"]
+    ))
 
 
 def _requested_nft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str | None:
@@ -379,12 +603,23 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 def register(app: Application) -> None:
     app.add_handler(CommandHandler("xoxno_status", status_command))
     app.add_handler(CommandHandler("xoxno_scan", scan_command))
+    app.add_handler(CommandHandler("xoxno_report", scan_command))
     app.add_handler(CommandHandler("xoxno_profit", profit_command))
     if enabled() and admin_id() and app.job_queue:
         app.job_queue.run_repeating(
             scan_job, interval=interval(), first=65,
             name="xoxno_lending_liquidation_private",
         )
-        logger.info("XOXNO Lending read-only watcher scheduled | interval=%ss", interval())
+        from core.hatom_digest import digest_hours
+        for hour in digest_hours():
+            app.job_queue.run_daily(
+                report_job,
+                time=clock_time(hour=hour, minute=0, tzinfo=ZoneInfo("Europe/Berlin")),
+                name="xoxno_private_scan_report_" + str(hour),
+            )
+        logger.info(
+            "XOXNO Lending reports incl. loss scheduled | every=%ss | digest=%s Berlin",
+            interval(), digest_hours()
+        )
     else:
         logger.info("XOXNO Lending read-only watcher disabled")
