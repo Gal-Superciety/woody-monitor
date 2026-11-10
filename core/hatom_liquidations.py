@@ -250,53 +250,40 @@ def _value_eligible_positions(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 async def eligibility_notifier(context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Send only private, positive indicative DEX scenarios after strict screen.
+    """Alert on every freshly reconfirmed, contract-eligible Hatom borrower.
 
-    Hatom scan and scheduled risk digest continue normally. No wallet signing.
+    Profit and DEX data are optional. Losing and unpriceable liquidations still
+    trigger an eligibility alert. No Stage-1 alerts and no trading.
     """
     if not _enabled() or not _ready() or _source() != "onchain" or _admin_id() is None:
         return False
     from core.hatom_stages import pending, revalidate, format_alert, mark_delivered
-    from core.hatom_profit_filter import eligible_for_priority_alert
     candidates = pending()
     if not candidates:
         return False
-    # Inspect several candidates; the first two may be economically worthless.
     checked, errors = await asyncio.to_thread(revalidate, candidates, max_select=8)
     if errors:
         logger.info("HATOM_ELIGIBILITY_REFRESH_ERRORS | skipped=%s", errors)
     if not checked:
         return False
-    valuations = await asyncio.to_thread(_value_eligible_positions, checked)
-    passing: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    reason_counts: dict[str, int] = {}
-    for row in checked:
-        qualifies, reason, screened = eligible_for_priority_alert(
-            valuations.get(row["borrower"])
+    # Oldest first; 12-hour borrower cooldown begins after Telegram delivery.
+    selected = checked[:2]
+    values: dict[str, Any] = {}
+    try:
+        values = await asyncio.wait_for(
+            asyncio.to_thread(_value_eligible_positions, selected), timeout=45
         )
-        if qualifies and screened is not None:
-            passing.append((row, screened))
-        else:
-            reason_counts[reason] = reason_counts.get(reason, 0) + 1
-    logger.info(
-        "HATOM_PROFIT_ALERT_SCREEN | checked=%s | passing=%s | rejected=%s",
-        len(checked), len(passing), reason_counts
-    )
-    if not passing:
-        return False
-    # Pick up to two distinct wallets with the best *indicative* surplus,
-    # without altering the Stage-2 borrower cooldown or hourly limit.
-    passing.sort(key=lambda item: item[1]["screened_surplus_usd"], reverse=True)
-    selected = passing[:2]
-    rows = [row for row, _ in selected]
-    screened_values = {row["borrower"]: value for row, value in selected}
+    except asyncio.TimeoutError:
+        values = {row["borrower"]: "Pricing timed out" for row in selected}
+    # A negative or missing net scenario NEVER suppresses an eligible signal.
     await context.bot.send_message(
-        chat_id=_admin_id(), text=format_alert(rows, screened_values, profit_screened=True)
+        chat_id=_admin_id(), text=format_alert(selected, values)
     )
-    mark_delivered(rows)
+    mark_delivered(selected)
     _STATE["sent"] += 1
+    logger.info("HATOM_ELIGIBLE_PRIVATE_ALERT | count=%s | profit_gate=none",
+                len(selected))
     return True
-
 
 async def digest(context: ContextTypes.DEFAULT_TYPE, *, manual: bool = False) -> bool:
     """Send a private, rate-limited risk summary, not one alert per market."""
@@ -350,10 +337,11 @@ def status_text() -> str:
         f"Unpriced risk signals on last scan: {_STATE['last_candidates']}\n"
         "Profit scenario: REFERENCE USD PRICES + ASSUMED COSTS\n"
         "Verified executable profit: NOT AVAILABLE (no transaction simulation)\n"
-        "Risk scan reports: 09:00/15:00/21:00 Berlin, include negative scenarios\n"
-        "Stage 2: PROFIT-SCREENED INDICATIVE ONLY; 1 batch/hour, 2 wallets\n"
-        "Priority filter: fresh DEX min-out + assumed gas + extra buffer\n"
-        "Priority surplus floor: $0.25 (estimated, NOT VERIFIED)\n"
+        "Risk reporting: on-demand /hatom_report only\n"
+        "Stage 2: ANY reconfirmed liquidatable, +/-/UNKNOWN profit\n"
+        "Eligibility notifications: up to 2 wallets every 3min, 12h dedupe\n"
+        "Optional profit estimate: DEX min-out - assumed gas; no alert threshold\n"
+        "Manual /hatom_profit remains available; profit NOT VERIFIED\n"
         "Stage 2 borrower cooldown: 12h\n"
         f"Pending stage 2 candidates: {stage['pending_eligible']}\n"
         f"Private risk digest: {','.join(f'{hour:02d}:00' for hour in digest_hours())} Berlin\n"
@@ -588,17 +576,11 @@ def register(app: Application) -> None:
         app.job_queue.run_repeating(scan, interval=_interval(), first=12, name="hatom_private_observer")
         if _source() == "onchain":
             app.job_queue.run_repeating(
-                eligibility_notifier, interval=300, first=45, name="hatom_stage2_private_batch"
+                eligibility_notifier, interval=180, first=45, name="hatom_stage2_private_batch"
             )
-        from core.hatom_digest import digest_hours
-        if _source() == "onchain":
-            for hour in digest_hours():
-                app.job_queue.run_daily(
-                    digest,
-                    time=clock_time(hour=hour, minute=0, tzinfo=ZoneInfo("Europe/Berlin")),
-                    name=f"hatom_admin_digest_{hour:02d}",
-                )
-        logger.info("Hatom private observer scheduled | interval=%ss | stage2 hourly cap | digest hours Berlin=%s",
-                    _interval(), digest_hours() if _source() == "onchain" else [])
+        logger.info(
+            "Hatom private observer scheduled | scan=%ss | eligibility alerts=180s | no empty scheduled reports",
+            _interval(),
+        )
     else:
         logger.info("Hatom private observer disabled until an on-chain or trusted feed source is enabled")
