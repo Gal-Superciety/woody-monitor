@@ -31,11 +31,11 @@ def sample(*, repay="200", received="209", gas="0.25", observed=None,
 
 
 class FilterTests(unittest.TestCase):
-    def test_default_limits_allow_small_repayment_with_quarter_dollar_floor(self):
+    def test_default_limits_allow_small_repayment_with_ten_cent_floor(self):
         with patch.dict(os.environ, {}, clear=True):
             rules = limits()
         self.assertEqual(rules["min_repay_usd"], Decimal("0"))
-        self.assertEqual(rules["min_net_usd"], Decimal("0.25"))
+        self.assertEqual(rules["min_net_usd"], Decimal("0.10"))
         self.assertEqual(rules["buffer_bps"], 100)
         self.assertEqual(rules["fixed_buffer_usd"], Decimal("0.50"))
 
@@ -56,14 +56,14 @@ class FilterTests(unittest.TestCase):
         self.assertEqual(result["screened_surplus_usd"], Decimal("0.70"))
         self.assertFalse(result["verified_profit"])
 
-    def test_quarter_dollar_is_a_hard_floor_after_extra_buffer(self):
+    def test_ten_cents_is_a_hard_floor_after_extra_buffer(self):
         exactly, _, value = eligible_for_priority_alert(
-            sample(repay="10", received="10.95", gas="0.20")
+            sample(repay="10", received="10.80", gas="0.20")
         )
         self.assertTrue(exactly)
-        self.assertEqual(value["screened_surplus_usd"], Decimal("0.25"))
+        self.assertEqual(value["screened_surplus_usd"], Decimal("0.10"))
         under, _, _ = eligible_for_priority_alert(
-            sample(repay="10", received="10.949999", gas="0.20")
+            sample(repay="10", received="10.799999", gas="0.20")
         )
         self.assertFalse(under)
 
