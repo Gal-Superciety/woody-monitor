@@ -92,6 +92,43 @@ class StageTests(unittest.TestCase):
         stages.observe([sample(borrower=A)], now=now+65)
         self.assertNotIn(A, [p["borrower"] for p in stages.pending(now=now+3700)])
 
+    def test_same_borrower_never_realerts_after_12_hours_or_days_or_restart(self):
+        now = time.time()
+        stages.observe([sample()], now=now)
+        self.assertEqual(len(stages.pending(now=now)), 1)
+        stages.mark_delivered([sample()], now=now)
+        # Earlier 12-hour timeout must no longer allow a second alert.
+        for elapsed in (13 * 3600, 2 * 86400, 30 * 86400):
+            stages.observe([sample(category="ONCHAIN_RISKY")], now=now + elapsed - 2)
+            stages.observe([sample()], now=now + elapsed)
+            self.assertEqual(stages.pending(now=now + elapsed), [])
+
+        # Simulate bot restart with the same durable Railway DATA_DIR file.
+        stages._INITIALIZED = False
+        stages._NOTIFIED.clear()
+        stages._SEEN.clear()
+        stages._PENDING.clear()
+        stages._LAST_BATCH = 0
+        stages.observe([sample()], now=now + 30 * 86400)
+        self.assertEqual(stages.pending(now=now + 30 * 86400), [])
+        self.assertIn(A, stages._NOTIFIED)
+
+    def test_different_borrowers_still_trigger_separate_alerts(self):
+        now = time.time()
+        stages.observe([sample()], now=now)
+        stages.mark_delivered([sample()], now=now)
+        stages.observe([sample(borrower=B)], now=now + 181)
+        self.assertEqual([r["borrower"] for r in stages.pending(now=now + 181)], [B])
+
+    def test_unreadable_alert_history_fails_closed_not_duplicate(self):
+        # A damaged history must not be silently interpreted as empty.
+        path = stages._file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{broken", encoding="utf8")
+        stages._INITIALIZED = False
+        with self.assertRaises(RuntimeError):
+            stages.observe([sample()])
+
     def test_client_checks_risk_and_significant_repayment(self):
         testrow = sample()
         c = Client()
@@ -163,7 +200,7 @@ class StageTests(unittest.TestCase):
         self.assertIn("DEX quote unavailable", msg)
         self.assertIn("NET PROFIT: NOT VERIFIED", msg)
         self.assertEqual(stages.pending(), [])
-        # Send once, not every polling interval; 12h per-borrower dedupe.
+        # Send once, not every polling interval; persistent per-borrower dedupe.
         with patch("core.hatom_stages.revalidate") as recheck:
             self.assertFalse(asyncio.run(watch.eligibility_notifier(SimpleNamespace(bot=bot))))
             recheck.assert_not_called()
