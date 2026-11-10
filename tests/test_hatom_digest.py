@@ -92,10 +92,62 @@ class DigestTests(unittest.TestCase):
     def test_report_never_claims_verified_profit(self):
         rows = [dict(risk(), observed_at=time.time())]
         report = dg.build_report(rows, verified=rows, scans=13, checks=130)
-        self.assertIn("PRIVATE RISK DIGEST", report)
+        self.assertIn("PRIVATE SCAN REPORT", report)
         self.assertIn("Profit-positive liquidations: NOT VERIFIED", report)
         self.assertNotIn("Profit: +", report)
         self.assertIn(BORROWER, report)
+
+    def test_digest_includes_negative_and_positive_scenarios_without_claiming_verified(self):
+        from decimal import Decimal
+        rows = [dict(risk(), category="ONCHAIN_ELIGIBLE", observed_at=time.time())]
+        bad = {
+            "category": "INDICATIVE_ONLY",
+            "repay_usd": Decimal("12.0"),
+            "quote_min_usd": Decimal("12.05"),
+            "assumed_gas_cost_usd": Decimal("0.20"),
+            "quote_net_after_assumed_gas_usd": Decimal("-0.15"),
+            "dex_quote": {"route_count": 1},
+        }
+        negative = dg.build_report(rows, verified=rows, valuations={BORROWER: bad})
+        self.assertIn("LOSS / BELOW THRESHOLD", negative)
+        self.assertIn("-0.1500 USD", negative)
+        self.assertIn("-0.6500 USD", negative)
+        winning = dict(bad, repay_usd=Decimal("10"),
+                       quote_min_usd=Decimal("11.00"),
+                       quote_net_after_assumed_gas_usd=Decimal("0.80"))
+        positive = dg.build_report(rows, verified=rows, valuations={BORROWER: winning})
+        self.assertIn("ABOVE THRESHOLD (INDICATIVE)", positive)
+        self.assertIn("+0.3000 USD", positive)
+        self.assertIn("NOT VERIFIED", positive)
+
+    def test_report_shows_unknown_when_dex_quote_missing(self):
+        rows = [dict(risk(), category="ONCHAIN_ELIGIBLE", observed_at=time.time())]
+        report = dg.build_report(rows, verified=rows, valuations={
+            BORROWER: "DEX route missing"
+        })
+        self.assertIn("Net scenario: UNKNOWN", report)
+        self.assertNotIn("0.0000 USD", report)
+
+    def test_scheduled_report_prices_negative_protocol_eligible_candidate(self):
+        from decimal import Decimal
+        dg.store_scan([risk()])
+        bot = SimpleNamespace(send_message=AsyncMock())
+        env = {"ENABLE_HATOM_WATCH": "true", "HATOM_WATCH_SOURCE": "onchain",
+               "ADMIN_TELEGRAM_ID": "42"}
+        stage = dict(dg.state_snapshot()["candidates"][0],
+                     category="ONCHAIN_ELIGIBLE")
+        valuation = {
+            "category": "INDICATIVE_ONLY", "repay_usd": Decimal("1"),
+            "quote_min_usd": Decimal("1.10"),
+            "assumed_gas_cost_usd": Decimal("0.20"),
+            "quote_net_after_assumed_gas_usd": Decimal("-0.10"),
+            "dex_quote": {"route_count": 1},
+        }
+        with patch.dict(os.environ, env), patch("core.hatom_digest.recheck", return_value=([stage], 0)), patch.object(
+            watch, "_value_eligible_positions", return_value={BORROWER: valuation}
+        ):
+            self.assertTrue(asyncio.run(watch.digest(SimpleNamespace(bot=bot))))
+        self.assertIn("LOSS / BELOW THRESHOLD", bot.send_message.await_args.kwargs["text"])
 
     def test_regular_scan_never_sends_telegram(self):
         bot = SimpleNamespace(send_message=AsyncMock())
@@ -121,13 +173,14 @@ class DigestTests(unittest.TestCase):
         self.assertEqual(bot.send_message.await_args.kwargs["chat_id"], 42)
         self.assertNotEqual(bot.send_message.await_args.kwargs["chat_id"], -100123)
 
-    def test_empty_digest_stays_silent(self):
+    def test_empty_digest_reports_zero_even_without_candidates(self):
         bot = SimpleNamespace(send_message=AsyncMock())
         env = {"ENABLE_HATOM_WATCH": "true", "HATOM_WATCH_SOURCE": "onchain",
                "ADMIN_TELEGRAM_ID": "42"}
         with patch.dict(os.environ, env):
-            self.assertFalse(asyncio.run(watch.digest(SimpleNamespace(bot=bot))))
-        bot.send_message.assert_not_awaited()
+            self.assertTrue(asyncio.run(watch.digest(SimpleNamespace(bot=bot))))
+        self.assertEqual(bot.send_message.await_args.kwargs["chat_id"], 42)
+        self.assertIn("0", bot.send_message.await_args.kwargs["text"])
 
     def test_config_schedules_only_three_digests(self):
         app = SimpleNamespace(add_handler=MagicMock(), job_queue=SimpleNamespace(
