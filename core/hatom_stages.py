@@ -89,7 +89,6 @@ def observe(rows: list[dict[str, Any]], *, now: float | None = None) -> None:
                 continue
             if stage not in ("ONCHAIN_RISKY", "ONCHAIN_ELIGIBLE"):
                 continue
-            previous = _SEEN.get(borrower, (None, 0))[0]
             _SEEN[borrower] = (stage, now)
             if stage == "ONCHAIN_RISKY":
                 _PENDING.pop(borrower, None)
