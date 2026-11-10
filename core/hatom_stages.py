@@ -1,11 +1,13 @@
 """Two-stage Hatom Watch notification gate.
 
-Stage 1: borrower risk indicators -> three scheduled private summaries/day.
-Stage 2: nontrivial, contract-preflight liquidation eligibility -> one private
-batch per hour at most, with 12-hour per-borrower duplicate suppression.
+Stage 1: borrower risk indicators -> read-only observation, no automatic alerts.
+Stage 2: contract-preflight liquidation eligibility -> PRIVATE alert on every
+newly verified liquidatable borrower, regardless of positive/negative/unknown
+profit. Batching is rate-limited, with 12-hour per-borrower deduplication.
 
-All values are on-chain raw amounts. NO USD profit is calculated; no actions
-are signed or sent. All notifications target ONLY ADMIN_TELEGRAM_ID.
+All values are on-chain raw amounts; USD estimates are optional and can be
+negative or unavailable. Nothing is signed or sent to the blockchain.
+All Telegram notifications target ONLY ADMIN_TELEGRAM_ID.
 """
 from __future__ import annotations
 
@@ -27,9 +29,9 @@ _NOTIFIED: dict[str, float] = {}
 _LAST_BATCH = 0.0
 _MSG_COUNT = 0
 
-# One eligible update/hour, at most 2 candidates/update, same address only
-# once/12 hours. Do not send these for unpriced risk-only positions.
-GLOBAL_INTERVAL = 3600
+# One eligibility batch every 3 minutes when new Stage-2 positions exist.
+# Per-borrower 12-hour dedupe prevents repeats; Stage-1 risk-only is silent.
+GLOBAL_INTERVAL = 180
 BORROWER_COOLDOWN = 12 * 3600
 PENDING_TTL = 30 * 60
 
@@ -114,7 +116,7 @@ def pending(*, now: float | None = None) -> list[dict[str, Any]]:
         if now - _LAST_BATCH < GLOBAL_INTERVAL:
             return []
         return [dict(item) for _, item in sorted(
-            _PENDING.items(), key=lambda pair: pair[1]["observed_at"], reverse=True
+            _PENDING.items(), key=lambda pair: pair[1]["observed_at"]
         ) if now - item["observed_at"] <= PENDING_TTL][:8]
 
 
@@ -156,8 +158,9 @@ def format_alert(rows: list[dict[str, Any]], valuations: dict[str, Any] | None =
         "🚨 HATOM — PRIVATE POSITIVE-SCENARIO ALERT" if profit_screened
         else "🚨 HATOM — PRIVATE PROTOCOL-LIQUIDATION ALERT",
         "Stage 2: protocol liquidation eligibility reconfirmed NOW.",
-        "Positive indicative DEX margin, NOT verified execution profit." if profit_screened
-        else "Not a net-profit quote or execution guarantee.",
+        "Alert is sent REGARDLESS OF PROFIT: gain, loss or unknown." if not profit_screened
+        else "Positive indicative DEX margin, NOT verified execution profit.",
+        "Profit is optional indicative information, NOT an execution guarantee.",
         "",
     ]
     for i, row in enumerate(rows, 1):
