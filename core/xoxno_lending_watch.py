@@ -2,7 +2,8 @@
 
 Public XOXNO leaderboard is *discovery*, NOT on-chain execution evidence.
 A fresh Controller canBeLiquidated query is required before notifications.
-Exact liquidation payoff, gas and DEX-net profit are NOT calculated here.
+Every newly confirmed eligible position is alerted regardless of profit sign.
+Exact liquidation payoff, gas and DEX-net profit remain indicative only.
 """
 from __future__ import annotations
 
@@ -30,7 +31,8 @@ CONTROLLER = "erd1qqqqqqqqqqqqqpgqyq9mwxkq7zelkupafta5ah95pw6362j745qsk5mdzw"
 LIST_URL = "https://api.xoxno.com/lending/leaderboard/liquidate"
 NFT = re.compile(r"^XLEND-18dc6f-([0-9a-f]{1,16})$")
 MAX_ROWS = 20
-MAX_PRICE_PER_POLL = 6  # Rotate through every confirmed candidate over successive polls.
+MAX_PRICE_PER_POLL = 6  # Rotate confirmed candidates for optional profit reports.
+ELIGIBILITY_BATCH_INTERVAL = 240  # Seconds; pricing does not gate alerts.
 _STATE_LOCK = threading.RLock()
 _LOADED_PATH: str | None = None
 _NOTIFIED: dict[str, float] = {}
@@ -390,7 +392,7 @@ def eligible_to_send(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     load_state()
     now = time.time()
     with _STATE_LOCK:
-        if now - _LAST_BATCH < 3600:
+        if now - _LAST_BATCH < ELIGIBILITY_BATCH_INTERVAL:
             return []
         return [r for r in rows if
                 now - _NOTIFIED.get(r["identifier"], -1e12) >= 12 * 3600][:2]
@@ -402,7 +404,8 @@ def alert_text(rows: list[dict[str, Any]], *, manual: bool = False) -> str:
         else "🟠 XOXNO Lending — PRIVATE LIQUIDATION CANDIDATE",
         "MultiversX | READ-ONLY",
         "Source: XOXNO public liquidation list + on-chain Controller.",
-        "NOT A PROFIT ALERT. Only the health-based eligibility was reconfirmed.",
+        "Eligibility CONFIRMED regardless of estimated GAIN, LOSS or UNKNOWN.",
+        "Profit is NOT VERIFIED; this is NOT an execution recommendation.",
         "",
     ]
     for n, row in enumerate(rows[:3], 1):
@@ -411,7 +414,8 @@ def alert_text(rows: list[dict[str, Any]], *, manual: bool = False) -> str:
             f"   Account owner: {row['borrower']}",
             f"   API-estimated borrow value: USD {row['borrowed_usd_api']:.2f}",
             "   On-chain canBeLiquidated: TRUE",
-            "   Net gain after repayment/gas/swap: NOT VERIFIED",
+            "   Net gain after repayment/gas/swap: UNKNOWN until /xoxno_profit",
+            "   Recheck: /xoxno_profit " + row["identifier"],
             "",
         ])
     lines.extend([
@@ -430,11 +434,12 @@ def status_text() -> str:
         "Discovery: XOXNO public liquidatable leaderboard\n"
         "Validation: canBeLiquidated on mainnet Controller\n"
         f"Scan interval: {interval()}s\n"
-        "Private profitable-scenario alerts: <=1 batch/hour; <=2 positions/batch\n"
-        "Scan reports (including losses): 09:00, 15:00, 21:00 Berlin\n"
+        "Private alerts: ALL verified liquidatable, including losses/unknown\n"
+        "Alert batches: 1 per 4min, up to 2 positions; 12h NFT dedupe\n"
+        "Scan reports including loss: on-demand /xoxno_report\n"
         "Per NFT repeat cooldown: 12h\n"
         "Profit: /xoxno_profit (read-only, indicative and NOT verified)\n"
-        "Profit model floor: >= USD 0.25 after gas estimate + reserve\n"
+        "Profit >= USD 0.25 is informational, NOT an alert requirement\n"
         f"Scans this session: {_STATS['scans']}\n"
         f"API candidates: {_STATS['api_candidates']}\n"
         f"On-chain confirmed: {_STATS['confirmed']}\n"        f"Priced this scan: {_STATS['priced']} | losses: {_STATS['losses']}\n"
@@ -467,6 +472,16 @@ async def scan(context: ContextTypes.DEFAULT_TYPE, *, manual: bool = False) -> l
         _LAST_REPORT = {"rows": [], "valuations": {}, "found": 0,
                         "error": type(exc).__name__}
         return []
+    # Alert immediately after on-chain confirmation, even with unknown or
+    # negative economics. Pricing is independent and may time out.
+    if not manual and positions:
+        selected = eligible_to_send(positions)
+        if selected:
+            await context.bot.send_message(
+                chat_id=admin_id(), text=alert_text(selected)
+            )
+            mark_sent(selected)
+            _STATS["alerts"] += 1
     valuations: dict[str, Any] = {}
     if positions:
         try:
@@ -482,17 +497,6 @@ async def scan(context: ContextTypes.DEFAULT_TYPE, *, manual: bool = False) -> l
     _STATS.update(counts)
     _LAST_REPORT = {"rows": positions, "valuations": valuations,
                     "found": found, "error": _STATS["last_error"]}
-    if not manual and positions:
-        qualified = [r for r in positions if _priority_eligible(
-            valuations.get(r["identifier"])
-        )]
-        selected = eligible_to_send(qualified)
-        if selected:
-            await context.bot.send_message(
-                chat_id=admin_id(), text=positive_alert_text(selected, valuations)
-            )
-            mark_sent(selected)
-            _STATS["alerts"] += 1
     return positions
 
 
@@ -610,16 +614,9 @@ def register(app: Application) -> None:
             scan_job, interval=interval(), first=65,
             name="xoxno_lending_liquidation_private",
         )
-        from core.hatom_digest import digest_hours
-        for hour in digest_hours():
-            app.job_queue.run_daily(
-                report_job,
-                time=clock_time(hour=hour, minute=0, tzinfo=ZoneInfo("Europe/Berlin")),
-                name="xoxno_private_scan_report_" + str(hour),
-            )
         logger.info(
-            "XOXNO Lending reports incl. loss scheduled | every=%ss | digest=%s Berlin",
-            interval(), digest_hours()
+            "XOXNO Lending watcher scheduled | every=%ss | eligibility alerts + manual reports",
+            interval(),
         )
     else:
         logger.info("XOXNO Lending read-only watcher disabled")
