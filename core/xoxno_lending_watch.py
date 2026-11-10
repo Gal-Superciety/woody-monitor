@@ -472,6 +472,16 @@ async def scan(context: ContextTypes.DEFAULT_TYPE, *, manual: bool = False) -> l
         _LAST_REPORT = {"rows": [], "valuations": {}, "found": 0,
                         "error": type(exc).__name__}
         return []
+    # Alert immediately after on-chain confirmation, even with unknown or
+    # negative economics. Pricing is independent and may time out.
+    if not manual and positions:
+        selected = eligible_to_send(positions)
+        if selected:
+            await context.bot.send_message(
+                chat_id=admin_id(), text=alert_text(selected)
+            )
+            mark_sent(selected)
+            _STATS["alerts"] += 1
     valuations: dict[str, Any] = {}
     if positions:
         try:
@@ -487,17 +497,6 @@ async def scan(context: ContextTypes.DEFAULT_TYPE, *, manual: bool = False) -> l
     _STATS.update(counts)
     _LAST_REPORT = {"rows": positions, "valuations": valuations,
                     "found": found, "error": _STATS["last_error"]}
-    if not manual and positions:
-        qualified = [r for r in positions if _priority_eligible(
-            valuations.get(r["identifier"])
-        )]
-        selected = eligible_to_send(qualified)
-        if selected:
-            await context.bot.send_message(
-                chat_id=admin_id(), text=positive_alert_text(selected, valuations)
-            )
-            mark_sent(selected)
-            _STATS["alerts"] += 1
     return positions
 
 
@@ -615,16 +614,9 @@ def register(app: Application) -> None:
             scan_job, interval=interval(), first=65,
             name="xoxno_lending_liquidation_private",
         )
-        from core.hatom_digest import digest_hours
-        for hour in digest_hours():
-            app.job_queue.run_daily(
-                report_job,
-                time=clock_time(hour=hour, minute=0, tzinfo=ZoneInfo("Europe/Berlin")),
-                name="xoxno_private_scan_report_" + str(hour),
-            )
         logger.info(
-            "XOXNO Lending reports incl. loss scheduled | every=%ss | digest=%s Berlin",
-            interval(), digest_hours()
+            "XOXNO Lending watcher scheduled | every=%ss | eligibility alerts + manual reports",
+            interval(),
         )
     else:
         logger.info("XOXNO Lending read-only watcher disabled")
