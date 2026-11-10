@@ -409,7 +409,9 @@ class XoxnoTests(unittest.TestCase):
         x.register(app)
         self.assertEqual(app.add_handler.call_count, 4)
         self.assertEqual(app.job_queue.run_repeating.call_count, 1)
-        self.assertEqual(app.job_queue.run_daily.call_count, 0)
+        self.assertEqual(app.job_queue.run_daily.call_count, 1)
+        self.assertEqual(app.job_queue.run_daily.call_args.kwargs['time'].hour, 21)
+        self.assertEqual(app.job_queue.run_daily.call_args.kwargs['time'].minute, 5)
         self.assertEqual(app.job_queue.run_repeating.call_args.kwargs["interval"], 240)
         with patch.dict(os.environ, {"ENABLE_XOXNO_LENDING_WATCH": "false"}):
             app.job_queue.run_repeating.reset_mock()
