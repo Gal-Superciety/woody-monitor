@@ -217,8 +217,7 @@ class XoxnoTests(unittest.TestCase):
         ):
             asyncio.run(x.scan(SimpleNamespace(bot=bot)))
         bot.send_message.assert_awaited_once()
-        self.assertIn("canBeLiquidated", bot.send_message.await_args.kwargs["text"]
-                      ) if False else None
+        self.assertIn("REGARDLESS", bot.send_message.await_args.kwargs["text"].upper())
 
     def test_inconsistent_stale_or_fake_profit_cannot_alert(self):
         q = scenario(net="0.25")
