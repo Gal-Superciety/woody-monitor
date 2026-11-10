@@ -82,7 +82,6 @@ def load_state() -> None:
         path = state_file()
         if _LOADED_PATH == str(path):
             return
-        _LOADED_PATH = str(path)
         _NOTIFIED.clear()
         _LAST_BATCH = 0
         try:
@@ -103,8 +102,9 @@ def load_state() -> None:
                         and type(ts) in (int, float)
                         and 0 < ts <= now + 300):
                     _NOTIFIED[key] = float(ts)
+            _LOADED_PATH = str(path)
         except FileNotFoundError:
-            pass
+            _LOADED_PATH = str(path)
         except (OSError, ValueError, TypeError, AttributeError) as exc:
             logger.error("XOXNO notification history unreadable (%s); alerts fail closed",
                          type(exc).__name__)
@@ -477,11 +477,18 @@ async def scan(context: ContextTypes.DEFAULT_TYPE, *, manual: bool = False) -> l
     if not manual and positions:
         selected = eligible_to_send(positions)
         if selected:
-            await context.bot.send_message(
-                chat_id=admin_id(), text=alert_text(selected)
-            )
-            mark_sent(selected)
-            _STATS["alerts"] += 1
+            # Persist BEFORE Telegram to avoid duplicates after ambiguous
+            # delivery timeouts. Failed sends are not automatically retried.
+            try:
+                mark_sent(selected)
+            except (OSError, RuntimeError, ValueError) as exc:
+                logger.error("XOXNO alert history not saved; suppress send (%s)",
+                             type(exc).__name__)
+            else:
+                await context.bot.send_message(
+                    chat_id=admin_id(), text=alert_text(selected)
+                )
+                _STATS["alerts"] += 1
     valuations: dict[str, Any] = {}
     if positions:
         try:
