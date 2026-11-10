@@ -45,21 +45,24 @@ def _load() -> None:
     with _LOCK:
         if _INITIALIZED:
             return
-        _INITIALIZED = True
         try:
             obj = json.loads(_file().read_text(encoding="utf8"))
             if not isinstance(obj, dict):
-                return
+                raise ValueError("Invalid Hatom notification state")
             now = time.time()
             entries = obj.get("notified", {})
-            if isinstance(entries, dict):
-                for borrower, ts in entries.items():
-                    if isinstance(borrower, str) and borrower.startswith("erd1") and type(ts) in (int, float) and 0 < ts <= now + 300:
-                        _NOTIFIED[borrower] = float(ts)
+            if not isinstance(entries, dict):
+                raise ValueError("Invalid Hatom notification history")
+            for borrower, ts in entries.items():
+                if (isinstance(borrower, str) and borrower.startswith("erd1")
+                        and type(ts) in (int, float) and 0 < ts <= now + 300):
+                    _NOTIFIED[borrower] = float(ts)
             batch = obj.get("last_batch", 0)
             if isinstance(batch, (int, float)) and 0 <= now - batch <= 86400:
                 _LAST_BATCH = float(batch)
+            _INITIALIZED = True
         except FileNotFoundError:
+            _INITIALIZED = True
             return
         except (OSError, ValueError, TypeError) as exc:
             logger.error("Hatom persisted notification history unreadable (%s); alerts fail closed", type(exc).__name__)
