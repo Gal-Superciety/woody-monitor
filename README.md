@@ -469,8 +469,8 @@ profit is positive, negative, below $0.25 or unavailable**. Only
 risk-only Stage-1 positions remain silent.
 
 The eligible-borrower notifier checks approximately every 180 seconds,
-sends up to two positions per message and persists a 12-hour
-per-borrower duplicate cooldown. The optional DEX-min output estimate
+sends up to two positions per message and permanently records
+notified borrower addresses across future scans and restarts. The optional DEX-min output estimate
 is attached where available; errors never suppress a valid Stage-2
 eligibility notification. The saved `HATOM_ALERT_*` thresholds still
 support informative profitability classification but are NOT a
@@ -533,7 +533,7 @@ Controller. It alerts every newly confirmed eligible **account NFT**,
 whether the optional price scenario is a profit, a loss or UNKNOWN.
 
 The main loop runs every 240 seconds and sends at most two positions per
-batch, with a minimum 240-second gap between batches and a 12-hour
+batch, with a minimum 240-second gap between batches and permanent
 persistent deduplication per account NFT. The alert includes the owner
 address and a `/xoxno_profit XLEND-...` command to manually re-price.
 A fresh verified eligible account is alerted *before* the optional
@@ -597,8 +597,8 @@ routine risk-only or empty scan messages are scheduled.
 
 | Protocol | Scanning | Alert trigger | Duplicate limit |
 | --- | --- | --- | --- |
-| Hatom | ~90 sec | Fresh contract-confirmed Stage-2 liquidation eligibility | Max 2 positions per 3-minute batch, each borrower once/12h |
-| XOXNO MVX | ~240 sec | Fresh contract-confirmed `canBeLiquidated` for an XLEND NFT | Max 2 NFTs per 4-minute batch, each NFT once/12h |
+| Hatom | ~90 sec | Fresh contract-confirmed Stage-2 liquidation eligibility | Max 2 positions per 3-minute batch, each borrower notified once |
+| XOXNO MVX | ~240 sec | Fresh contract-confirmed `canBeLiquidated` for an XLEND NFT | Max 2 NFTs per 4-minute batch, each NFT notified once |
 
 The existing private commands `/hatom_report`, `/hatom_profit`,
 `/xoxno_report`, `/xoxno_scan`, `/xoxno_profit` remain available.
@@ -606,3 +606,29 @@ Profit thresholds and market valuations are INFORMATION ONLY;
 the user will decide whether to attempt manual liquidation.
 An eligible account may not have a profitable execution, and
 other liquidators or changing prices may invalidate the opportunity.
+
+### Permanent one-time notification history (10 November 2026)
+
+The bot **never automatically repeats an eligibility alert for the same
+Hatom borrower address** or the same **XOXNO account NFT** while the
+persistent Railway Volume remains intact. This replaces the previous
+12-hour deduplication expiration. Other newly eligible addresses and
+different XOXNO lending account NFTs still trigger their own one-time
+notifications (even if two XOXNO NFTs belong to the same owner wallet).
+
+Hatom stores notified borrower keys in
+`DATA_DIR/hatom_stage_notifications.json`; XOXNO stores NFT keys in
+`DATA_DIR/xoxno_lending_alerts.json`. The files are preserved across
+normal application restarts and are not pruned for age. Legacy keys
+already expired and removed by *older* deployments cannot be recovered.
+
+To minimize duplicate attempts if Telegram times out after receiving a
+message, a notification is **reserved on disk before Telegram is called**.
+This is at-most-once delivery, not a guarantee that Telegram delivered it:
+a crash or network error after reservation can lose an alert rather than
+retry it. Manual `/hatom_report`, `/hatom_profit`,
+`/xoxno_scan` and `/xoxno_profit` still allow fresh checks.
+If the historical file is corrupted or cannot be saved, automatic
+notification is suppressed instead of silently clearing the deduplication
+history. Restoring a Railway Volume from an older snapshot can naturally
+restore an older alert history.
