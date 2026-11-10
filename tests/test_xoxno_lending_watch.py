@@ -36,6 +36,22 @@ class FakeVm:
         return self.return_data
 
 
+def scenario(*, identifier="XLEND-18dc6f-eb", net="0.30"):
+    profit = Decimal(net)
+    return {
+        "identifier": identifier, "repay_token": "USDC-c76f1f",
+        "repay_usd": Decimal("10"),
+        "dex_min_usd": Decimal("10.70") + profit,
+        "estimated_gas_usd": Decimal("0.20"),
+        "safety_buffer_usd": Decimal("0.50"),
+        "scenario_net_usd": profit,
+        "quote_observed_at": time.time(),
+        "clears_quarter_dollar": profit >= Decimal("0.25"),
+        "verified_profit": False, "transaction_sent": False,
+        "full_pipeline_simulated": False,
+    }
+
+
 class XoxnoTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -47,6 +63,7 @@ class XoxnoTests(unittest.TestCase):
         x._NOTIFIED.clear()
         x._LOADED_PATH = None
         x._LAST_BATCH = 0
+        x._LAST_REPORT = None
         x._STATS.update({
             "last_poll": None, "last_error": None,
             "api_candidates": 0, "confirmed": 0, "scans": 0, "alerts": 0,
@@ -122,31 +139,105 @@ class XoxnoTests(unittest.TestCase):
         source.assert_not_called()
         m.reply_text.assert_not_awaited()
 
-    def test_manual_scan_never_calls_bot_broadcast(self):
+    def test_manual_scan_includes_loss_and_never_broadcasts(self):
         admin = SimpleNamespace(
             effective_chat=SimpleNamespace(type="private", id=42),
             effective_user=SimpleNamespace(id=42),
             message=SimpleNamespace(reply_text=AsyncMock()),
         )
         bot = SimpleNamespace(send_message=AsyncMock())
-        with patch.object(x, "inspect", return_value=([x.parse_candidate(entry())], 1)):
+        rows = [x.parse_candidate(entry())]
+        with patch.object(x, "inspect", return_value=(rows, 1)), patch.object(
+            x, "price_candidates",
+            return_value={rows[0]["identifier"]: scenario(net="-0.15")}
+        ):
             asyncio.run(x.scan_command(admin, SimpleNamespace(bot=bot)))
-        self.assertIn("NOT A PROFIT ALERT", admin.message.reply_text.await_args.args[0])
+        message = admin.message.reply_text.await_args.args[0]
+        self.assertIn("PRIVATE SCAN REPORT", message)
+        self.assertIn("🔴 LOSS", message)
+        self.assertIn("-0.1500", message)
         bot.send_message.assert_not_awaited()
 
-    def test_auto_alert_admin_only_cooldown_and_no_profit_claim(self):
-        rows = [x.parse_candidate(entry())]
+    def test_auto_alert_only_positive_scenarios_and_admin_cooldown(self):
+        rows = [x.parse_candidate(entry()),
+                x.parse_candidate(entry(identifier="XLEND-18dc6f-01"))]
+        value = {
+            rows[0]["identifier"]: scenario(net="-0.30"),
+            rows[1]["identifier"]: scenario(
+                identifier=rows[1]["identifier"], net="0.30"
+            ),
+        }
         bot = SimpleNamespace(send_message=AsyncMock())
-        with patch.object(x, "inspect", return_value=(rows, 1)):
+        with patch.object(x, "inspect", return_value=(rows, 2)), patch.object(
+            x, "price_candidates", return_value=value
+        ):
             asyncio.run(x.scan(SimpleNamespace(bot=bot)))
             asyncio.run(x.scan(SimpleNamespace(bot=bot)))
         bot.send_message.assert_awaited_once()
         self.assertEqual(bot.send_message.await_args.kwargs["chat_id"], 42)
         alert = bot.send_message.await_args.kwargs["text"]
-        self.assertIn("NOT A PROFIT ALERT", alert)
+        self.assertIn("POSITIVE-SCENARIO ALERT", alert)
+        self.assertIn(rows[1]["identifier"], alert)
+        self.assertNotIn(rows[0]["identifier"], alert)
         self.assertIn("NOT VERIFIED", alert)
-        self.assertIn("No funds used", alert)
-        self.assertNotIn("profit: +", alert.lower())
+        self.assertIn("NO transaction sent", alert)
+        self.assertEqual(x._STATS["losses"], 1)
+        self.assertEqual(x._STATS["positive"], 1)
+
+    def test_negative_only_no_priority_alert_but_in_scan_report(self):
+        rows = [x.parse_candidate(entry())]
+        bot = SimpleNamespace(send_message=AsyncMock())
+        with patch.object(x, "inspect", return_value=(rows, 1)), patch.object(
+            x, "price_candidates",
+            return_value={rows[0]["identifier"]: scenario(net="-0.17")}
+        ):
+            asyncio.run(x.scan(SimpleNamespace(bot=bot)))
+        bot.send_message.assert_not_awaited()
+        self.assertIn("-0.1700", x.scan_report_text(
+            rows, x._LAST_REPORT["valuations"]
+        ))
+
+    def test_inconsistent_stale_or_fake_profit_cannot_alert(self):
+        q = scenario(net="0.25")
+        self.assertTrue(x._priority_eligible(q))
+        self.assertFalse(x._priority_eligible(
+            dict(q, quote_observed_at=time.time()-100)
+        ))
+        self.assertFalse(x._priority_eligible(
+            dict(q, scenario_net_usd=Decimal("999"))
+        ))
+        self.assertFalse(x._priority_eligible(
+            dict(q, verified_profit=True)
+        ))
+        self.assertFalse(x._priority_eligible(
+            dict(q, estimated_gas_usd=Decimal("0"))
+        ))
+        self.assertFalse(x._priority_eligible(
+            dict(q, clears_quarter_dollar=False)
+        ))
+
+    def test_scheduled_report_sent_when_no_candidates(self):
+        bot = SimpleNamespace(send_message=AsyncMock())
+        with patch.object(x, "inspect", return_value=([], 0)):
+            asyncio.run(x.report_job(SimpleNamespace(bot=bot)))
+        bot.send_message.assert_awaited_once()
+        self.assertEqual(bot.send_message.await_args.kwargs["chat_id"], 42)
+        self.assertIn("API candidates: 0",
+                      bot.send_message.await_args.kwargs["text"])
+        self.assertIn("PRIVATE SCAN REPORT",
+                      bot.send_message.await_args.kwargs["text"])
+
+    def test_all_candidates_priced_in_rotation(self):
+        rows = [x.parse_candidate(entry(identifier=f"XLEND-18dc6f-{j:02x}"))
+                for j in range(1, 15)]
+        with patch("core.xoxno_profit.calculate") as calc:
+            calc.side_effect = lambda nft: scenario(identifier=nft)
+            visited = set()
+            for poll in range(3):
+                result = x.price_candidates(rows, poll=poll)
+                self.assertLessEqual(len(result), x.MAX_PRICE_PER_POLL)
+                visited.update(result.keys())
+        self.assertEqual(visited, {row["identifier"] for row in rows})
 
     def test_cooldown_survives_restart(self):
         row = x.parse_candidate(entry())
@@ -161,16 +252,19 @@ class XoxnoTests(unittest.TestCase):
     def test_register_is_scheduled_only_when_enabled(self):
         app = SimpleNamespace(
             add_handler=Mock(),
-            job_queue=SimpleNamespace(run_repeating=Mock()),
+            job_queue=SimpleNamespace(run_repeating=Mock(), run_daily=Mock()),
         )
         x.register(app)
-        self.assertEqual(app.add_handler.call_count, 3)
+        self.assertEqual(app.add_handler.call_count, 4)
         self.assertEqual(app.job_queue.run_repeating.call_count, 1)
+        self.assertEqual(app.job_queue.run_daily.call_count, 3)
         self.assertEqual(app.job_queue.run_repeating.call_args.kwargs["interval"], 240)
         with patch.dict(os.environ, {"ENABLE_XOXNO_LENDING_WATCH": "false"}):
             app.job_queue.run_repeating.reset_mock()
+            app.job_queue.run_daily.reset_mock()
             x.register(app)
         app.job_queue.run_repeating.assert_not_called()
+        app.job_queue.run_daily.assert_not_called()
 
 
 if __name__ == "__main__":
