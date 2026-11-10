@@ -266,19 +266,19 @@ class StageTests(unittest.TestCase):
         stages.observe([sample()], now=time.time() + 100000)
         self.assertEqual(stages.pending(now=time.time() + 100000), [])
 
-    def test_under_quarter_dollar_and_missing_dex_route_never_alert(self):
+    def test_under_ten_cents_and_missing_dex_route_never_alert(self):
         from decimal import Decimal
         stages.observe([sample()])
         bot = SimpleNamespace(send_message=AsyncMock())
         base = {
             "category": "INDICATIVE_ONLY", "verified_profit": False,
             "executable_dex_quote": False, "repay_usd": Decimal("10"),
-            "quote_min_usd": Decimal("10.949"),
+            "quote_min_usd": Decimal("10.799"),
             "assumed_gas_cost_usd": Decimal("0.20"),
-            "quote_net_after_assumed_gas_usd": Decimal("0.749"),
-            "gross_usd": Decimal("0.95"),
+            "quote_net_after_assumed_gas_usd": Decimal("0.599"),
+            "gross_usd": Decimal("0.80"),
             "dex_quote": {
-                "route_count": 1, "amount_out_min_raw": 10949000,
+                "route_count": 1, "amount_out_min_raw": 10799000,
                 "quote_received_at": time.time(),
             },
         }
