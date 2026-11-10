@@ -306,8 +306,10 @@ class XoxnoTests(unittest.TestCase):
         with patch.object(x, "inspect", return_value=([row], 1)), patch.object(
             x, "price_candidates", return_value={}
         ):
-            with self.assertRaises(TimeoutError):
-                asyncio.run(x.scan(SimpleNamespace(bot=failing)))
+            # Notification failures are isolated by the multi-recipient fanout.
+            # The NFT is already persisted as notified (at-most-once policy).
+            asyncio.run(x.scan(SimpleNamespace(bot=failing)))
+            failing.send_message.assert_awaited_once()
             self.assertIn(row["identifier"], x._NOTIFIED)
             self.assertTrue(x.state_file().exists())
             # A restart must not attempt a duplicate send.
