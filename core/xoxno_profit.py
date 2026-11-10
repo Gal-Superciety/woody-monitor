@@ -15,7 +15,7 @@ from typing import Any
 import requests
 from core.hatom_onchain import VmClient
 from core.hatom_profit import MarketData, QuoteUnavailable, human
-from core.xoxno_lending_watch import CONTROLLER, nonce_of
+from core.xoxno_lending_watch import CONTROLLER, nonce_of, minimum_alert_usd
 
 API = "https://api.xoxno.com"
 ETH = Decimal(10) ** 18
@@ -238,6 +238,7 @@ def quote_one(
         "scenario_pre_buffer_usd": before_buffer,
         "scenario_net_usd": after_buffer,
         "clears_quarter_dollar": after_buffer >= Decimal("0.25"),
+        "clears_alert_minimum": after_buffer >= minimum_alert_usd(),
         "bonus_bps": data["bonus_bps"],
         "routes": routes, "collaterals": collaterals,
         "price_source_timestamp": None,
@@ -319,10 +320,13 @@ def format_report(result: dict[str, Any]) -> str:
     def money(value: Decimal) -> str:
         return "USD " + format(value, ",.4f")
     net = result["scenario_net_usd"]
-    if result["clears_quarter_dollar"]:
-        verdict = "MODELED >= USD 0.25 (NOT VERIFIED EXECUTABLE PROFIT)"
+    floor = minimum_alert_usd()
+    if net >= floor:
+        verdict = ("MODELED >= USD " + str(floor)
+                   + " (NOT VERIFIED EXECUTABLE PROFIT)")
     else:
-        verdict = "BELOW USD 0.25 — NOT ECONOMIC IN THIS SCENARIO"
+        verdict = ("BELOW USD " + str(floor)
+                   + " — NOT ELIGIBLE FOR PROFIT ALERT IN THIS SCENARIO")
     rows = [
         "💰 XOXNO LENDING — PRIVATE PROFIT SCENARIO",
         "MultiversX | READ-ONLY | MANUAL ACTION ONLY",

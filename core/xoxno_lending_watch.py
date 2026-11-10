@@ -3,7 +3,7 @@
 Public XOXNO leaderboard is *discovery*, NOT on-chain execution evidence.
 A fresh Controller canBeLiquidated query and a fresh, complete, positive
 DEX-min liquidation scenario are required for private alerts: at least USD
-0.25 modeled after assumed gas and buffer. Negative or unknown estimates
+0.10 modeled after assumed gas and buffer. Negative or unknown estimates
 stay in manual scan reports only. No transactions are executed.
 """
 from __future__ import annotations
@@ -211,6 +211,17 @@ def inspect() -> tuple[list[dict[str, Any]], int]:
     return confirm_onchain(records), len(records)
 
 
+def minimum_alert_usd() -> Decimal:
+    """Configured modeled net floor (AFTER estimated gas and safety reserve)."""
+    try:
+        value = Decimal(os.getenv("XOXNO_ALERT_MIN_NET_USD", "0.10"))
+    except (InvalidOperation, ValueError, TypeError) as exc:
+        raise ValueError("Invalid XOXNO alert profit threshold") from exc
+    if not value.is_finite() or not Decimal("0.01") <= value <= Decimal("100000"):
+        raise ValueError("Unsafe XOXNO alert profit threshold")
+    return value
+
+
 def _priority_eligible(report: Any, *, now: float | None = None) -> bool:
     """Fail closed on stale, inconsistent or incomplete indicative net scenarios.
 
@@ -221,8 +232,7 @@ def _priority_eligible(report: Any, *, now: float | None = None) -> bool:
         return False
     if (report.get("verified_profit") is not False
             or report.get("transaction_sent") is not False
-            or report.get("full_pipeline_simulated") is not False
-            or report.get("clears_quarter_dollar") is not True):
+            or report.get("full_pipeline_simulated") is not False):
         return False
     try:
         repaid = Decimal(str(report["repay_usd"]))
@@ -230,12 +240,13 @@ def _priority_eligible(report: Any, *, now: float | None = None) -> bool:
         gas = Decimal(str(report["estimated_gas_usd"]))
         reserve = Decimal(str(report["safety_buffer_usd"]))
         modeled = Decimal(str(report["scenario_net_usd"]))
+        floor = minimum_alert_usd()
         timestamp = float(report["quote_observed_at"])
         current = time.time() if now is None else now
         if not (all(x.is_finite() for x in (repaid, received, gas, reserve, modeled))
                 and repaid > 0 and received > 0 and gas > 0
                 and reserve >= Decimal("0.50")
-                and modeled >= Decimal("0.25")
+                and modeled >= floor
                 and received > repaid + gas
                 and abs(received - repaid - gas - reserve - modeled)
                 <= Decimal("0.000000001")
@@ -319,7 +330,8 @@ def scan_report_text(
         "Priced scenarios: " + str(counts["priced"]),
         "🔴 Loss scenarios: " + str(counts["losses"]),
         "🟡 Nonnegative but below alert threshold: " + str(counts["below_threshold"]),
-        "🟢 Passing modeled +0.25 USD alert screen: " + str(counts["positive"]),
+        "🟢 Passing modeled +" + str(minimum_alert_usd())
+        + " USD alert screen: " + str(counts["positive"]),
         "⚪ Not priced / unavailable: " + str(counts["unavailable"]),
         "",
     ]
@@ -338,7 +350,7 @@ def scan_report_text(
                 net = Decimal(str(data["scenario_net_usd"]))
                 if not net.is_finite():
                     raise ValueError("Invalid net")
-                verdict = ("🟢 +0.25 USD SCREEN" if _priority_eligible(data)
+                verdict = ("🟢 +" + str(minimum_alert_usd()) + " USD SCREEN" if _priority_eligible(data)
                            else "🔴 LOSS" if net < 0 else "🟡 BELOW THRESHOLD")
                 lines.append("   Net after assumed gas + reserve: "
                              + format(net, "+.4f") + " USD " + verdict)
@@ -354,7 +366,8 @@ def scan_report_text(
         "Candidate discovery uses XOXNO public leaderboard; live liquidation",
         "and DEX prices may change. Only up to " + str(MAX_PRICE_PER_POLL)
         + " candidate scenarios priced per poll, rotated on later polls.",
-        "Separate positive alerts require >= 0.25 USD modeled after costs.",
+        "Separate positive alerts require >= " + str(minimum_alert_usd())
+        + " USD modeled after costs.",
         "Profit remains UNVERIFIED: gas and full TX are not simulated.",
         "No keys or automatic execution.",
     ])
@@ -421,7 +434,8 @@ def alert_text(rows: list[dict[str, Any]], *, manual: bool = False) -> str:
         ])
     lines.extend([
         "Liquidation repayment and collateral payout NOT simulated.",
-        "Do not assume the +0.25 USD threshold is met.",
+        "Do not assume the +" + str(minimum_alert_usd())
+        + " USD threshold is met.",
         "No funds used; no wallet keys; no transaction sent.",
     ])
     return "\n".join(lines)[:3600]
@@ -435,7 +449,8 @@ def status_text() -> str:
         "Discovery: XOXNO public liquidatable leaderboard\n"
         "Validation: canBeLiquidated on mainnet Controller\n"
         f"Scan interval: {interval()}s\n"
-        "Private alerts: ONLY modeled positive +USD 0.25 net or more\n"
+        "Private alerts: ONLY modeled net >= USD "
+        + str(minimum_alert_usd()) + " after costs\n"
         "Require fresh on-chain eligibility, DEX quote, assumed gas + buffer\n"
         "Negative, unknown and below threshold: no Telegram alerts\n"
         "Alerts: up to 2 positions per 4min; one-time per positive NFT\n"
@@ -452,7 +467,7 @@ def status_text() -> str:
 
 
 async def scan(context: ContextTypes.DEFAULT_TYPE, *, manual: bool = False) -> list[dict[str, Any]]:
-    """Price confirmed positions; alert only on fresh +$0.25 net scenarios.
+    """Price confirmed positions; alert only on fresh positive >= minimum net scenarios.
 
     Manual scans still show losses and unavailable prices. No empty or loss
     notifications are pushed to Telegram.
@@ -485,7 +500,7 @@ async def scan(context: ContextTypes.DEFAULT_TYPE, *, manual: bool = False) -> l
             _STATS["last_error"] = "Valuation: " + type(exc).__name__
             logger.warning("XOXNO batch pricing unavailable (%s)", type(exc).__name__)
     # Economic estimates are checked BEFORE alerting. No recipient receives
-    # losing, unpriced or below-$0.25 candidates. Older eligibility alerts
+    # losing, unpriced or below-minimum candidates. Older eligibility alerts
     # used a different history file and cannot suppress newfound positives.
     if not manual and positions:
         qualifying = [

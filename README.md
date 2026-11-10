@@ -596,7 +596,7 @@ produce private automatic Telegram notifications. Negative, zero,
 unknown, unpriced and below-threshold scenarios are entirely silent.
 Nothing is posted automatically when a scan has no profitable candidates.
 
-**Profit-screening threshold: >= USD 0.25 indicative net after** repayment,
+**Profit-screening threshold: >= USD 0.10 indicative net after** repayment,
 fresh DEX minimum output, assumed gas, and an additional conservative
 safety buffer (at least USD 0.50 or 1% of repayment). Hatom also verifies
 a fresh XOXNO swap route with a nonzero minimum output and rejects
@@ -608,8 +608,8 @@ liquidators can wipe out the margin. NO automated execution.
 
 | Protocol | Continual scan | Alert condition | Repeated alert suppression |
 | --- | --- | --- | --- |
-| Hatom | about every 90 sec | fresh Stage-2 eligibility AND DEX-modelled >=$0.25 net | one positive alert per borrower across restarts |
-| XOXNO MVX | about every 240 sec | fresh Controller eligibility AND full-model >=$0.25 net | one positive alert per account NFT across restarts |
+| Hatom | about every 90 sec | fresh Stage-2 eligibility AND DEX-modelled >=$0.10 net | one positive alert per borrower across restarts |
+| XOXNO MVX | about every 240 sec | fresh Controller eligibility AND full-model >=$0.10 net | one positive alert per account NFT across restarts |
 
 The Hatom alert screening job checks approximately every 180 seconds,
 and each Telegram batch contains up to two positions. XOXNO models

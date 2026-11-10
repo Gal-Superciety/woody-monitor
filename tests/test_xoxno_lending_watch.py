@@ -208,6 +208,29 @@ class XoxnoTests(unittest.TestCase):
             asyncio.run(x.scan(SimpleNamespace(bot=bot)))
         bot.send_message.assert_not_awaited()
 
+    def test_ten_cent_profit_auto_alerts_but_nine_cents_stays_silent(self):
+        rows = [x.parse_candidate(entry()),
+                x.parse_candidate(entry(identifier="XLEND-18dc6f-01"))]
+        valuations = {
+            rows[0]["identifier"]: scenario(net="0.09"),
+            rows[1]["identifier"]: scenario(
+                identifier=rows[1]["identifier"], net="0.10"
+            ),
+        }
+        bot = SimpleNamespace(send_message=AsyncMock())
+        with patch.object(x, "inspect", return_value=(rows, 2)), patch.object(
+            x, "price_candidates", return_value=valuations
+        ):
+            asyncio.run(x.scan(SimpleNamespace(bot=bot)))
+        bot.send_message.assert_awaited_once()
+        alert = bot.send_message.await_args.kwargs["text"]
+        self.assertIn("Indicative net: +0.1000 USD", alert)
+        self.assertIn(rows[1]["identifier"], alert)
+        self.assertNotIn(rows[0]["identifier"], alert)
+        self.assertEqual(x._STATS["positive"], 1)
+        self.assertNotIn(rows[0]["identifier"], x._NOTIFIED)
+        self.assertIn(rows[1]["identifier"], x._NOTIFIED)
+
     def test_negative_then_positive_same_nft_can_alert_once(self):
         row = x.parse_candidate(entry())
         bot = SimpleNamespace(send_message=AsyncMock())
@@ -252,8 +275,14 @@ class XoxnoTests(unittest.TestCase):
         self.assertNotIn(rows[0]["identifier"], x._NOTIFIED)
 
     def test_inconsistent_stale_or_fake_profit_cannot_alert(self):
-        q = scenario(net="0.25")
+        q = scenario(net="0.10")
+        self.assertFalse(q["clears_quarter_dollar"])
         self.assertTrue(x._priority_eligible(q))
+        self.assertFalse(x._priority_eligible(scenario(net="0.09")))
+        with patch.dict(os.environ, {"XOXNO_ALERT_MIN_NET_USD": "0.25"}):
+            self.assertFalse(x._priority_eligible(q))
+        with patch.dict(os.environ, {"XOXNO_ALERT_MIN_NET_USD": "0.10"}):
+            self.assertTrue(x._priority_eligible(q))
         self.assertFalse(x._priority_eligible(
             dict(q, quote_observed_at=time.time()-100)
         ))
@@ -267,7 +296,7 @@ class XoxnoTests(unittest.TestCase):
             dict(q, estimated_gas_usd=Decimal("0"))
         ))
         self.assertFalse(x._priority_eligible(
-            dict(q, clears_quarter_dollar=False)
+            dict(q, full_pipeline_simulated=True)
         ))
 
     def test_scheduled_report_sent_when_no_candidates(self):
