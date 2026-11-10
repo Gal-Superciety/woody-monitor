@@ -305,14 +305,24 @@ async def digest(context: ContextTypes.DEFAULT_TYPE, *, manual: bool = False) ->
     from core.hatom_digest import state_snapshot, recheck, build_report, mark_report_sent
     snapshot = state_snapshot()
     candidates = snapshot["candidates"]
-    if not candidates and not manual:
-        return False
-    checked, errors = await asyncio.to_thread(recheck, candidates)
-    if not checked and not manual:
-        return False
+    # Scheduled reports are useful even with zero current candidates.
+    # Bounded fresh checks, including unprofitable Stage-2 positions.
+    checked, errors = await asyncio.to_thread(
+        recheck, candidates, max_check=12, max_show=8
+    )
+    stage2 = [r for r in checked if r.get("category") == "ONCHAIN_ELIGIBLE"]
+    valuations: dict[str, Any] = {}
+    if stage2:
+        try:
+            valuations = await asyncio.wait_for(
+                asyncio.to_thread(_value_eligible_positions, stage2), timeout=70
+            )
+        except asyncio.TimeoutError:
+            valuations = {r["borrower"]: "DEX valuation timed out" for r in stage2}
     report = build_report(
         candidates, verified=checked, errors=errors,
-        scans=snapshot["scans"], checks=snapshot["checks"]
+        scans=snapshot["scans"], checks=snapshot["checks"],
+        valuations=valuations
     )
     await context.bot.send_message(chat_id=_admin_id(), text=report)
     if not manual:
@@ -340,7 +350,7 @@ def status_text() -> str:
         f"Unpriced risk signals on last scan: {_STATE['last_candidates']}\n"
         "Profit scenario: REFERENCE USD PRICES + ASSUMED COSTS\n"
         "Verified executable profit: NOT AVAILABLE (no transaction simulation)\n"
-        "Risk alerts: PRIVATE DIGEST ONLY\n"
+        "Risk scan reports: 09:00/15:00/21:00 Berlin, include negative scenarios\n"
         "Stage 2: PROFIT-SCREENED INDICATIVE ONLY; 1 batch/hour, 2 wallets\n"
         "Priority filter: fresh DEX min-out + assumed gas + extra buffer\n"
         "Priority surplus floor: $0.25 (estimated, NOT VERIFIED)\n"
