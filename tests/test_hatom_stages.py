@@ -182,57 +182,116 @@ class StageTests(unittest.TestCase):
         self.assertNotEqual(bot.send_message.await_args.kwargs["chat_id"], -100123)
         alert = bot.send_message.await_args.kwargs["text"]
         self.assertEqual(alert.count("Borrower:"), 2)
-        self.assertIn("REGARDLESS OF PROFIT", alert)
+        self.assertIn("POSITIVE-SCENARIO ALERT", alert)
+        self.assertIn("Positive indicative margin", alert)
         self.assertIn("NET PROFIT: NOT VERIFIED", alert)
         self.assertEqual(len(stages.pending()), 0)
 
-    def test_unprofitable_or_unknown_positions_still_trigger_eligibility_alert(self):
+    def test_unknown_profit_never_notifies_and_can_be_rechecked(self):
         stages.observe([sample()])
         bot = SimpleNamespace(send_message=AsyncMock())
         with patch("core.hatom_liquidations._value_eligible_positions",
                    return_value={A: "DEX quote unavailable"}), patch(
             "core.hatom_stages.revalidate", return_value=([sample()], 0)
         ):
-            self.assertTrue(asyncio.run(watch.eligibility_notifier(SimpleNamespace(bot=bot))))
-        bot.send_message.assert_awaited_once()
-        msg = bot.send_message.await_args.kwargs["text"]
-        self.assertIn("REGARDLESS OF PROFIT", msg)
-        self.assertIn("DEX quote unavailable", msg)
-        self.assertIn("NET PROFIT: NOT VERIFIED", msg)
-        self.assertEqual(stages.pending(), [])
-        # Send once, not every polling interval; persistent per-borrower dedupe.
-        with patch("core.hatom_stages.revalidate") as recheck:
-            self.assertFalse(asyncio.run(watch.eligibility_notifier(SimpleNamespace(bot=bot))))
-            recheck.assert_not_called()
+            self.assertFalse(asyncio.run(
+                watch.eligibility_notifier(SimpleNamespace(bot=bot))
+            ))
+        bot.send_message.assert_not_awaited()
+        self.assertEqual(len(stages.pending()), 1)
+        self.assertNotIn(A, stages._NOTIFIED)
 
-    def test_onchain_eligible_with_negative_profit_still_notifies(self):
+    def test_negative_scenario_silent_and_later_positive_gets_one_alert(self):
         from decimal import Decimal
         stages.observe([sample()])
         bot = SimpleNamespace(send_message=AsyncMock())
-        scenario = {
+        negative = {
             "category": "INDICATIVE_ONLY",
-            "repay_units": Decimal("0.1"),
-            "repay_symbol": "USDT",
-            "repay_usd": Decimal("0.10"),
-            "collateral_units": Decimal("200000"),
-            "collateral_symbol": "MEX",
-            "collateral_usd": Decimal("0.11"),
+            "verified_profit": False,
+            "executable_dex_quote": False,
+            "repay_usd": Decimal("10"),
             "gross_usd": Decimal("0.01"),
-            "assumed_swap_cost_usd": Decimal("0.001"),
-            "assumed_slippage_bps": 150,
+            "quote_min_usd": Decimal("10.10"),
             "assumed_gas_cost_usd": Decimal("0.20"),
-            "scenario_net_usd": Decimal("-0.191"),
-            "quote_min_units": Decimal("0.11"),
-            "quote_min_usd": Decimal("0.11"),
-            "quote_net_after_assumed_gas_usd": Decimal("-0.19"),
-            "dex_quote": {"route_count": 1},
+            "quote_net_after_assumed_gas_usd": Decimal("-0.10"),
+            "dex_quote": {
+                "route_count": 1, "amount_out_min_raw": 10100000,
+                "quote_received_at": time.time(),
+            },
         }
+        positive = dict(
+            negative,
+            gross_usd=Decimal("2"),
+            quote_min_usd=Decimal("11"),
+            quote_net_after_assumed_gas_usd=Decimal("0.80"),
+            repay_units=Decimal("10"),
+            repay_symbol="USDC",
+            collateral_units=Decimal("1"),
+            collateral_symbol="EGLD",
+            collateral_usd=Decimal("11"),
+            assumed_swap_cost_usd=Decimal("0.15"),
+            assumed_slippage_bps=150,
+            scenario_net_usd=Decimal("0.75"),
+            quote_min_units=Decimal("11"),
+        )
         with patch("core.hatom_liquidations._value_eligible_positions",
-                   return_value={A: scenario}), patch(
+                   return_value={A: negative}), patch(
             "core.hatom_stages.revalidate", return_value=([sample()], 0)
         ):
-            self.assertTrue(asyncio.run(watch.eligibility_notifier(SimpleNamespace(bot=bot))))
-        self.assertIn("$-0.19", bot.send_message.await_args.kwargs["text"])
+            self.assertFalse(asyncio.run(
+                watch.eligibility_notifier(SimpleNamespace(bot=bot))
+            ))
+        bot.send_message.assert_not_awaited()
+        self.assertNotIn(A, stages._NOTIFIED)
+        # Same address becomes profitable at a later poll.
+        with patch("core.hatom_liquidations._value_eligible_positions",
+                   return_value={A: positive}), patch(
+            "core.hatom_stages.revalidate", return_value=([sample()], 0)
+        ):
+            self.assertTrue(asyncio.run(
+                watch.eligibility_notifier(SimpleNamespace(bot=bot))
+            ))
+        bot.send_message.assert_awaited_once()
+        self.assertIn("POSITIVE-SCENARIO ALERT",
+                      bot.send_message.await_args.kwargs["text"])
+        self.assertIn("Indicative surplus AFTER buffer",
+                      bot.send_message.await_args.kwargs["text"])
+        self.assertEqual(len(stages.pending()), 0)
+        # The new positive-only dedupe remains permanent across restarts.
+        stages._INITIALIZED = False
+        stages._NOTIFIED.clear()
+        stages._PENDING.clear()
+        stages._SEEN.clear()
+        stages._LAST_BATCH = 0
+        stages.observe([sample()], now=time.time() + 100000)
+        self.assertEqual(stages.pending(now=time.time() + 100000), [])
+
+    def test_under_quarter_dollar_and_missing_dex_route_never_alert(self):
+        from decimal import Decimal
+        stages.observe([sample()])
+        bot = SimpleNamespace(send_message=AsyncMock())
+        base = {
+            "category": "INDICATIVE_ONLY", "verified_profit": False,
+            "executable_dex_quote": False, "repay_usd": Decimal("10"),
+            "quote_min_usd": Decimal("10.949"),
+            "assumed_gas_cost_usd": Decimal("0.20"),
+            "quote_net_after_assumed_gas_usd": Decimal("0.749"),
+            "gross_usd": Decimal("0.95"),
+            "dex_quote": {
+                "route_count": 1, "amount_out_min_raw": 10949000,
+                "quote_received_at": time.time(),
+            },
+        }
+        for report in (base, dict(base, dex_quote=None)):
+            with patch("core.hatom_liquidations._value_eligible_positions",
+                       return_value={A: report}), patch(
+                "core.hatom_stages.revalidate", return_value=([sample()], 0)
+            ):
+                self.assertFalse(asyncio.run(
+                    watch.eligibility_notifier(SimpleNamespace(bot=bot))
+                ))
+        bot.send_message.assert_not_awaited()
+        self.assertNotIn(A, stages._NOTIFIED)
 
     def test_disabled_monitor_does_not_notify(self):
         stages.observe([sample()])

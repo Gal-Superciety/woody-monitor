@@ -250,14 +250,16 @@ def _value_eligible_positions(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 async def eligibility_notifier(context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Alert on every freshly reconfirmed, contract-eligible Hatom borrower.
+    """Notify ONLY contract-eligible Hatom liquidations with modeled net >=$0.25.
 
-    Profit and DEX data are optional. Losing and unpriceable liquidations still
-    trigger an eligibility alert. No Stage-1 alerts and no trading.
+    Every candidate is repriced even after earlier negative/unknown scenarios.
+    Priority filtering demands a fresh DEX minimum output and extra reserve.
+    Manual reports remain available for loss-making/unknown positions.
     """
     if not _enabled() or not _ready() or _source() != "onchain" or _admin_id() is None:
         return False
     from core.hatom_stages import pending, revalidate, format_alert, mark_delivered
+    from core.hatom_profit_filter import eligible_for_priority_alert
     candidates = pending()
     if not candidates:
         return False
@@ -266,33 +268,54 @@ async def eligibility_notifier(context: ContextTypes.DEFAULT_TYPE) -> bool:
         logger.info("HATOM_ELIGIBILITY_REFRESH_ERRORS | skipped=%s", errors)
     if not checked:
         return False
-    # Oldest first; 12-hour borrower cooldown begins after Telegram delivery.
-    selected = checked[:2]
-    values: dict[str, Any] = {}
     try:
-        values = await asyncio.wait_for(
-            asyncio.to_thread(_value_eligible_positions, selected), timeout=45
+        valuations = await asyncio.wait_for(
+            asyncio.to_thread(_value_eligible_positions, checked), timeout=70
         )
     except asyncio.TimeoutError:
-        values = {row["borrower"]: "Pricing timed out" for row in selected}
-    # A negative or missing net scenario NEVER suppresses an eligible signal.
-    # Reserve the one-time notification keys BEFORE contacting Telegram.
-    # If Telegram times out after delivering, a retry would duplicate it.
-    # A failed API call may therefore lose an alert, by design (at-most-once).
+        logger.info("HATOM_PROFIT_ONLY | pricing timeout; no alert")
+        return False
+    qualifying: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    rejected: dict[str, int] = {}
+    for row in checked:
+        qualifies, reason, screened = eligible_for_priority_alert(
+            valuations.get(row["borrower"])
+        )
+        if qualifies and screened is not None:
+            qualifying.append((row, screened))
+        else:
+            rejected[reason] = rejected.get(reason, 0) + 1
+    logger.info(
+        "HATOM_PROFIT_ONLY_SCREEN | checked=%s | qualifying=%s | suppressed=%s",
+        len(checked), len(qualifying), rejected,
+    )
+    if not qualifying:
+        return False
+    # Only positive scenarios are marked as notified. Sort best modeled net
+    # first; do not block future profit when an account is currently negative.
+    qualifying.sort(
+        key=lambda pair: pair[1]["screened_surplus_usd"], reverse=True
+    )
+    selected = qualifying[:2]
+    rows = [row for row, _ in selected]
+    screened = {row["borrower"]: value for row, value in selected}
     try:
-        mark_delivered(selected)
+        # At-most-once persistent record is saved before Telegram fanout.
+        mark_delivered(rows)
     except (OSError, RuntimeError, ValueError) as exc:
-        logger.error("Hatom alert history not persisted; not sending (%s)", type(exc).__name__)
+        logger.error("Hatom positive alert history unavailable (%s)", type(exc).__name__)
         return False
     from core.liquidation_access import send_liquidation_alert
     recipients = await send_liquidation_alert(
-        context.bot, format_alert(selected, values)
+        context.bot, format_alert(rows, screened, profit_screened=True)
     )
     _STATE["sent"] += 1
-    logger.info("HATOM_PRIVATE_FANOUT | delivered=%s", recipients)
-    logger.info("HATOM_ELIGIBLE_PRIVATE_ALERT | count=%s | profit_gate=none",
-                len(selected))
+    logger.info(
+        "HATOM_POSITIVE_PRIVATE_ALERT | positions=%s | delivered=%s",
+        len(rows), recipients,
+    )
     return True
+
 
 async def digest(context: ContextTypes.DEFAULT_TYPE, *, manual: bool = False,
                  target_chat_id: int | None = None) -> bool:
@@ -353,11 +376,12 @@ def status_text() -> str:
         "Profit scenario: REFERENCE USD PRICES + ASSUMED COSTS\n"
         "Verified executable profit: NOT AVAILABLE (no transaction simulation)\n"
         "Risk reporting: on-demand /hatom_report only\n"
-        "Stage 2: ANY reconfirmed liquidatable, +/-/UNKNOWN profit\n"
-        "Eligibility notifications: up to 2 wallets every 3min, one-time per address\n"
-        "Optional profit estimate: DEX min-out - assumed gas; no alert threshold\n"
-        "Manual /hatom_profit remains available; profit NOT VERIFIED\n"
-        "Stage 2: repeat alerts disabled for previously sent borrower addresses\n"
+        "Stage 2: only profitable modeled liquidation alerts\n"
+        "Minimum indicative net: +USD 0.25 AFTER assumed gas and buffer\n"
+        "Require fresh live DEX min-out and on-chain eligibility\n"
+        "Negative, missing DEX and below-threshold: no notifications\n"
+        "Positive-alert dedupe: each borrower once (persistent)\n"
+        "Manual /hatom_profit and /hatom_report show losses too\n"
         f"Pending stage 2 candidates: {stage['pending_eligible']}\n"
         f"Private risk digest: {','.join(f'{hour:02d}:00' for hour in digest_hours())} Berlin\n"
         f"Risk wallets observed (last 12h): {len(report_state['candidates'])}\n"
@@ -595,7 +619,7 @@ def register(app: Application) -> None:
                 eligibility_notifier, interval=180, first=45, name="hatom_stage2_private_batch"
             )
         logger.info(
-            "Hatom private observer scheduled | scan=%ss | eligibility alerts=180s | no empty scheduled reports",
+            "Hatom private observer scheduled | scan=%ss | positive-only alerts=180s | min modeled surplus=USD 0.25",
             _interval(),
         )
     else:

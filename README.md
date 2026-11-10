@@ -460,7 +460,7 @@ sign or execute any blockchain transactions. If the position is no
 longer eligible, the bot says so rather than manufacturing a profit quote.
 
 
-### Hatom Stage-2 liquidation eligibility alerts (independent of profit)
+### Historical Hatom Stage-2 eligibility notification mode (superseded)
 
 The Hatom watcher scans every `HATOM_WATCH_INTERVAL_SECONDS=90` seconds.
 When a borrower passes the fresh on-chain Stage-2 liquidation preflight,
@@ -524,7 +524,7 @@ for Telegram eligibility notifications, and not executable profit.
 Even a small failed or unexpectedly expensive transaction can wipe
 out gains from many successful micro-liquidations.
 
-### XOXNO Lending MultiversX watch — private, no wallet
+### XOXNO Lending MultiversX data sources — private, no wallet
 
 XOXNO's lending protocol is separate from Hatom. This integration uses
 the publicly documented `GET /lending/leaderboard/liquidate` to discover
@@ -585,53 +585,68 @@ manual independent verification*, not approval to trade.
 The on-demand `/xoxno_profit` command lets the administrator
 recheck an individual NFT; `/xoxno_scan` and `/xoxno_report`
 show negative, below-threshold, positive and unpriceable results.
-Automatic eligibility alerts do not require a profit estimate.
+CURRENT RULE: automatic alerts require the positive profit screen described below.
 No wallet, signing, funds, broadcasting or automatic liquidation is implemented.
 
-### Current private notification rule (10 November 2026)
+### Current private notification rule — positive-profit only
 
-**Continuous scanning, notifications only for newly confirmed
-liquidatable positions.** Both protocols alert even when their
-best available profit scenario is negative or unpriceable. No
-routine risk-only or empty scan messages are scheduled.
+Both Hatom and XOXNO MVX monitors continue scanning normally, but
+**only fresh, on-chain-reconfirmed and modeled-profitable liquidations**
+produce private automatic Telegram notifications. Negative, zero,
+unknown, unpriced and below-threshold scenarios are entirely silent.
+Nothing is posted automatically when a scan has no profitable candidates.
 
-| Protocol | Scanning | Alert trigger | Duplicate limit |
+**Profit-screening threshold: >= USD 0.25 indicative net after** repayment,
+fresh DEX minimum output, assumed gas, and an additional conservative
+safety buffer (at least USD 0.50 or 1% of repayment). Hatom also verifies
+a fresh XOXNO swap route with a nonzero minimum output and rejects
+incomplete or stale quotes. XOXNO requires a complete current
+liquidationEstimations+DEX scenario and arithmetic validation.
+An indicative scenario is NOT a verified execution profit:
+future gas, slippage, oracle changes, failed transactions or other
+liquidators can wipe out the margin. NO automated execution.
+
+| Protocol | Continual scan | Alert condition | Repeated alert suppression |
 | --- | --- | --- | --- |
-| Hatom | ~90 sec | Fresh contract-confirmed Stage-2 liquidation eligibility | Max 2 positions per 3-minute batch, each borrower notified once |
-| XOXNO MVX | ~240 sec | Fresh contract-confirmed `canBeLiquidated` for an XLEND NFT | Max 2 NFTs per 4-minute batch, each NFT notified once |
+| Hatom | about every 90 sec | fresh Stage-2 eligibility AND DEX-modelled >=$0.25 net | one positive alert per borrower across restarts |
+| XOXNO MVX | about every 240 sec | fresh Controller eligibility AND full-model >=$0.25 net | one positive alert per account NFT across restarts |
 
-The existing private commands `/hatom_report`, `/hatom_profit`,
-`/xoxno_report`, `/xoxno_scan`, `/xoxno_profit` remain available.
-Profit thresholds and market valuations are INFORMATION ONLY;
-the user will decide whether to attempt manual liquidation.
-An eligible account may not have a profitable execution, and
-other liquidators or changing prices may invalidate the opportunity.
+The Hatom alert screening job checks approximately every 180 seconds,
+and each Telegram batch contains up to two positions. XOXNO models
+up to six eligible accounts per scan in rotation and alerts up to two
+NFTs in each qualifying batch. Only the private owner and any
+owner-invited read-only subscribers receive alerts.
 
-### Permanent one-time notification history (10 November 2026)
+**Manual checks still show everything.** `/hatom_report`, `/hatom_profit`,
+`/xoxno_scan`, `/xoxno_report`, and `/xoxno_profit` may be requested at any
+time from an authorized private Telegram chat. These commands can display
+negative or unknown estimates without creating automatic notifications.
 
-The bot **never automatically repeats an eligibility alert for the same
-Hatom borrower address** or the same **XOXNO account NFT** while the
-persistent Railway Volume remains intact. This replaces the previous
-12-hour deduplication expiration. Other newly eligible addresses and
-different XOXNO lending account NFTs still trigger their own one-time
-notifications (even if two XOXNO NFTs belong to the same owner wallet).
+### Permanent one-time positive-only notification history
 
-Hatom stores notified borrower keys in
-`DATA_DIR/hatom_stage_notifications.json`; XOXNO stores NFT keys in
-`DATA_DIR/xoxno_lending_alerts.json`. The files are preserved across
-normal application restarts and are not pruned for age. Legacy keys
-already expired and removed by *older* deployments cannot be recovered.
+Positive alerts are recorded in new independent persistent files:
+`DATA_DIR/hatom_positive_alerts.json` for Hatom borrower addresses and
+`DATA_DIR/xoxno_positive_alerts.json` for XOXNO account NFT IDs. An
+unprofitable position is **never marked as notified**; if the same
+address/NFT becomes profitable in a later scan, it can trigger its
+first qualifying alert. After that positive alert, the same
+address/NFT is not automatically alerted again while Railway's
+persistent volume remains intact.
 
-To minimize duplicate attempts if Telegram times out after receiving a
-message, a notification is **reserved on disk before Telegram is called**.
-This is at-most-once delivery, not a guarantee that Telegram delivered it:
-a crash or network error after reservation can lose an alert rather than
-retry it. Manual `/hatom_report`, `/hatom_profit`,
-`/xoxno_scan` and `/xoxno_profit` still allow fresh checks.
-If the historical file is corrupted or cannot be saved, automatic
-notification is suppressed instead of silently clearing the deduplication
-history. Restoring a Railway Volume from an older snapshot can naturally
-restore an older alert history.
+Previously stored eligibility-only alerts (including losing ones)
+remain in the legacy `hatom_stage_notifications.json` and
+`xoxno_lending_alerts.json` files. They **do not** block a new
+profit-screened alert. Since the legacy data did not record whether
+a historical alert was profitable, a previously alerted address
+may receive its first qualifying positive-only notification again.
+
+To avoid duplicates after an ambiguous Telegram response, the bot
+records a positive alert on disk before attempting to send it.
+This is **at-most-once delivery**, not a guarantee of delivery:
+a crash or API failure between the reservation and delivery may lose
+that message. A corrupt/unwritable positive history suppresses alerts
+instead of resetting the deduplication. Restoring an outdated Railway
+volume snapshot can also restore older history.
 
 ### Owner-approved second Telegram user for Hatom/XOXNO (private read-only)
 
@@ -650,7 +665,7 @@ person enters the command in their own private Telegram chat with the bot.
 The bot stores only the SHA-256 hash of the one-time secret in Railway.
 
 After joining, the owner and subscriber each receive **future** private
-Hatom and XOXNO liquidation-eligibility alerts. The subscriber may use
+Hatom and XOXNO profit-screened liquidation alerts (positive only). The subscriber may use
 `/hatom_status`, `/hatom_scan`, `/hatom_report`, `/hatom_profit`,
 `/xoxno_status`, `/xoxno_scan`, `/xoxno_report`, `/xoxno_profit`.
 Each private command replies to its own requester; `/hatom_report` no longer

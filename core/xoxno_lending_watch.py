@@ -1,9 +1,10 @@
 """XOXNO Lending MultiversX-only, admin-private, READ-ONLY eligibility watcher.
 
 Public XOXNO leaderboard is *discovery*, NOT on-chain execution evidence.
-A fresh Controller canBeLiquidated query is required before notifications.
-Every newly confirmed eligible position is alerted regardless of profit sign.
-Exact liquidation payoff, gas and DEX-net profit remain indicative only.
+A fresh Controller canBeLiquidated query and a fresh, complete, positive
+DEX-min liquidation scenario are required for private alerts: at least USD
+0.25 modeled after assumed gas and buffer. Negative or unknown estimates
+stay in manual scan reports only. No transactions are executed.
 """
 from __future__ import annotations
 
@@ -73,7 +74,7 @@ def interval() -> int:
 
 
 def state_file() -> Path:
-    return Path(os.getenv("DATA_DIR", "data")) / "xoxno_lending_alerts.json"
+    return Path(os.getenv("DATA_DIR", "data")) / "xoxno_positive_alerts.json"
 
 
 def load_state() -> None:
@@ -434,12 +435,12 @@ def status_text() -> str:
         "Discovery: XOXNO public liquidatable leaderboard\n"
         "Validation: canBeLiquidated on mainnet Controller\n"
         f"Scan interval: {interval()}s\n"
-        "Private alerts: ALL verified liquidatable, including losses/unknown\n"
-        "Alert batches: 1 per 4min, up to 2 positions; lifetime NFT dedupe\n"
-        "Scan reports including loss: on-demand /xoxno_report\n"
-        "Duplicate suppression: same NFT notified only once while stored\n"
-        "Profit: /xoxno_profit (read-only, indicative and NOT verified)\n"
-        "Profit >= USD 0.25 is informational, NOT an alert requirement\n"
+        "Private alerts: ONLY modeled positive +USD 0.25 net or more\n"
+        "Require fresh on-chain eligibility, DEX quote, assumed gas + buffer\n"
+        "Negative, unknown and below threshold: no Telegram alerts\n"
+        "Alerts: up to 2 positions per 4min; one-time per positive NFT\n"
+        "Manual /xoxno_scan /xoxno_report still include losses\n"
+        "Profit: /xoxno_profit (indicative, execution NOT verified)\n"
         f"Scans this session: {_STATS['scans']}\n"
         f"API candidates: {_STATS['api_candidates']}\n"
         f"On-chain confirmed: {_STATS['confirmed']}\n"        f"Priced this scan: {_STATS['priced']} | losses: {_STATS['losses']}\n"
@@ -451,10 +452,10 @@ def status_text() -> str:
 
 
 async def scan(context: ContextTypes.DEFAULT_TYPE, *, manual: bool = False) -> list[dict[str, Any]]:
-    """Each polling cycle discovers all API candidates and prices a rotating slice.
+    """Price confirmed positions; alert only on fresh +$0.25 net scenarios.
 
-    Only fresh, coherent indicative >=$0.25 scenarios create priority alerts.
-    Scheduled scan reports (including losses) are a separate message type.
+    Manual scans still show losses and unavailable prices. No empty or loss
+    notifications are pushed to Telegram.
     """
     global _LAST_REPORT
     if not enabled() or admin_id() is None:
@@ -472,25 +473,6 @@ async def scan(context: ContextTypes.DEFAULT_TYPE, *, manual: bool = False) -> l
         _LAST_REPORT = {"rows": [], "valuations": {}, "found": 0,
                         "error": type(exc).__name__}
         return []
-    # Alert immediately after on-chain confirmation, even with unknown or
-    # negative economics. Pricing is independent and may time out.
-    if not manual and positions:
-        selected = eligible_to_send(positions)
-        if selected:
-            # Persist BEFORE Telegram to avoid duplicates after ambiguous
-            # delivery timeouts. Failed sends are not automatically retried.
-            try:
-                mark_sent(selected)
-            except (OSError, RuntimeError, ValueError) as exc:
-                logger.error("XOXNO alert history not saved; suppress send (%s)",
-                             type(exc).__name__)
-            else:
-                from core.liquidation_access import send_liquidation_alert
-                delivered = await send_liquidation_alert(
-                    context.bot, alert_text(selected)
-                )
-                _STATS["alerts"] += 1
-                logger.info("XOXNO_PRIVATE_FANOUT | delivered=%s", delivered)
     valuations: dict[str, Any] = {}
     if positions:
         try:
@@ -502,6 +484,43 @@ async def scan(context: ContextTypes.DEFAULT_TYPE, *, manual: bool = False) -> l
         except (asyncio.TimeoutError, ValueError, TypeError) as exc:
             _STATS["last_error"] = "Valuation: " + type(exc).__name__
             logger.warning("XOXNO batch pricing unavailable (%s)", type(exc).__name__)
+    # Economic estimates are checked BEFORE alerting. No recipient receives
+    # losing, unpriced or below-$0.25 candidates. Older eligibility alerts
+    # used a different history file and cannot suppress newfound positives.
+    if not manual and positions:
+        qualifying = [
+            row for row in positions
+            if _priority_eligible(valuations.get(row["identifier"]))
+        ]
+        qualifying.sort(
+            key=lambda row: valuations[row["identifier"]]["scenario_net_usd"],
+            reverse=True,
+        )
+        if qualifying:
+            try:
+                selected = eligible_to_send(qualifying)
+            except (OSError, RuntimeError, ValueError) as exc:
+                logger.error("XOXNO positive history unavailable (%s)",
+                             type(exc).__name__)
+                selected = []
+            if selected:
+                try:
+                    # Reserve the *positive* NFT IDs before Telegram fanout:
+                    # repeated scans or failed sends cannot generate duplicates.
+                    mark_sent(selected)
+                except (OSError, RuntimeError, ValueError) as exc:
+                    logger.error("XOXNO positive history not saved (%s)",
+                                 type(exc).__name__)
+                else:
+                    from core.liquidation_access import send_liquidation_alert
+                    delivered = await send_liquidation_alert(
+                        context.bot, positive_alert_text(selected, valuations)
+                    )
+                    _STATS["alerts"] += 1
+                    logger.info(
+                        "XOXNO_POSITIVE_ONLY_ALERT | selected=%s | delivered=%s",
+                        len(selected), delivered,
+                    )
     counts = _scenario_counts(positions, valuations)
     _STATS.update(counts)
     _LAST_REPORT = {"rows": positions, "valuations": valuations,
@@ -624,7 +643,7 @@ def register(app: Application) -> None:
             name="xoxno_lending_liquidation_private",
         )
         logger.info(
-            "XOXNO Lending watcher scheduled | every=%ss | eligibility alerts + manual reports",
+            "XOXNO Lending watcher scheduled | every=%ss | positive-only modeled alerts + manual reports",
             interval(),
         )
     else:

@@ -158,10 +158,10 @@ class XoxnoTests(unittest.TestCase):
         self.assertIn("-0.1500", message)
         bot.send_message.assert_not_awaited()
 
-    def test_auto_alert_both_negative_and_positive_positions(self):
+    def test_auto_alert_only_positive_nft_and_ignores_negative_nft(self):
         rows = [x.parse_candidate(entry()),
                 x.parse_candidate(entry(identifier="XLEND-18dc6f-01"))]
-        valuations = {
+        values = {
             rows[0]["identifier"]: scenario(net="-0.30"),
             rows[1]["identifier"]: scenario(
                 identifier=rows[1]["identifier"], net="0.30"
@@ -169,36 +169,71 @@ class XoxnoTests(unittest.TestCase):
         }
         bot = SimpleNamespace(send_message=AsyncMock())
         with patch.object(x, "inspect", return_value=(rows, 2)), patch.object(
-            x, "price_candidates", return_value=valuations
+            x, "price_candidates", return_value=values
         ):
             asyncio.run(x.scan(SimpleNamespace(bot=bot)))
             asyncio.run(x.scan(SimpleNamespace(bot=bot)))
         bot.send_message.assert_awaited_once()
         self.assertEqual(bot.send_message.await_args.kwargs["chat_id"], 42)
         alert = bot.send_message.await_args.kwargs["text"]
-        self.assertIn("PRIVATE LIQUIDATION CANDIDATE", alert)
-        self.assertIn("REGARDLESS", alert.upper())
-        self.assertIn(rows[0]["identifier"], alert)
+        self.assertIn("PRIVATE POSITIVE-SCENARIO ALERT", alert)
+        self.assertNotIn(rows[0]["identifier"], alert)
         self.assertIn(rows[1]["identifier"], alert)
-        self.assertIn("NOT VERIFIED", alert)
-        self.assertIn("/xoxno_profit", alert)
+        self.assertIn("Indicative net: +0.3000", alert)
+        self.assertIn("NOT a verified executable profit", alert)
         self.assertEqual(x._STATS["losses"], 1)
         self.assertEqual(x._STATS["positive"], 1)
+        self.assertIn(rows[1]["identifier"], x._NOTIFIED)
+        self.assertNotIn(rows[0]["identifier"], x._NOTIFIED)
 
-    def test_negative_or_unpriceable_positions_still_alert(self):
+    def test_negative_or_unpriceable_nft_never_sends_notification(self):
         rows = [x.parse_candidate(entry())]
         bot = SimpleNamespace(send_message=AsyncMock())
         with patch.object(x, "inspect", return_value=(rows, 1)), patch.object(
-            x, "price_candidates",
-            return_value={rows[0]["identifier"]: scenario(net="-0.17")}
+            x, "price_candidates", return_value={
+                rows[0]["identifier"]: scenario(net="-0.17")
+            }
         ):
             asyncio.run(x.scan(SimpleNamespace(bot=bot)))
-        bot.send_message.assert_awaited_once()
+        bot.send_message.assert_not_awaited()
+        self.assertNotIn(rows[0]["identifier"], x._NOTIFIED)
         self.assertIn("-0.1700", x.scan_report_text(
             rows, x._LAST_REPORT["valuations"]
         ))
-        self.assertIn("UNKNOWN until /xoxno_profit",
-                      bot.send_message.await_args.kwargs["text"])
+        with patch.object(x, "inspect", return_value=(rows, 1)), patch.object(
+            x, "price_candidates", return_value={
+                rows[0]["identifier"]: "DEX timeout"
+            }
+        ):
+            asyncio.run(x.scan(SimpleNamespace(bot=bot)))
+        bot.send_message.assert_not_awaited()
+
+    def test_negative_then_positive_same_nft_can_alert_once(self):
+        row = x.parse_candidate(entry())
+        bot = SimpleNamespace(send_message=AsyncMock())
+        with patch.object(x, "inspect", return_value=([row], 1)), patch.object(
+            x, "price_candidates",
+            return_value={row["identifier"]: scenario(net="-0.20")}
+        ):
+            asyncio.run(x.scan(SimpleNamespace(bot=bot)))
+        self.assertNotIn(row["identifier"], x._NOTIFIED)
+        with patch.object(x, "inspect", return_value=([row], 1)), patch.object(
+            x, "price_candidates",
+            return_value={row["identifier"]: scenario(net="0.31")}
+        ):
+            asyncio.run(x.scan(SimpleNamespace(bot=bot)))
+        bot.send_message.assert_awaited_once()
+        self.assertIn(row["identifier"], x._NOTIFIED)
+        # Reset memory; persisted positive-only history still prevents repeats.
+        x._LOADED_PATH = None
+        x._NOTIFIED.clear()
+        x._LAST_BATCH = 0
+        with patch.object(x, "inspect", return_value=([row], 1)), patch.object(
+            x, "price_candidates",
+            return_value={row["identifier"]: scenario(net="0.35")}
+        ):
+            asyncio.run(x.scan(SimpleNamespace(bot=bot)))
+        bot.send_message.assert_awaited_once()
 
     def test_no_candidates_no_automatic_notification(self):
         bot = SimpleNamespace(send_message=AsyncMock())
@@ -206,18 +241,15 @@ class XoxnoTests(unittest.TestCase):
             asyncio.run(x.scan(SimpleNamespace(bot=bot)))
         bot.send_message.assert_not_awaited()
 
-    def test_alert_happens_before_slow_or_failing_profit_calculation(self):
+    def test_price_calculation_failure_suppresses_notifications(self):
         rows = [x.parse_candidate(entry())]
         bot = SimpleNamespace(send_message=AsyncMock())
-        def scenario_failed(*args, **kwargs):
-            self.assertEqual(bot.send_message.await_count, 1)
-            raise ValueError("DEX unavailable")
         with patch.object(x, "inspect", return_value=(rows, 1)), patch.object(
-            x, "price_candidates", side_effect=scenario_failed
+            x, "price_candidates", side_effect=ValueError("DEX unavailable")
         ):
             asyncio.run(x.scan(SimpleNamespace(bot=bot)))
-        bot.send_message.assert_awaited_once()
-        self.assertIn("REGARDLESS", bot.send_message.await_args.kwargs["text"].upper())
+        bot.send_message.assert_not_awaited()
+        self.assertNotIn(rows[0]["identifier"], x._NOTIFIED)
 
     def test_inconsistent_stale_or_fake_profit_cannot_alert(self):
         q = scenario(net="0.25")
@@ -304,7 +336,9 @@ class XoxnoTests(unittest.TestCase):
         row = x.parse_candidate(entry())
         failing = SimpleNamespace(send_message=AsyncMock(side_effect=TimeoutError()))
         with patch.object(x, "inspect", return_value=([row], 1)), patch.object(
-            x, "price_candidates", return_value={}
+            x, "price_candidates", return_value={
+                row["identifier"]: scenario(net="0.33")
+            }
         ):
             # Notification failures are isolated by the multi-recipient fanout.
             # The NFT is already persisted as notified (at-most-once policy).
