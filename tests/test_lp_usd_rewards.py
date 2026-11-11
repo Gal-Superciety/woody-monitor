@@ -1,4 +1,4 @@
-"""LP reward fairness: USD values are comparable; raw LP amounts are not."""
+"""LP reward fairness: final monthly USD values are comparable; raw LP amounts are not."""
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -29,18 +29,30 @@ def test_incomplete_snapshots_withhold_rewards():
     assert result["valuation_complete"] is False
 
 
-def test_absent_wallet_counts_zero_across_snapshots():
-    snaps = [
-        {"valuation_complete": True, "total_eligible_usd": 100, "pools": [{"status": "verified"}],
-         "holders": [{"wallet": "erd1a", "estimated_usd": 100}]},
-        {"valuation_complete": True, "total_eligible_usd": 100, "pools": [{"status": "verified"}],
-         "holders": [{"wallet": "erd1b", "estimated_usd": 100}]},
+def test_monthly_rewards_use_only_the_final_snapshot():
+    base = {"valuation_complete": True, "pools": [{"status": "verified"}]}
+    snapshots = [
+        dict(base, date="2026-09-01", total_eligible_usd=100,
+             holders=[{"wallet": "erd1a", "estimated_usd": 100}]),
+        dict(base, date="2026-09-15", total_eligible_usd=100,
+             holders=[{"wallet": "erd1b", "estimated_usd": 100}]),
+        dict(base, date="2026-09-30", total_eligible_usd=100,
+             holders=[
+                 {"wallet": "erd1a", "estimated_usd": 25},
+                 {"wallet": "erd1b", "estimated_usd": 75},
+             ]),
     ]
-    with patch.object(m, "get_month_lp_usd_snapshots", return_value=[dict(snaps[0], date="2026-09-01"), dict(snaps[1], date="2026-09-15"), dict(snaps[1], date="2026-09-30")]), \
+    with patch.object(m, "get_month_lp_usd_snapshots", return_value=snapshots), \
          patch.object(m, "current_month_key", return_value="2026-09"):
-        result = m.calculate_monthly_lp_averages()
-    assert [round(r["average_usd"], 6) for r in result["rows"]] == [66.666667, 33.333333]
+        result = m.calculate_monthly_lp_rewards(4)
 
+    rewards = {row["wallet"]: row for row in result["rows"]}
+    assert result["reward_snapshot_date"] == "2026-09-30"
+    assert result["total_month_end_usd"] == 100
+    assert rewards["erd1a"]["month_end_usd"] == 25
+    assert rewards["erd1a"]["reward_egld"] == 1
+    assert rewards["erd1b"]["month_end_usd"] == 75
+    assert rewards["erd1b"]["reward_egld"] == 3
 
 def test_missing_quote_price_is_derived_from_exact_pool_reserves():
     pool = {"status": "active", "pair_address": "erd1pair", "name": "WOODY/JEX", "quote_token": "JEX-123"}

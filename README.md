@@ -215,18 +215,18 @@ erd1qqqqqqqqqqqqqpgqvmgnk26tfvz6sj5yasw7p6yfvqpv628d2jpsnvmeaz
 
 ### Comenzi Telegram
 - `/lp_holders` — afișează holderii LP, cantitatea de LP deținută și valoarea estimată în EGLD.
-- `/lp_leaderboard` — afișează clasamentul lunar după media LP din snapshot-urile lunii curente.
+- `/lp_leaderboard` — afișează clasamentul live al furnizorilor LP eligibili.
 - `/lp_snapshots` — listează snapshot-urile salvate pentru luna curentă și programul automat de snapshot.
-- `/lp_rewards X` — calculează distribuția proporțională pentru un fond lunar de `X` EGLD, fără să trimită EGLD automat. Exemplu: `/lp_rewards 5`.
-- `/lp_export` — generează CSV cu wallet address, LP mediu lunar, procent din total și recompensa calculată în EGLD.
+- `/lp_rewards X` — calculează distribuția pentru un fond lunar de `X` EGLD folosind doar valoarea USD/USDT-echivalentă din snapshot-ul final al lunii. Snapshot-urile din 1 și 15 sunt păstrate pentru monitorizare. Nu trimite EGLD automat. Exemplu: `/lp_rewards 5`.
+- `/lp_export` — generează CSV cu valoarea de la finalul lunii pentru fiecare wallet, procentul din total și recompensa calculată în EGLD.
 
 ### Snapshot-uri automate
-Botul salvează snapshot-uri automat în `data/lp_snapshots.json` pe:
+Botul salvează snapshot-uri automat în `data/lp_usd_snapshots.json` pe:
 - data de 1 a lunii;
 - data de 15 a lunii;
 - ultima zi a lunii.
 
-Fiecare snapshot include data, wallet address, cantitatea de LP token și valoarea estimată în EGLD.
+Fiecare snapshot include data, wallet address și valoarea estimată în USD, folosită ca echivalent USDT. Toate cele trei snapshot-uri trebuie să existe, dar numai snapshot-ul din ultima zi a lunii stabilește proporția rewards.
 
 ### Configurare opțională
 ```env
