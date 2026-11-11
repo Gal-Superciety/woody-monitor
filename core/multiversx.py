@@ -1804,8 +1804,8 @@ def build_public_liquidity(woody_price: float, pools: List[Dict[str, Any]]) -> D
         valued.append(item)
     estimates = [p["estimatedUsd"] for p in valued if p["estimatedUsd"] is not None]
     return {"totalUsd": sum(estimates) if estimates else None,
-            "source": "on-chain pool reserves × WOODY reference price",
-            "valuation": "estimated; quote-token USD prices not independently valued",
+            "source": "configured pool reserve feeds × WOODY reference price",
+            "valuation": "estimated; reserve feeds may be on-chain or public indexers, and quote-token USD prices are not independently valued",
             "estimatedPoolCount": len(estimates), "pools": valued}
 
 
