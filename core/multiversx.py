@@ -1665,7 +1665,7 @@ def get_onedex_woody_one_public_quote() -> Dict[str, Any]:
 
 
 def get_onedex_woody_bober_public_quote() -> Dict[str, Any]:
-    """Read the exact OneDex WOODY/BOBER pair from DexScreener for liquidity display only."""
+    """Read the exact OneDex WOODY/BOBER pair from DexScreener for indicative reserve valuation."""
     url = "https://api.dexscreener.com/latest/dex/search"
     data = get_json(url, params={"q": "WOODY BOBER"})
     if not isinstance(data, dict):
@@ -2963,13 +2963,15 @@ def build_global_usd_valuation() -> Dict[str, Any]:
                       "quote_token": quote_token, "quote_reserve": quote_reserve,
                       "quote_usd": quote_usd, "quote_price_source": quote_price.get("source"),
                       "quote_price_confidence": quote_price.get("confidence"),
+                      "reserve_source": snap.get("reserve_source", "MultiversX reserve query"),
                       "source": best.get("source", "unknown")})
     rows = sorted(wallets.values(), key=lambda row: row["estimated_usd"], reverse=True)
     total = sum(row["estimated_usd"] for row in rows)
     for row in rows:
         row["share_pct"] = row["estimated_usd"] / total * 100 if total > 0 else 0.0
-    return {"created_at": now, "valuation_complete": complete and bool(rows) and not prices_indicative,
+    return {"created_at": now, "valuation_complete": complete and bool(rows),
             "indicative_only": prices_indicative,
+            "reward_valuation_model": "woody_reserve_ratio_estimate_v1",
             "total_eligible_usd": total, "holders": rows, "pools": pools,
             "pricing": {"egld_usd": egld_usd, "woody_usd": woody_usd,
                         "woody_source": best.get("source", "unavailable")}}
@@ -3199,14 +3201,18 @@ def _snapshot_holder_estimated_egld(holder: Dict[str, Any], snap: Dict[str, Any]
 def is_valid_global_usd_snapshot(snap: Dict[str, Any]) -> bool:
     """Reject corrupt, duplicated or internally inconsistent reward inputs."""
     from math import isfinite
-    if snap.get("valuation_complete") is not True or snap.get("indicative_only") is True:
+    if snap.get("valuation_complete") is not True:
+        return False
+    estimate_model = snap.get("reward_valuation_model") == "woody_reserve_ratio_estimate_v1"
+    if snap.get("indicative_only") is True and not estimate_model:
         return False
     holders = snap.get("holders")
     pools = snap.get("pools")
     if not isinstance(holders, list) or not holders or not isinstance(pools, list) or not pools:
         return False
     if any(not isinstance(p, dict) or p.get("status") not in {"verified", "excluded"}
-           or p.get("quote_price_confidence") == "indicative" for p in pools):
+           or (p.get("quote_price_confidence") == "indicative" and not estimate_model)
+           for p in pools):
         return False
     if not any(isinstance(p, dict) and p.get("status") == "verified" for p in pools):
         return False
@@ -3543,7 +3549,7 @@ def get_lp_snapshots_text() -> str:
              f"Month: *{current_month_key()}*",
              "Schedule: day 1, 15 and last day of month", ""]
     if not snapshots:
-        return "\n".join(lines + ["No verified global USD snapshots saved yet."])
+        return "\n".join(lines + ["No eligible global USD snapshots saved yet."])
     for snap in snapshots:
         lines.append(f"• {snap.get('date')}: {fmt_usd(snap.get('total_eligible_usd'))} "
                      f"({len(snap.get('holders', []))} wallets)")
@@ -3554,7 +3560,7 @@ def get_lp_rewards_help_text() -> str:
     saved_pool = get_last_lp_reward_pool()
     lines = [
         "🎁 *LP Rewards*",
-        "Monthly EGLD rewards are calculated proportionally by verified average LP value in USD.",
+        "Monthly EGLD rewards are calculated proportionally by estimated average LP value in USD.",
         "",
         "Formula:",
         "`Reward = Wallet average USD / Total average USD * Monthly EGLD reward pool`",
@@ -3565,7 +3571,7 @@ def get_lp_rewards_help_text() -> str:
         "Example:",
         "`/lp_rewards 5`",
         "",
-        "_The bot never sends EGLD automatically; it only prepares the manual distribution report._",
+        "_Pool values use WOODY reserve ratios; indexer-sourced pools are estimates. The bot prepares a manual payout report and never sends EGLD automatically._",
     ]
     if saved_pool > 0:
         lines.extend(["", f"Last saved reward pool for export: *{saved_pool:,.6f} EGLD*"])
@@ -3575,9 +3581,10 @@ def get_lp_rewards_help_text() -> str:
 def get_lp_rewards_text(reward_pool_egld: float) -> str:
     data = calculate_monthly_lp_rewards(reward_pool_egld)
     if not data.get("valuation_complete") or not data.get("rows"):
-        return "⚠️ *LP Rewards*\n\nVerified USD snapshots missing or incomplete. No reward allocations available."
-    lines = ["🎁 *WOODY LP Rewards — Monthly USD-weighted*",
-             f"Reward pool: *{reward_pool_egld:,.6f} EGLD*", ""]
+        return "⚠️ *LP Rewards*\n\nEligible monthly LP snapshots are missing or incomplete. No reward allocations available."
+    lines = ["🎁 *WOODY LP Rewards — Monthly estimated USD-weighted*",
+             f"Reward pool: *{reward_pool_egld:,.6f} EGLD*",
+             "_Pool reserve-ratio values are estimates; OneDex WOODY/BOBER reserves come from a public indexer._", ""]
     for row in data["rows"]:
         lines.append(f"`{short_wallet(str(row.get('wallet')))}` "
                      f"{fmt_usd(row.get('average_usd'))} | "
@@ -3590,7 +3597,7 @@ def build_lp_export_csv(reward_pool_egld: Optional[float] = None) -> Tuple[bytes
     pool = get_last_lp_reward_pool() if reward_pool_egld is None else safe_float(reward_pool_egld)
     data = calculate_monthly_lp_rewards(pool)
     if not data.get("valuation_complete") or not data.get("rows"):
-        raise ValueError("Verified USD snapshots missing or incomplete; reward export withheld")
+        raise ValueError("Eligible monthly LP snapshots are missing or incomplete; reward export withheld")
     output = StringIO()
     writer = csv.writer(output)
     writer.writerow(["wallet_address", "average_usd", "percent_of_total", "reward_egld"])
@@ -5285,7 +5292,7 @@ async def lp_export_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     bio.name = filename
     await update.message.reply_document(
         document=InputFile(bio, filename=filename),
-        caption="WOODY/EGLD LP monthly reward CSV. No EGLD was sent automatically.",
+        caption="Global monthly LP reward CSV (estimated USD weights). No EGLD was sent automatically.",
     )
 
 

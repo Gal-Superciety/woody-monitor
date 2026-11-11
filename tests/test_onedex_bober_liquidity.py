@@ -1,4 +1,4 @@
-"""Liquidity-only monitoring for the legacy OneDex WOODY/BOBER pair."""
+"""Liquidity and indicative LP rewards coverage for OneDex WOODY/BOBER."""
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -52,15 +52,14 @@ def test_onedex_bober_quote_fails_closed_on_mismatched_pair():
     assert "not uniquely verified" in result["reason"]
 
 
-def test_liquidity_monitor_includes_excluded_bober_pool_without_reclassifying_it():
+def test_restored_bober_pool_is_active_and_included_in_lp_monitoring():
     monitor_pool = {
         "dex": "OneDex",
         "name": "WOODY/BOBER",
         "pair_address": m.ONEDEX_POOL_ADDRESS,
         "lp_token": "WOODYBOBER-1a1703",
         "quote_token": m.BOBER,
-        "status": "excluded",
-        "monitor_liquidity": True,
+        "status": "active",
     }
     snapshot = {
         "ok": True,
@@ -76,19 +75,21 @@ def test_liquidity_monitor_includes_excluded_bober_pool_without_reclassifying_it
 
     assert len(rows) == 1
     assert rows[0]["pair"] == "WOODY/BOBER"
-    assert rows[0]["monitorOnly"] is True
+    assert rows[0]["monitorOnly"] is False
     assert "DexScreener" in rows[0]["reserveSource"]
 
     with patch.object(m, "LP_POOLS", [monitor_pool]), patch.object(
-        m, "get_lp_holders"
+        m, "get_lp_holders",
+        return_value={"ok": True, "lp_token_id": "WOODYBOBER-1a1703",
+                      "holders": []},
     ) as get_holders:
         global_snapshot = m.build_global_snapshot()
 
-    assert global_snapshot["pools"][0]["status_text"] == "excluded"
-    get_holders.assert_not_called()
+    assert global_snapshot["pools"][0]["status_text"] == "LP token found"
+    get_holders.assert_called_once_with(monitor_pool)
 
 
-def test_one_dex_bober_indexer_quote_is_blocked_from_verified_calculations():
+def test_one_dex_bober_indexer_quote_is_blocked_from_onchain_only_calculations():
     pool = {
         "dex": "OneDex",
         "name": "WOODY/BOBER",
