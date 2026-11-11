@@ -3260,69 +3260,62 @@ def required_month_lp_snapshot_dates(month_key: str) -> List[str]:
         return []
 
 
-def calculate_monthly_lp_averages(month_key: Optional[str] = None) -> Dict[str, Any]:
-    """Rank only independently valued, complete snapshots by USD.
-
-    Legacy single-pool EGLD snapshots have no reliable historical USD
-    conversion; keep them visible but never silently mix LP units across pools.
-    """
+def calculate_monthly_lp_snapshot_values(month_key: Optional[str] = None) -> Dict[str, Any]:
+    """Use the final monthly checkpoint for rewards; earlier snapshots are records only."""
     snapshots = get_month_lp_usd_snapshots(month_key)
     eligible = [s for s in snapshots if is_valid_global_usd_snapshot(s)]
     required = required_month_lp_snapshot_dates(month_key or current_month_key())
     found_dates = [str(s.get("date") or "") for s in eligible]
-    # Require one and only one verified record per scheduled date.
-    # Never turn duplicate/misdated snapshots into extra voting weight.
+    # Keep all three scheduled checkpoints as a completeness check. Only the
+    # final checkpoint's wallet values determine the reward shares.
     checkpoints_complete = (len(required) == 3 and sorted(found_dates) == sorted(required)
                             and len(snapshots) == 3)
-    sums: Dict[str, Dict[str, float]] = {}
-    for snap in eligible:
-        for holder in snap.get("holders", []):
-            wallet = str(holder.get("wallet") or "")
-            if not wallet:
-                continue
-            value = safe_float(holder.get("estimated_usd"))
-            if value < 0:
-                continue
-            bucket = sums.setdefault(wallet, {"usd": 0.0})
-            bucket["usd"] += value
+    final_date = required[-1] if required else ""
+    final_snapshot = next((s for s in eligible if str(s.get("date") or "") == final_date), None)
 
-    sample_count = len(eligible)
     rows: List[Dict[str, Any]] = []
-    for wallet, values in sums.items():
-        rows.append({
-            "wallet": wallet,
-            "average_usd": values["usd"] / sample_count if sample_count else 0.0,
-        })
-    rows.sort(key=lambda x: safe_float(x.get("average_usd")), reverse=True)
-    total_average_usd = sum(safe_float(r.get("average_usd")) for r in rows)
+    for holder in (final_snapshot or {}).get("holders", []):
+        wallet = str(holder.get("wallet") or "")
+        value = safe_float(holder.get("estimated_usd"))
+        if wallet and value > 0:
+            rows.append({"wallet": wallet, "month_end_usd": value})
+    rows.sort(key=lambda row: safe_float(row.get("month_end_usd")), reverse=True)
+    total_month_end_usd = sum(safe_float(row.get("month_end_usd")) for row in rows)
     for row in rows:
         row["share_pct"] = (
-            safe_float(row.get("average_usd")) / total_average_usd * 100
-            if total_average_usd > 0 else 0.0
+            safe_float(row.get("month_end_usd")) / total_month_end_usd * 100
+            if total_month_end_usd > 0 else 0.0
         )
     return {
-        "snapshots": eligible, "rows": rows,
-        "total_average_usd": total_average_usd,
-        "total_average_lp": 0.0,
+        "snapshots": eligible,
+        "rows": rows,
+        "total_month_end_usd": total_month_end_usd,
+        "reward_snapshot_date": final_date if final_snapshot else None,
         "excluded_snapshots": len(snapshots) - len(eligible),
         "duplicate_dates": sorted({d for d in found_dates if found_dates.count(d) > 1}),
-        "valuation_complete": checkpoints_complete and len(eligible) == len(snapshots),
+        "valuation_complete": checkpoints_complete and len(eligible) == len(snapshots)
+        and final_snapshot is not None,
         "required_dates": required,
         "missing_dates": [date for date in required if date not in found_dates],
     }
 
 
+def calculate_monthly_lp_averages(month_key: Optional[str] = None) -> Dict[str, Any]:
+    """Backward-compatible alias; monthly reward values now come from the final snapshot."""
+    return calculate_monthly_lp_snapshot_values(month_key)
+
+
 def calculate_monthly_lp_rewards(reward_pool_egld: float, month_key: Optional[str] = None) -> Dict[str, Any]:
-    averages = calculate_monthly_lp_averages(month_key)
-    total = safe_float(averages.get("total_average_usd"))
-    if not averages.get("valuation_complete") or total <= 0:
-        return {**averages, "rows": [], "reward_pool_egld": reward_pool_egld,
-                "reason": "Historical USD valuations missing or incomplete; rewards withheld"}
+    snapshot_values = calculate_monthly_lp_snapshot_values(month_key)
+    total = safe_float(snapshot_values.get("total_month_end_usd"))
+    if not snapshot_values.get("valuation_complete") or total <= 0:
+        return {**snapshot_values, "rows": [], "reward_pool_egld": reward_pool_egld,
+                "reason": "Month-end USD snapshot missing or incomplete; rewards withheld"}
     rows: List[Dict[str, Any]] = []
-    for row in averages.get("rows", []):
-        share = safe_float(row.get("average_usd")) / total
+    for row in snapshot_values.get("rows", []):
+        share = safe_float(row.get("month_end_usd")) / total
         rows.append({**row, "reward_egld": share * max(0.0, reward_pool_egld)})
-    return {**averages, "rows": rows, "reward_pool_egld": reward_pool_egld}
+    return {**snapshot_values, "rows": rows, "reward_pool_egld": reward_pool_egld}
 
 
 def save_last_lp_reward_pool(reward_pool_egld: float, month_key: Optional[str] = None) -> bool:
@@ -3560,10 +3553,10 @@ def get_lp_rewards_help_text() -> str:
     saved_pool = get_last_lp_reward_pool()
     lines = [
         "🎁 *LP Rewards*",
-        "Monthly EGLD rewards are calculated proportionally by estimated average LP value in USD.",
+        "Rewards use only the final monthly snapshot; snapshots from days 1 and 15 are retained for tracking.",
         "",
         "Formula:",
-        "`Reward = Wallet average USD / Total average USD * Monthly EGLD reward pool`",
+        "`Reward = Wallet month-end USD value / Total month-end USD value * Monthly EGLD reward pool`",
         "",
         "Use command:",
         "`/lp_rewards X`",
@@ -3584,10 +3577,11 @@ def get_lp_rewards_text(reward_pool_egld: float) -> str:
         return "⚠️ *LP Rewards*\n\nEligible monthly LP snapshots are missing or incomplete. No reward allocations available."
     lines = ["🎁 *WOODY LP Rewards — Monthly estimated USD-weighted*",
              f"Reward pool: *{reward_pool_egld:,.6f} EGLD*",
+             f"Reward basis: final snapshot *{data.get('reward_snapshot_date') or 'missing'}* (USD/USDT equivalent)",
              "_Pool reserve-ratio values are estimates; OneDex WOODY/BOBER reserves come from a public indexer._", ""]
     for row in data["rows"]:
         lines.append(f"`{short_wallet(str(row.get('wallet')))}` "
-                     f"{fmt_usd(row.get('average_usd'))} | "
+                     f"{fmt_usd(row.get('month_end_usd'))} | "
                      f"{fmt_pct(row.get('share_pct'))} | "
                      f"{fmt_egld(row.get('reward_egld'))}")
     return "\n".join(lines)
@@ -3600,10 +3594,10 @@ def build_lp_export_csv(reward_pool_egld: Optional[float] = None) -> Tuple[bytes
         raise ValueError("Eligible monthly LP snapshots are missing or incomplete; reward export withheld")
     output = StringIO()
     writer = csv.writer(output)
-    writer.writerow(["wallet_address", "average_usd", "percent_of_total", "reward_egld"])
+    writer.writerow(["wallet_address", "month_end_value_usd", "percent_of_total", "reward_egld"])
     for row in data["rows"]:
         writer.writerow([row.get("wallet"),
-                         f"{safe_float(row.get('average_usd')):.8f}",
+                         f"{safe_float(row.get('month_end_usd')):.8f}",
                          f"{safe_float(row.get('share_pct')):.8f}",
                          f"{safe_float(row.get('reward_egld')):.18f}"])
     return output.getvalue().encode("utf-8"), f"woody_lp_rewards_{current_month_key()}.csv"
