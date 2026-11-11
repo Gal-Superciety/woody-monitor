@@ -54,7 +54,8 @@ def test_missing_quote_price_is_derived_from_exact_pool_reserves():
          patch.object(m, "get_lp_holders", return_value=holder_data), \
          patch.object(m, "get_pool_snapshot", return_value=snap):
         result = m.build_global_usd_valuation()
-    assert result["valuation_complete"] is False
+    assert result["valuation_complete"] is True
+    assert result["indicative_only"] is True
     assert result["pools"][0]["status"] == "verified"
     assert result["pools"][0]["quote_usd"] == 0.1
     assert result["total_eligible_usd"] == 10
@@ -189,7 +190,7 @@ def test_lp_holders_reject_supply_exceeded_without_tvl():
     tvl.assert_not_called()
 
 
-def test_metadata_quote_produces_indicative_not_reward_eligible_valuation():
+def test_metadata_quote_produces_indicative_reward_valuation():
     pool = {"status": "active", "pair_address": "erd1pair", "name": "WOODY/JEX", "quote_token": "JEX-abc123"}
     holder_data = {"ok": True, "total_supply_raw": "1000",
                    "holders": [{"wallet": "erd1wallet", "balance_raw": "250"}]}
@@ -205,7 +206,8 @@ def test_metadata_quote_produces_indicative_not_reward_eligible_valuation():
         result = m.build_global_usd_valuation()
     assert result["holders"][0]["estimated_usd"] == 5
     assert result["indicative_only"] is True
-    assert result["valuation_complete"] is False
+    assert result["valuation_complete"] is True
+    assert result["reward_valuation_model"] == "woody_reserve_ratio_estimate_v1"
     assert result["pools"][0]["quote_price_confidence"] == "indicative"
 
 
@@ -235,12 +237,13 @@ def test_off_schedule_manual_snapshot_cannot_become_reward_checkpoint():
     write.assert_not_called()
 
 
-def test_indicative_snapshot_is_rejected_even_if_marked_complete():
+def test_indicative_snapshot_is_reward_eligible_only_with_estimate_model():
     snap = {"valuation_complete": True, "indicative_only": True,
+            "reward_valuation_model": "woody_reserve_ratio_estimate_v1",
             "total_eligible_usd": 10,
             "pools": [{"status": "verified", "quote_price_confidence": "indicative"}],
             "holders": [{"wallet": "erd1wallet", "estimated_usd": 10}]}
-    assert m.is_valid_global_usd_snapshot(snap) is False
+    assert m.is_valid_global_usd_snapshot(snap) is True
 
 
 def test_indicative_pool_provenance_is_rejected_even_without_top_level_flag():
@@ -385,12 +388,13 @@ def test_onedex_woody_one_live_usd_uses_exact_reserves_without_pair_id():
     assert result["holders"][0]["estimated_usd"] == 1.2
     assert result["pools"][0]["quote_usd"] == 0.0012
     assert result["pools"][0]["quote_price_confidence"] == "indicative"
-    # Indicative live quotes may appear in the live leaderboard but remain
-    # ineligible for monthly reward snapshots.
-    assert result["valuation_complete"] is False
+    # This pool is eligible for the disclosed reserve-ratio estimate model.
+    assert result["valuation_complete"] is True
+    assert result["indicative_only"] is True
+    assert result["reward_valuation_model"] == "woody_reserve_ratio_estimate_v1"
 
 
-def test_indicative_quote_metadata_is_replaced_by_exact_pool_reserve_price():
+def test_indicative_quote_metadata_is_replaced_by_exact_pool_reserve_price_and_eligible_as_estimate():
     pool = {"status": "active", "pair_address": "erd1jexpair",
             "name": "WOODY/JEX", "dex": "JEX",
             "lp_token": "LP-JEX", "quote_token": "JEX-expected"}
@@ -540,6 +544,19 @@ def test_jex_lp_identifiers_verified_on_chain():
     }
     actual = {p["name"]: p["lp_token"] for p in LP_POOLS if p["dex"] == "JEX"}
     assert actual == expected
+
+
+def test_rewards_include_onedex_bober_and_exclude_withdrawn_jex_pools():
+    from config import LP_POOLS
+
+    bober = next(p for p in LP_POOLS
+                 if p["dex"] == "OneDex" and p["name"] == "WOODY/BOBER")
+    jex_pools = [p for p in LP_POOLS if p["dex"] == "JEX"]
+
+    assert bober["status"] == "active"
+    assert len(jex_pools) == 3
+    assert all(p["status"] == "excluded" for p in jex_pools)
+    assert all("withdrawn" in p.get("reason", "").lower() for p in jex_pools)
 
 
 def test_live_lp_ownership_includes_unpriced_wallets():
