@@ -837,10 +837,10 @@ def test_global_rewards_refuse_partial_active_pool_snapshot(monkeypatch) -> None
     with pytest.raises(ValueError, match="reward export withheld"):
         main.build_lp_export_csv(5)
 
-def test_broken_onedex_bober_pool_is_not_eligible() -> None:
+def test_restored_onedex_bober_pool_is_reward_eligible() -> None:
     bober = next(pool for pool in main.LP_POOLS if pool.get("lp_token") == "WOODYBOBER-1a1703")
-    assert bober["status"] == "excluded"
-    assert main.get_lp_holders(bober)["excluded"] is True
+    assert bober["status"] == "active"
+    assert bober["quote_token"] == main.BOBER
 
 def test_websocket_subscriptions_stay_within_server_limit() -> None:
     import asyncio
