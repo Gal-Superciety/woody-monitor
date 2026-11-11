@@ -226,7 +226,7 @@ GLOBAL_LP_DUST_EGLD = _env_float("GLOBAL_LP_DUST_EGLD", 0.000001, min_value=0)
 
 LP_POOLS: List[Dict[str, Any]] = [
     {"dex": "OneDex", "name": "WOODY/WEGLD", "pair_address": ONEDEX_POOL_ADDRESS, "lp_token": "WOODYWEGLD-9832b2", "quote_token": WEGLD, "status": "active"},
-    {"dex": "OneDex", "name": "WOODY/BOBER", "pair_address": "", "lp_token": "WOODYBOBER-1a1703", "quote_token": BOBER, "status": "excluded", "reason": "broken pool; excluded from rewards"},
+    {"dex": "OneDex", "name": "WOODY/BOBER", "pair_address": ONEDEX_POOL_ADDRESS, "lp_token": "WOODYBOBER-1a1703", "quote_token": BOBER, "status": "excluded", "monitor_liquidity": True, "reason": "broken pool; monitored for liquidity only and excluded from LP rewards"},
     {"dex": "OneDex", "name": "WOODY/ONE", "pair_address": ONEDEX_POOL_ADDRESS, "pair_id": ONEDEX_WOODY_ONE_PAIR_ID, "lp_token": "WOODYONE-826f23", "quote_token": ONE, "status": "active", "reason": "LP ownership readable; pool reserves and USD valuation require verified OneDex pair ID" if ONEDEX_WOODY_ONE_PAIR_ID <= 0 else ""},
     {"dex": "xExchange", "name": "WOODY/USDC", "pair_address": WOODY_USDC_POOL_ADDRESS, "lp_token": "WOODYUSDC-56b519", "quote_token": USDC, "status": "active"},
     {"dex": "xExchange", "name": "WOODY/EGLD", "pair_address": XEXCHANGE_POOL_ADDRESS, "lp_token": "WOODYWEGLD-5c3558", "quote_token": WEGLD, "status": "active"},
