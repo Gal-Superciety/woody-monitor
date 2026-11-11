@@ -3581,7 +3581,7 @@ def get_lp_rewards_help_text() -> str:
 def get_lp_rewards_text(reward_pool_egld: float) -> str:
     data = calculate_monthly_lp_rewards(reward_pool_egld)
     if not data.get("valuation_complete") or not data.get("rows"):
-        return "⚠️ *LP Rewards*\n\nVerified USD snapshots missing or incomplete. No reward allocations available."
+        return "⚠️ *LP Rewards*\n\nEligible monthly LP snapshots are missing or incomplete. No reward allocations available."
     lines = ["🎁 *WOODY LP Rewards — Monthly estimated USD-weighted*",
              f"Reward pool: *{reward_pool_egld:,.6f} EGLD*",
              "_Pool reserve-ratio values are estimates; OneDex WOODY/BOBER reserves come from a public indexer._", ""]
@@ -3597,7 +3597,7 @@ def build_lp_export_csv(reward_pool_egld: Optional[float] = None) -> Tuple[bytes
     pool = get_last_lp_reward_pool() if reward_pool_egld is None else safe_float(reward_pool_egld)
     data = calculate_monthly_lp_rewards(pool)
     if not data.get("valuation_complete") or not data.get("rows"):
-        raise ValueError("Verified USD snapshots missing or incomplete; reward export withheld")
+        raise ValueError("Eligible monthly LP snapshots are missing or incomplete; reward export withheld")
     output = StringIO()
     writer = csv.writer(output)
     writer.writerow(["wallet_address", "average_usd", "percent_of_total", "reward_egld"])
