@@ -731,7 +731,9 @@ def get_liquidity_text() -> str:
             reason = str(pool.get("reason") or "reserves could not be read")
             lines.append(f"• {label}: unavailable ({reason})")
         else:
-            lines.append(f"• {label}: *${value:,.2f}*")
+            source = str(pool.get("reserveSource") or "")
+            source_note = " · indexer estimate" if "DexScreener" in source else ""
+            lines.append(f"• {label}: *${value:,.2f}*{source_note}")
     total = liquidity["totalUsd"]
     total_text = f"${total:,.2f}" if total is not None else "Unavailable"
     return (
@@ -1662,6 +1664,38 @@ def get_onedex_woody_one_public_quote() -> Dict[str, Any]:
             "reserve_source": "DexScreener public indexer (indicative; not on-chain verified)"}
 
 
+def get_onedex_woody_bober_public_quote() -> Dict[str, Any]:
+    """Read the exact OneDex WOODY/BOBER pair from DexScreener for liquidity display only."""
+    url = "https://api.dexscreener.com/latest/dex/search"
+    data = get_json(url, params={"q": "WOODY BOBER"})
+    if not isinstance(data, dict):
+        return {"ok": False, "reason": "DexScreener unavailable"}
+    expected_pair = ONEDEX_POOL_ADDRESS + "-WOODYBOBER-1a1703"
+    matches = [
+        p for p in data.get("pairs", []) if isinstance(p, dict)
+        and p.get("chainId") == "multiversx"
+        and p.get("dexId") == "onedex"
+        and str(p.get("pairAddress") or "").lower() == expected_pair.lower()
+        and (p.get("baseToken") or {}).get("address") == WOODY
+        and (p.get("quoteToken") or {}).get("address") == BOBER
+    ]
+    if len(matches) != 1:
+        return {"ok": False, "reason": "Exact OneDex WOODY/BOBER pair not uniquely verified"}
+    liquidity = matches[0].get("liquidity") or {}
+    woody = safe_float(liquidity.get("base"))
+    bober = safe_float(liquidity.get("quote"))
+    if woody <= 0 or bober <= 0:
+        return {"ok": False, "reason": "OneDex WOODY/BOBER indexer reserves unavailable"}
+    return {
+        "ok": True,
+        "woody_amount": woody,
+        "pair_amount": bober,
+        "pair_symbol": "BOBER",
+        "pair_token": BOBER,
+        "reserve_source": "DexScreener public indexer (indicative; not on-chain verified)",
+    }
+
+
 def _fetch_public_pool_reserves() -> List[Dict[str, Any]]:
     """Fetch observed on-chain reserves, never estimated TVL as verified liquidity."""
     pools = []
@@ -1669,10 +1703,12 @@ def _fetch_public_pool_reserves() -> List[Dict[str, Any]]:
     for pool in LP_POOLS:
         address = str(pool.get("pair_address") or "").strip()
         lp_id = str(pool.get("lp_token") or "")
-        if str(pool.get("status") or "") != "active" or not address:
+        monitor_only = bool(pool.get("monitor_liquidity"))
+        if (str(pool.get("status") or "") != "active" and not monitor_only) or not address:
             continue
-        key = (f"{address}:WOODYONE-826f23"
-               if lp_id == "WOODYONE-826f23" else address)
+        # OneDex stores many pairs in one smart contract; deduplicate pair IDs,
+        # not the shared contract address.
+        key = f"{address}:{lp_id}" if str(pool.get("dex") or "") == "OneDex" else address
         snap = get_configured_pool_snapshot(pool)
         if key in seen:
             continue
@@ -1700,6 +1736,8 @@ def _fetch_public_pool_reserves() -> List[Dict[str, Any]]:
             "woodyReserve": woody_amount,
             "quoteReserve": quote_amount,
             "quoteSymbol": quote_symbol,
+            "reserveSource": str(snap.get("reserve_source") or "MultiversX on-chain account balances"),
+            "monitorOnly": bool(pool.get("monitor_liquidity")),
             "valuation": "not_verified",
         })
     return pools
@@ -2337,6 +2375,36 @@ def get_configured_pool_snapshot(
     label = _pool_label(pool)
     pool_address = str(pool.get("pair_address") or "").strip()
     lp_token = str(pool.get("lp_token") or "").strip()
+
+    if lp_token == "WOODYBOBER-1a1703":
+        if not pool_address:
+            return {"label": label, "ok": False, "reason": "pair address missing"}
+        if not allow_indexer_fallback:
+            return {
+                "label": label, "ok": False,
+                "reason": "OneDex WOODY/BOBER pair ID is unverified; indexer data is not allowed for this calculation",
+            }
+        cache_key = f"{pool_address}:{lp_token}"
+        now = time.time()
+        cached = POOL_SNAPSHOT_CACHE.get(cache_key)
+        if cached and now - cached[1] < POOL_SNAPSHOT_TTL_SECONDS:
+            return cached[0]
+        snap = dict(get_onedex_woody_bober_public_quote())
+        snap["label"] = label
+        if snap.get("ok"):
+            woody_price = safe_float((get_best_price() or {}).get("price_usd"))
+            woody_amount = safe_float(snap.get("woody_amount"))
+            snap["pool_value_usd"] = (
+                2 * woody_amount * woody_price
+                if woody_amount > 0 and woody_price > 0 else 0.0
+            )
+            snap["value_reason"] = (
+                "" if snap["pool_value_usd"] > 0
+                else "WOODY USD reference price unavailable"
+            )
+        POOL_SNAPSHOT_CACHE[cache_key] = (snap, now)
+        return snap
+
     if lp_token != "WOODYONE-826f23":
         if not pool_address:
             return {"label": label, "ok": False, "reason": "pair address missing"}
@@ -2369,7 +2437,6 @@ def get_configured_pool_snapshot(
         )
     POOL_SNAPSHOT_CACHE[cache_key] = (snap, now)
     return snap
-
 
 def get_active_lp_pool_snapshots() -> List[Dict[str, Any]]:
     """Read every active configured LP pair, not just unique smart contracts."""
