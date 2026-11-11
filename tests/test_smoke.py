@@ -456,7 +456,7 @@ def test_lp_holder_values_use_lp_token_decimals_and_raw_share(monkeypatch) -> No
     assert abs(holder["estimated_egld"] - 0.541) < 1e-12
 
 
-def test_monthly_average_uses_all_available_snapshots(monkeypatch) -> None:
+def test_monthly_rewards_use_only_the_final_snapshot(monkeypatch) -> None:
     snapshots = [_verified_usd_checkpoint(date, alice, bob) for date, alice, bob in
                  [("2026-06-01", 100, 300), ("2026-06-15", 200, 200),
                   ("2026-06-30", 300, 100)]]
@@ -464,9 +464,10 @@ def test_monthly_average_uses_all_available_snapshots(monkeypatch) -> None:
     result = main.calculate_monthly_lp_rewards(8, "2026-06")
     rewards = {row["wallet"]: row["reward_egld"] for row in result["rows"]}
     assert len(result["snapshots"]) == 3
-    assert result["total_average_usd"] == 400.0
-    assert rewards["erd1alice"] == 4.0
-    assert rewards["erd1bob"] == 4.0
+    assert result["reward_snapshot_date"] == "2026-06-30"
+    assert result["total_month_end_usd"] == 400.0
+    assert rewards["erd1alice"] == 6.0
+    assert rewards["erd1bob"] == 2.0
 
 def test_snapshot_average_egld_is_recomputed_from_pool_value(monkeypatch) -> None:
     # Legacy EGLD snapshots must never be used to manufacture historical USD values.
@@ -519,14 +520,14 @@ def test_lp_export_csv_contains_manual_reward_distribution(monkeypatch) -> None:
     monkeypatch.setattr(main, "current_month_key", lambda now=None: "2026-06")
     monkeypatch.setattr(main, "calculate_monthly_lp_rewards",
                         lambda reward_pool_egld: {"valuation_complete": True, "rows": [
-                            {"wallet": "erd1alice", "average_usd": 200,
+                            {"wallet": "erd1alice", "month_end_usd": 200,
                              "share_pct": 40, "reward_egld": 2},
-                            {"wallet": "erd1bob", "average_usd": 300,
+                            {"wallet": "erd1bob", "month_end_usd": 300,
                              "share_pct": 60, "reward_egld": 3}]})
     content, filename = main.build_lp_export_csv(5)
     csv_text = content.decode("utf-8")
     assert filename == "woody_lp_rewards_2026-06.csv"
-    assert "wallet_address,average_usd,percent_of_total,reward_egld" in csv_text
+    assert "wallet_address,month_end_value_usd,percent_of_total,reward_egld" in csv_text
     assert "erd1alice,200.00000000,40.00000000,2.000000000000000000" in csv_text
     assert "erd1bob,300.00000000,60.00000000,3.000000000000000000" in csv_text
 
