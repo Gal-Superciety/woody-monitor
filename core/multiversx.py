@@ -3249,14 +3249,22 @@ def get_month_lp_usd_snapshots(month_key: Optional[str] = None) -> List[Dict[str
 
 
 def required_month_lp_snapshot_dates(month_key: str) -> List[str]:
-    """Three calendar checkpoints; rewards require all three."""
+    """Return scheduled monthly checkpoints on or after the campaign start date."""
     try:
         year, month = (int(x) for x in month_key.split("-"))
-        last_day = calendar.monthrange(year, month)[1]
         if not 1 <= month <= 12:
             return []
-        return [f"{year:04d}-{month:02d}-{day:02d}" for day in (1, 15, last_day)]
+        start_raw = os.getenv("LP_REWARD_CAMPAIGN_START_DATE", "2026-11-15").strip()
+        campaign_start = datetime.strptime(start_raw, "%Y-%m-%d").date()
+        last_day = calendar.monthrange(year, month)[1]
+        checkpoints = sorted({1, 15, last_day})
+        return [
+            f"{year:04d}-{month:02d}-{day:02d}"
+            for day in checkpoints
+            if datetime(year, month, day).date() >= campaign_start
+        ]
     except (ValueError, TypeError):
+        logger.error("Invalid LP_REWARD_CAMPAIGN_START_DATE; expected YYYY-MM-DD")
         return []
 
 
@@ -3266,10 +3274,13 @@ def calculate_monthly_lp_snapshot_values(month_key: Optional[str] = None) -> Dic
     eligible = [s for s in snapshots if is_valid_global_usd_snapshot(s)]
     required = required_month_lp_snapshot_dates(month_key or current_month_key())
     found_dates = [str(s.get("date") or "") for s in eligible]
-    # Keep all three scheduled checkpoints as a completeness check. Only the
-    # final checkpoint's wallet values determine the reward shares.
-    checkpoints_complete = (len(required) == 3 and sorted(found_dates) == sorted(required)
-                            and len(snapshots) == 3)
+    # Every checkpoint from the campaign start must exist exactly once. Only
+    # the final checkpoint's wallet values determine the reward shares.
+    checkpoints_complete = (
+        bool(required)
+        and len(snapshots) == len(required)
+        and all(found_dates.count(date) == 1 for date in required)
+    )
     final_date = required[-1] if required else ""
     final_snapshot = next((s for s in eligible if str(s.get("date") or "") == final_date), None)
 
@@ -3413,6 +3424,43 @@ def build_live_lp_ownership() -> Dict[str, Any]:
             "pools": pools}
 
 
+def get_monthly_lp_leaderboard_text(month_key: Optional[str] = None) -> str:
+    """Show the saved month-end USD leaderboard when that campaign is complete."""
+    key = month_key or current_month_key()
+    data = calculate_monthly_lp_snapshot_values(key)
+    if not data.get("valuation_complete"):
+        missing = data.get("missing_dates", [])
+        missing_text = ", ".join(missing) if missing else "valid monthly checkpoints"
+        return (
+            f"🏆 *WOODY LP Leaderboard — {key}*\n\n"
+            f"Monthly standings are not final yet. Missing or invalid snapshot: *{missing_text}*.\n"
+            "Use /lp_leaderboard to see live estimated standings."
+        )
+    lines = [
+        f"🏆 *WOODY LP Leaderboard — {key}*",
+        f"_Final snapshot: {data.get('reward_snapshot_date')} · estimated USD value._",
+        f"Total eligible liquidity: *{fmt_usd(data.get('total_month_end_usd'))}*",
+        "",
+    ]
+    for rank, row in enumerate(data.get("rows", [])[:50], start=1):
+        lines.append(
+            f"{rank}. `{short_wallet(str(row.get('wallet')))}` — "
+            f"*{fmt_usd(row.get('month_end_usd'))}* · {fmt_pct(row.get('share_pct'))}"
+        )
+    if not data.get("rows"):
+        lines.append("No eligible LP wallets in the final snapshot.")
+    lines.extend(["", "_Values are estimates from the saved pool reserves. No rewards are sent automatically._"])
+    return "\n".join(lines)
+
+
+def get_lp_leaderboard_display_text(month_key: Optional[str] = None) -> str:
+    """Show finalized snapshot standings when available; otherwise show live estimates."""
+    data = calculate_monthly_lp_snapshot_values(month_key or current_month_key())
+    if data.get("valuation_complete") or month_key:
+        return get_monthly_lp_leaderboard_text(month_key)
+    return get_lp_leaderboard_text()
+
+
 def get_lp_leaderboard_text() -> str:
     """Compact live LP leaderboard with explicit valuation coverage."""
     ownership = build_live_lp_ownership()
@@ -3538,9 +3586,14 @@ def format_lp_snapshot_confirmation(snapshot: Dict[str, Any]) -> str:
 
 def get_lp_snapshots_text() -> str:
     snapshots = get_month_lp_usd_snapshots()
+    month_key = current_month_key()
+    required = required_month_lp_snapshot_dates(month_key)
+    checkpoint_days = ", ".join(str(int(date[-2:])) for date in required) or "none"
+    campaign_start = os.getenv("LP_REWARD_CAMPAIGN_START_DATE", "2026-11-15").strip()
     lines = ["📸 *WOODY Global LP USD Snapshots*",
-             f"Month: *{current_month_key()}*",
-             "Schedule: day 1, 15 and last day of month", ""]
+             f"Month: *{month_key}*",
+             f"Reward checkpoints: days *{checkpoint_days}*",
+             f"Campaign start: *{campaign_start}*", ""]
     if not snapshots:
         return "\n".join(lines + ["No eligible global USD snapshots saved yet."])
     for snap in snapshots:
@@ -5237,7 +5290,8 @@ async def lp_holders_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def lp_leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await reply_markdown_chunks(update, await asyncio.to_thread(get_lp_leaderboard_text))
+    month_key = str(context.args[0]) if context.args else None
+    await reply_markdown_chunks(update, await asyncio.to_thread(get_lp_leaderboard_display_text, month_key))
 
 
 async def lp_snapshots_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5427,7 +5481,7 @@ async def menu_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif query.data == "lp_holders":
         await reply_markdown_chunks_to_message(query.message, await asyncio.to_thread(get_lp_holders_text))
     elif query.data == "lp_leaderboard":
-        await reply_markdown_chunks_to_message(query.message, await asyncio.to_thread(get_lp_leaderboard_text))
+        await reply_markdown_chunks_to_message(query.message, await asyncio.to_thread(get_lp_leaderboard_display_text))
     elif query.data == "lp_snapshots":
         await reply_markdown_chunks_to_message(query.message, await asyncio.to_thread(get_lp_snapshots_text))
     elif query.data == "lp_rewards":
