@@ -215,7 +215,7 @@ erd1qqqqqqqqqqqqqpgqvmgnk26tfvz6sj5yasw7p6yfvqpv628d2jpsnvmeaz
 
 ### Comenzi Telegram
 - `/lp_holders` — afișează holderii LP, cantitatea de LP deținută și valoarea estimată în EGLD.
-- `/lp_leaderboard` — afișează clasamentul live al furnizorilor LP eligibili.
+- `/lp_leaderboard` — afișează clasamentul live până la finalizarea campaniei, apoi clasamentul salvat la finalul lunii; poți cere și o lună anume, de exemplu `/lp_leaderboard 2026-11`.
 - `/lp_snapshots` — listează snapshot-urile salvate pentru luna curentă și programul automat de snapshot.
 - `/lp_rewards X` — calculează distribuția pentru un fond lunar de `X` EGLD folosind doar valoarea USD/USDT-echivalentă din snapshot-ul final al lunii. Snapshot-urile din 1 și 15 sunt păstrate pentru monitorizare. Nu trimite EGLD automat. Exemplu: `/lp_rewards 5`.
 - `/lp_export` — generează CSV cu valoarea de la finalul lunii pentru fiecare wallet, procentul din total și recompensa calculată în EGLD.
@@ -226,7 +226,7 @@ Botul salvează snapshot-uri automat în `data/lp_usd_snapshots.json` pe:
 - data de 15 a lunii;
 - ultima zi a lunii.
 
-Fiecare snapshot include data, wallet address și valoarea estimată în USD, folosită ca echivalent USDT. Toate cele trei snapshot-uri trebuie să existe, dar numai snapshot-ul din ultima zi a lunii stabilește proporția rewards.
+Campania inițială începe la 15 noiembrie 2026, deci pentru noiembrie sunt necesare snapshot-urile din 15 și ultima zi; lunile următoare folosesc toate checkpoint-urile programate. Fiecare snapshot include wallet-urile și valoarea estimată în USD. Pentru recompense, numai snapshot-ul final al lunii stabilește proporțiile, iar botul pregătește un raport/CSV fără să trimită automat tokeni sau EGLD. Startul se poate schimba cu `LP_REWARD_CAMPAIGN_START_DATE`.
 
 ### Configurare opțională
 ```env
