@@ -126,7 +126,8 @@ VOLUME_HISTORY_FILE = os.getenv("VOLUME_HISTORY_FILE", "data/volume_history.json
 ROOT_CACHE_FILE = os.getenv("ROOT_CACHE_FILE", "data/root_cache.json").strip()
 PUBLIC_STATUS_FILE = os.getenv("PUBLIC_STATUS_FILE", "public/woody-monitor-status.json").strip()
 WOODY_APP_URL = os.getenv("WOODY_APP_URL", "https://woody-website.vercel.app/app").strip()
-PUBLIC_STATUS_INTERVAL = int(os.getenv("PUBLIC_STATUS_INTERVAL", "30"))
+# The dashboard refresh runs several external API reads; a 5-minute default avoids overlapping refreshes.
+PUBLIC_STATUS_INTERVAL = int(os.getenv("PUBLIC_STATUS_INTERVAL", "300"))
 PUBLIC_STATUS_HOST = os.getenv("PUBLIC_STATUS_HOST", "0.0.0.0").strip()
 PUBLIC_STATUS_PORT = int(
     os.getenv("PUBLIC_STATUS_PORT")
