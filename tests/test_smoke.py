@@ -420,6 +420,8 @@ def test_lp_snapshot_days_include_1_15_and_last_day() -> None:
 
 
 def test_lp_rewards_are_proportional_to_monthly_average(monkeypatch) -> None:
+    # Historical test fixture, not the real 2026-11-15 campaign start.
+    monkeypatch.setenv("LP_REWARD_CAMPAIGN_START_DATE", "2026-01-01")
     snapshots = [_verified_usd_checkpoint(date, alice, bob) for date, alice, bob in
                  [("2026-06-01", 100, 300), ("2026-06-15", 300, 300),
                   ("2026-06-30", 200, 300)]]
@@ -457,6 +459,8 @@ def test_lp_holder_values_use_lp_token_decimals_and_raw_share(monkeypatch) -> No
 
 
 def test_monthly_rewards_use_only_the_final_snapshot(monkeypatch) -> None:
+    # Historical test fixture, not the real 2026-11-15 campaign start.
+    monkeypatch.setenv("LP_REWARD_CAMPAIGN_START_DATE", "2026-01-01")
     snapshots = [_verified_usd_checkpoint(date, alice, bob) for date, alice, bob in
                  [("2026-06-01", 100, 300), ("2026-06-15", 200, 200),
                   ("2026-06-30", 300, 100)]]
@@ -507,12 +511,14 @@ def test_lp_rewards_submenu_contains_lp_tools() -> None:
 
 
 def test_lp_snapshots_text_lists_current_month_snapshots(monkeypatch) -> None:
+    # Historical test fixture, not the real 2026-11-15 campaign start.
+    monkeypatch.setenv("LP_REWARD_CAMPAIGN_START_DATE", "2026-01-01")
     monkeypatch.setattr(main, "current_month_key", lambda now=None: "2026-06")
     monkeypatch.setattr(main, "get_month_lp_usd_snapshots",
                         lambda month_key=None: [_verified_usd_checkpoint("2026-06-01", 100, 300)])
     text = main.get_lp_snapshots_text()
     assert "WOODY Global LP USD Snapshots" in text
-    assert "day 1, 15 and last day" in text
+    assert "Reward checkpoints: days *1, 15, 30*" in text
     assert "2026-06-01" in text
     assert "$400.00" in text
 
