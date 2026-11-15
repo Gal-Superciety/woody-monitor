@@ -442,6 +442,7 @@ def alert_text(rows: list[dict[str, Any]], *, manual: bool = False) -> str:
 
 
 def status_text() -> str:
+    from core.liquidation_access import scheduled_risk_reports_enabled
     return (
         "🔐 XOXNO Lending Watch — MultiversX\n"
         f"Enabled: {'YES' if enabled() else 'NO'}\n"
@@ -455,7 +456,7 @@ def status_text() -> str:
         "Negative, unknown and below threshold: no Telegram alerts\n"
         "Alerts: up to 2 positions per 4min; one-time per positive NFT\n"
         "Manual /xoxno_scan /xoxno_report still include losses\n"
-        "Automatic private scan report: 21:05 Berlin daily\n"
+        f"Scheduled risk report: {'21:05 Berlin' if scheduled_risk_reports_enabled() else 'OFF (manual only)'}\n"
         "Profit: /xoxno_profit (indicative, execution NOT verified)\n"
         f"Scans this session: {_STATS['scans']}\n"
         f"API candidates: {_STATS['api_candidates']}\n"
@@ -669,12 +670,16 @@ def register(app: Application) -> None:
             scan_job, interval=interval(), first=65,
             name="xoxno_lending_liquidation_private",
         )
-        # Daily owner-only summary is sent even when profit screening suppresses alerts.
-        app.job_queue.run_daily(
-            report_job,
-            time=clock_time(hour=21, minute=5, tzinfo=ZoneInfo("Europe/Berlin")),
-            name="xoxno_private_daily_scan_report",
-        )
+        # Losses, unknown outcomes and empty scans must not push unsolicited reports.
+        from core.liquidation_access import scheduled_risk_reports_enabled
+        if scheduled_risk_reports_enabled():
+            app.job_queue.run_daily(
+                report_job,
+                time=clock_time(hour=21, minute=5, tzinfo=ZoneInfo("Europe/Berlin")),
+                name="xoxno_private_daily_scan_report",
+            )
+        else:
+            logger.info("XOXNO_SCHEDULED_RISK_REPORTS_DISABLED | manual reports still available")
         logger.info(
             "XOXNO Lending watcher scheduled | every=%ss | positive-only modeled alerts + manual reports",
             interval(),

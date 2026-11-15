@@ -362,6 +362,7 @@ def status_text() -> str:
     admin_ok = _admin_id() is not None
     status = "SCAN + TWO-STAGE PRIVATE ALERTS" if enabled and configured and admin_ok else "PAUSED"
     from core.hatom_digest import digest_hours, state_snapshot
+    from core.liquidation_access import scheduled_risk_reports_enabled
     report_state = state_snapshot()
     from core.hatom_stages import status as stage_status
     stage = stage_status()
@@ -375,7 +376,8 @@ def status_text() -> str:
         f"Unpriced risk signals on last scan: {_STATE['last_candidates']}\n"
         "Profit scenario: REFERENCE USD PRICES + ASSUMED COSTS\n"
         "Verified executable profit: NOT AVAILABLE (no transaction simulation)\n"
-        "Risk reporting: scheduled private digest + /hatom_report\n"
+        "Risk reports: available manually via /hatom_report\n"
+        f"Scheduled risk reports: {'ON' if scheduled_risk_reports_enabled() else 'OFF'}\n"
         "Stage 2: only profitable modeled liquidation alerts\n"
         f"Minimum indicative net: +USD {os.getenv('HATOM_ALERT_MIN_NET_USD', '0.10')} AFTER assumed gas and buffer\n"
         "Require fresh live DEX min-out and on-chain eligibility\n"
@@ -383,7 +385,7 @@ def status_text() -> str:
         "Positive-alert dedupe: each borrower once (persistent)\n"
         "Manual /hatom_profit and /hatom_report show losses too\n"
         f"Pending stage 2 candidates: {stage['pending_eligible']}\n"
-        f"Private risk digest: {','.join(f'{hour:02d}:00' for hour in digest_hours())} Berlin\n"
+        f"Optional risk digest times: {','.join(f'{hour:02d}:00' for hour in digest_hours())} Berlin\n"
         f"Risk wallets observed (last 12h): {len(report_state['candidates'])}\n"
         f"Completed scans this session: {report_state['scans']}\n"
         f"Wallets checked this session: {report_state['checks']}\n"
@@ -618,15 +620,19 @@ def register(app: Application) -> None:
             app.job_queue.run_repeating(
                 eligibility_notifier, interval=180, first=45, name="hatom_stage2_private_batch"
             )
-            # Low-frequency risk summaries are independent of modeled profit.
-            from core.hatom_digest import digest_hours
-            for hour in digest_hours():
-                app.job_queue.run_daily(
-                    digest,
-                    time=clock_time(hour=hour, minute=0, tzinfo=ZoneInfo("Europe/Berlin")),
-                    name=f"hatom_private_digest_{hour:02d}",
-                )
-            logger.info("HATOM_PRIVATE_DIGEST_SCHEDULED | hours_berlin=%s", digest_hours())
+            # Silent by default: risk-only/negative/empty reports are on-demand.
+            from core.liquidation_access import scheduled_risk_reports_enabled
+            if scheduled_risk_reports_enabled():
+                from core.hatom_digest import digest_hours
+                for hour in digest_hours():
+                    app.job_queue.run_daily(
+                        digest,
+                        time=clock_time(hour=hour, minute=0, tzinfo=ZoneInfo("Europe/Berlin")),
+                        name=f"hatom_private_digest_{hour:02d}",
+                    )
+                logger.info("HATOM_PRIVATE_DIGEST_SCHEDULED | hours_berlin=%s", digest_hours())
+            else:
+                logger.info("HATOM_SCHEDULED_RISK_REPORTS_DISABLED | manual reports still available")
         logger.info(
             "Hatom private observer scheduled | scan=%ss | positive-only alerts=180s | min modeled surplus=USD %s",
             _interval(), os.getenv("HATOM_ALERT_MIN_NET_USD", "0.10"),

@@ -406,7 +406,8 @@ class XoxnoTests(unittest.TestCase):
             add_handler=Mock(),
             job_queue=SimpleNamespace(run_repeating=Mock(), run_daily=Mock()),
         )
-        x.register(app)
+        with patch.dict(os.environ, {"ENABLE_SCHEDULED_RISK_REPORTS": "true"}):
+            x.register(app)
         self.assertEqual(app.add_handler.call_count, 4)
         self.assertEqual(app.job_queue.run_repeating.call_count, 1)
         self.assertEqual(app.job_queue.run_daily.call_count, 1)
