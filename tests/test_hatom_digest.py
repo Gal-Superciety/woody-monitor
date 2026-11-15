@@ -187,7 +187,8 @@ class DigestTests(unittest.TestCase):
             run_daily=MagicMock(), run_repeating=MagicMock()
         ))
         env = {"ENABLE_HATOM_WATCH": "true", "HATOM_WATCH_SOURCE": "onchain",
-               "ADMIN_TELEGRAM_ID": "42", "HATOM_WATCH_INTERVAL_SECONDS": "90"}
+               "ADMIN_TELEGRAM_ID": "42", "HATOM_WATCH_INTERVAL_SECONDS": "90",
+               "ENABLE_SCHEDULED_RISK_REPORTS": "true"}
         with patch.dict(os.environ, env):
             watch.register(app)
         self.assertEqual(app.job_queue.run_repeating.call_count, 2)
