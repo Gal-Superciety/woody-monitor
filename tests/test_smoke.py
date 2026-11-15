@@ -518,7 +518,7 @@ def test_lp_snapshots_text_lists_current_month_snapshots(monkeypatch) -> None:
                         lambda month_key=None: [_verified_usd_checkpoint("2026-06-01", 100, 300)])
     text = main.get_lp_snapshots_text()
     assert "WOODY Global LP USD Snapshots" in text
-    assert "day 1, 15 and last day" in text
+    assert "Reward checkpoints: days *1, 15, 30*" in text
     assert "2026-06-01" in text
     assert "$400.00" in text
 
