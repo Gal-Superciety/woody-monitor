@@ -2987,9 +2987,20 @@ def save_global_usd_snapshot(force: bool = False,
     dt = dt.astimezone(timezone.utc)
     if dt.date() != now.date():
         return {"ok": False, "reason": "historical or future snapshots cannot use live balances"}
-    date_key = dt.strftime("%Y-%m-%d")
-    if not force and not is_lp_snapshot_day(dt):
+    # All campaign checkpoints are based on Europe/Berlin calendar dates.
+    # Otherwise a UTC timestamp after German midnight can be written into
+    # the wrong month (or a 23:xx UTC run can use the previous checkpoint).
+    berlin_dt = dt.astimezone(ZoneInfo("Europe/Berlin"))
+    date_key = berlin_dt.strftime("%Y-%m-%d")
+    if not force and not is_lp_snapshot_day(berlin_dt):
         return {"ok": False, "reason": "not a scheduled snapshot day"}
+    if not is_lp_snapshot_day(berlin_dt):
+        return {"ok": False, "reason": "manual off-schedule valuations cannot be monthly reward checkpoints"}
+    last_day = calendar.monthrange(berlin_dt.year, berlin_dt.month)[1]
+    if berlin_dt.day == last_day and berlin_dt.hour < 23:
+        # A 01:00 month-end capture would be almost a full day stale by payout.
+        # This rule also applies to force=True; never finalize early.
+        return {"ok": False, "reason": "month-end snapshot scheduled at 23:00-23:59 Europe/Berlin"}
     path = "data/lp_usd_snapshots.json"
     store = read_json_file(path, {"snapshots": []})
     if not isinstance(store, dict) or not isinstance(store.get("snapshots"), list):
@@ -3001,7 +3012,7 @@ def save_global_usd_snapshot(force: bool = False,
         return {"ok": False, "reason": "some pool prices, LP holders or USD totals are unverified",
                 "pools": data.get("pools", [])}
     data["date"] = date_key
-    data["scheduled_checkpoint"] = is_lp_snapshot_day(dt)
+    data["scheduled_checkpoint"] = is_lp_snapshot_day(berlin_dt)
     if not data["scheduled_checkpoint"]:
         return {"ok": False, "reason": "manual off-schedule valuations cannot be stored as monthly reward checkpoints"}
     store["snapshots"].append(data)
@@ -3593,7 +3604,8 @@ def get_lp_snapshots_text() -> str:
     lines = ["📸 *WOODY Global LP USD Snapshots*",
              f"Month: *{month_key}*",
              f"Reward checkpoints: days *{checkpoint_days}*",
-             f"Campaign start: *{campaign_start}*", ""]
+             f"Campaign start: *{campaign_start}*",
+             "Month-end value recorded after *23:00 Europe/Berlin*.", ""]
     if not snapshots:
         return "\n".join(lines + ["No eligible global USD snapshots saved yet."])
     for snap in snapshots:
@@ -5743,6 +5755,13 @@ def main() -> None:
     app.job_queue.run_repeating(process_pending_roots, interval=3, first=5)
     app.job_queue.run_repeating(dashboard_status_job, interval=PUBLIC_STATUS_INTERVAL, first=10)
     app.job_queue.run_repeating(lp_snapshot_job, interval=LP_SNAPSHOT_CHECK_INTERVAL, first=30)
+    # Extra month-end retry; normal hourly job also checks after 23:00 Berlin.
+    # Already-saved checkpoints are skipped, so a second run cannot overwrite.
+    app.job_queue.run_daily(
+        lp_snapshot_job,
+        time=datetime_time(hour=23, minute=45, tzinfo=ZoneInfo("Europe/Berlin")),
+        name="lp_month_end_snapshot_last_chance",
+    )
     if ENABLE_X_OFFICIAL_ALERTS:
         app.job_queue.run_repeating(x_official_posts_job, interval=X_POST_CHECK_INTERVAL, first=15)
 
