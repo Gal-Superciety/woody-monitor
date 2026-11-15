@@ -41,6 +41,13 @@ def owner_id() -> int | None:
     return int(raw) if _USER_ID.fullmatch(raw) else None
 
 
+def scheduled_risk_reports_enabled() -> bool:
+    """Opt-in only: risk-only, losing and empty reports stay available manually."""
+    return os.getenv("ENABLE_SCHEDULED_RISK_REPORTS", "false").strip().lower() in {
+        "true", "1", "yes", "on"
+    }
+
+
 def state_file() -> Path:
     return Path(os.getenv("DATA_DIR", "data")) / "liquidation_subscribers.json"
 
@@ -263,8 +270,8 @@ async def join_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     await update.message.reply_text(
         "✅ Hatom + XOXNO Liquidation Watch activated for your private chat.\n"
-        "You will receive NEW confirmed liquidation alerts, even when profit "
-        "is negative or unknown. Old alerts are not replayed.\n"
+        "You will receive ONLY new on-chain-confirmed, modeled-positive "
+        "liquidation alerts. Negative/unknown cases stay manual. Old alerts are not replayed.\n"
         "Try /hatom_report, /hatom_profit, /xoxno_scan or /xoxno_profit. "
         "Calculations are indicative; there is no automated execution."
     )
