@@ -226,7 +226,7 @@ Botul salvează snapshot-uri automat în `data/lp_usd_snapshots.json` pe:
 - data de 15 a lunii;
 - ultima zi a lunii.
 
-Campania inițială începe la 15 noiembrie 2026, deci pentru noiembrie sunt necesare snapshot-urile din 15 și ultima zi; lunile următoare folosesc toate checkpoint-urile programate. Fiecare snapshot include wallet-urile și valoarea estimată în USD. Pentru recompense, numai snapshot-ul final al lunii stabilește proporțiile, iar botul pregătește un raport/CSV fără să trimită automat tokeni sau EGLD. Startul se poate schimba cu `LP_REWARD_CAMPAIGN_START_DATE`.
+Campania inițială începe la 15 noiembrie 2026, deci pentru noiembrie sunt necesare snapshot-urile din 15 și ultima zi; lunile următoare folosesc toate checkpoint-urile programate. **Snapshot-ul final al lunii se face după ora 23:00 Europe/Berlin (cu o încercare suplimentară la 23:45), nu în prima oră a ultimei zile.** Datele calendaristice sunt evaluate în fusul orar Germania, inclusiv la schimbarea orei. Fiecare snapshot include wallet-urile și valoarea estimată în USD. Pentru recompense, numai snapshot-ul final al lunii stabilește proporțiile, iar botul pregătește un raport/CSV fără să trimită automat tokeni sau EGLD. Startul se poate schimba cu `LP_REWARD_CAMPAIGN_START_DATE`.
 
 ### Configurare opțională
 ```env
