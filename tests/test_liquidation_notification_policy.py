@@ -24,11 +24,13 @@ class LiquidationNotificationPolicyTests(unittest.TestCase):
 
     def test_hatom_keeps_scan_and_positive_notifier_without_risk_digest(self):
         app = fake_app()
-        with patch.dict(os.environ, {"ENABLE_SCHEDULED_RISK_REPORTS": "false"}), \
-             patch.object(hatom, "_enabled", return_value=True), \
-             patch.object(hatom, "_ready", return_value=True), \
-             patch.object(hatom, "_source", return_value="onchain"), \
-             patch.object(hatom, "_admin_id", return_value=42):
+        with (
+            patch.dict(os.environ, {"ENABLE_SCHEDULED_RISK_REPORTS": "false"}),
+            patch.object(hatom, "_enabled", return_value=True),
+            patch.object(hatom, "_ready", return_value=True),
+            patch.object(hatom, "_source", return_value="onchain"),
+            patch.object(hatom, "_admin_id", return_value=42),
+        ):
             hatom.register(app)
         self.assertEqual(app.job_queue.run_repeating.call_count, 2)
         app.job_queue.run_daily.assert_not_called()
@@ -47,13 +49,16 @@ class LiquidationNotificationPolicyTests(unittest.TestCase):
         self.assertEqual(app.add_handler.call_count, 4)
 
     def test_opt_in_preserves_existing_scheduled_reports(self):
-        with patch.dict(os.environ, {
-            "ENABLE_SCHEDULED_RISK_REPORTS": "true",
-            "HATOM_DIGEST_HOURS_BERLIN": "9,15,21",
-        }), patch.object(hatom, "_enabled", return_value=True), \
-            patch.object(hatom, "_ready", return_value=True), \
-            patch.object(hatom, "_source", return_value="onchain"), \
-            patch.object(hatom, "_admin_id", return_value=42):
+        with (
+            patch.dict(os.environ, {
+                "ENABLE_SCHEDULED_RISK_REPORTS": "true",
+                "HATOM_DIGEST_HOURS_BERLIN": "9,15,21",
+            }),
+            patch.object(hatom, "_enabled", return_value=True),
+            patch.object(hatom, "_ready", return_value=True),
+            patch.object(hatom, "_source", return_value="onchain"),
+            patch.object(hatom, "_admin_id", return_value=42),
+        ):
             app = fake_app()
             hatom.register(app)
         self.assertEqual(app.job_queue.run_daily.call_count, 3)
