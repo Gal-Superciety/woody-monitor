@@ -2,6 +2,13 @@
 import sys
 from pathlib import Path
 from unittest.mock import patch
+import pytest
+
+@pytest.fixture(autouse=True)
+def historical_campaign_window(monkeypatch):
+    """Synthetic 2026 samples predate the actual Nov 15 campaign start."""
+    monkeypatch.setenv("LP_REWARD_CAMPAIGN_START_DATE", "2026-01-01")
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core import multiversx as m
 
